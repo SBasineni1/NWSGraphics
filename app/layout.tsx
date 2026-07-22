@@ -11,7 +11,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
-  const image = `${protocol}://${host}/og.png`;
+  const image = `${protocol}://${host}/og-v2.png`;
   return {
     title: "PHI Forecast Graphics | Maximum Apparent Temperature",
     description: "Continuously updated apparent-temperature forecast graphics for the NWS Philadelphia / Mount Holly forecast area.",

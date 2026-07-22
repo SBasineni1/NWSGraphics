@@ -33,5 +33,6 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(route, /apparentTemperature/);
   assert.match(route, /Cache-Control/);
   assert.match(component, /15 \* 60 \* 1000/);
-  assert.match(component, /DAY \{index \+ 1\}/);
+  assert.match(component, /const day = 0/);
+  assert.match(component, /APPARENT TEMPERATURE · DAY 1/);
 });
