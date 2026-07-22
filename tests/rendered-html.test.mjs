@@ -19,7 +19,7 @@ test("server-renders the PHI apparent-temperature product", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /PHI Forecast Graphics/);
-  assert.match(html, /Maximum Apparent Temperature/);
+  assert.match(html, /Day 1 Forecast Graphics/);
   assert.match(html, /Philadelphia \/ Mount Holly/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
@@ -31,14 +31,23 @@ test("uses official NWS apparent-temperature grid data", async () => {
   ]);
   assert.match(route, /api\.weather\.gov\/gridpoints\/PHI/);
   assert.match(route, /apparentTemperature/);
+  assert.match(route, /temperature/);
+  assert.match(route, /windGust/);
+  assert.match(route, /probabilityOfPrecipitation/);
+  assert.match(route, /quantitativePrecipitation/);
   assert.match(route, /GRID_LOCATIONS/);
   assert.match(route, /label: false/);
   assert.match(route, /Cache-Control/);
   assert.match(component, /15 \* 60 \* 1000/);
   assert.match(component, /const DAY = 0/);
+  assert.match(component, /Maximum Temperature/);
+  assert.match(component, /Maximum Wind Gust/);
+  assert.match(component, /Maximum Probability of Precipitation/);
+  assert.match(component, /Total Precipitation Forecast/);
   assert.match(component, /Download PNG/);
+  assert.match(component, /const width = 1200/);
   assert.match(component, /destination-in/);
-  assert.match(component, /point\.label/);
+  assert.match(component, /item\.label/);
 });
 
 test("uses the official PHI County Warning Area boundary", async () => {
