@@ -33,6 +33,15 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(route, /apparentTemperature/);
   assert.match(route, /Cache-Control/);
   assert.match(component, /15 \* 60 \* 1000/);
-  assert.match(component, /const day = 0/);
-  assert.match(component, /APPARENT TEMPERATURE · DAY 1/);
+  assert.match(component, /const DAY = 0/);
+  assert.match(component, /Download PNG/);
+  assert.match(component, /destination-in/);
+});
+
+test("uses the official PHI County Warning Area boundary", async () => {
+  const source = await readFile(new URL("../public/phi-cwa.geojson", import.meta.url), "utf8");
+  const boundary = JSON.parse(source);
+  assert.equal(boundary.type, "FeatureCollection");
+  assert.equal(boundary.features[0].geometry.type, "MultiPolygon");
+  assert.equal(boundary.features[0].properties.wfo, "PHI");
 });
