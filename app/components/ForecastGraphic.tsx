@@ -8,6 +8,7 @@ type ForecastPoint = {
   state: string;
   lat: number;
   lon: number;
+  label: boolean;
   values: Array<number | null>;
 };
 
@@ -104,8 +105,8 @@ function interpolate(points: ForecastPoint[], lon: number, lat: number) {
 
 function makeLinearHeatCanvas(boundary: Boundary, points: ForecastPoint[], bounds: Bounds) {
   const canvas = document.createElement("canvas");
-  canvas.width = 540;
-  canvas.height = 720;
+  canvas.width = 720;
+  canvas.height = 960;
   const context = canvas.getContext("2d")!;
   const image = context.createImageData(canvas.width, canvas.height);
   const zoom = 7;
@@ -247,6 +248,7 @@ export function ForecastGraphic() {
   }, []);
 
   const points = useMemo(() => forecast?.points.filter((point) => point.values[DAY] !== null) ?? [], [forecast]);
+  const labelPoints = useMemo(() => points.filter((point) => point.label), [points]);
 
   useEffect(() => {
     const map = mapInstance.current;
@@ -267,7 +269,7 @@ export function ForecastGraphic() {
       const overlay = L.imageOverlay(heat.toDataURL("image/png"), [[bounds.south, bounds.west], [bounds.north, bounds.east]], { opacity: 0.82, interactive: false }).addTo(map);
       const outline = L.geoJSON(boundary as never, { interactive: false, style: { color: "#172b4d", weight: 3, opacity: 1, fillOpacity: 0 } }).addTo(map);
       dataLayers.current.push(overlay, outline);
-      points.forEach((point) => {
+      labelPoints.forEach((point) => {
         const value = point.values[DAY] as number;
         const marker = L.marker([point.lat, point.lon], {
           interactive: false,
@@ -277,7 +279,7 @@ export function ForecastGraphic() {
       });
       map.fitBounds([[bounds.south, bounds.west], [bounds.north, bounds.east]], { padding: [28, 28] });
     });
-  }, [boundary, points, mapReady]);
+  }, [boundary, points, labelPoints, mapReady]);
 
   const downloadPng = useCallback(async () => {
     if (!forecast || !boundary || !points.length) return;
@@ -328,8 +330,8 @@ export function ForecastGraphic() {
       context.setLineDash([]);
 
       const raster = document.createElement("canvas");
-      raster.width = 900;
-      raster.height = 650;
+      raster.width = 1080;
+      raster.height = 720;
       const rasterContext = raster.getContext("2d")!;
       const image = rasterContext.createImageData(raster.width, raster.height);
       for (let y = 0; y < raster.height; y += 1) {
@@ -359,7 +361,7 @@ export function ForecastGraphic() {
       context.restore();
 
       context.textAlign = "center";
-      for (const point of points) {
+      for (const point of labelPoints) {
         const [x, y] = projectToPlot(point.lon, point.lat, extent, plot.x, plot.y, plot.width, plot.height);
         context.fillStyle = "#ffffff";
         context.strokeStyle = "#111827";
@@ -394,7 +396,7 @@ export function ForecastGraphic() {
       context.strokeRect(plot.x, plot.y, plot.width, plot.height);
       context.fillStyle = "#4b5563";
       context.font = "14px Arial, sans-serif";
-      context.fillText("Forecast: NOAA / National Weather Service · Boundary: NWS County Warning Area · Basemap: OpenStreetMap / CARTO", 58, 1142);
+      context.fillText(`Forecast: NOAA / National Weather Service · ${points.length} PHI grid samples · Boundary: NWS County Warning Area · Basemap: OpenStreetMap / CARTO`, 58, 1142);
       context.textAlign = "right";
       context.font = "700 14px Arial, sans-serif";
       context.fillText("PHI FORECAST GRAPHICS", 1742, 1142);
@@ -408,7 +410,7 @@ export function ForecastGraphic() {
     } finally {
       setExporting(false);
     }
-  }, [forecast, boundary, points]);
+  }, [forecast, boundary, points, labelPoints]);
 
   const activeDay = forecast?.days[DAY]?.label ?? "Day 1";
   return (
@@ -429,7 +431,7 @@ export function ForecastGraphic() {
           <div className="map-legend" aria-label="Apparent temperature legend"><strong>APPARENT TEMPERATURE (°F)</strong><div className="legend-ramp" /><div className="legend-values">{COLOR_STOPS.map((stop) => <span key={stop.value}>{stop.value}</span>)}</div></div>
           <div className="boundary-label">NWS PHI COUNTY WARNING AREA</div>
         </div>
-        <footer className="plot-footer"><span>Forecast: NOAA / National Weather Service · apparentTemperature</span><span>Boundary: official NWS County Warning Area · Basemap: OpenStreetMap / CARTO</span></footer>
+        <footer className="plot-footer"><span>Forecast: NOAA / National Weather Service · apparentTemperature · {points.length || "—"} PHI grid samples</span><span>Boundary: official NWS County Warning Area · Basemap: OpenStreetMap / CARTO</span></footer>
       </section>
     </main>
   );

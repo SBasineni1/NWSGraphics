@@ -31,11 +31,14 @@ test("uses official NWS apparent-temperature grid data", async () => {
   ]);
   assert.match(route, /api\.weather\.gov\/gridpoints\/PHI/);
   assert.match(route, /apparentTemperature/);
+  assert.match(route, /GRID_LOCATIONS/);
+  assert.match(route, /label: false/);
   assert.match(route, /Cache-Control/);
   assert.match(component, /15 \* 60 \* 1000/);
   assert.match(component, /const DAY = 0/);
   assert.match(component, /Download PNG/);
   assert.match(component, /destination-in/);
+  assert.match(component, /point\.label/);
 });
 
 test("uses the official PHI County Warning Area boundary", async () => {
