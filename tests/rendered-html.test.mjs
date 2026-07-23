@@ -34,9 +34,10 @@ test("server-renders the PHI apparent-temperature product", async () => {
 });
 
 test("uses official NWS apparent-temperature grid data", async () => {
-  const [route, component] = await Promise.all([
+  const [route, component, publishedRoute] = await Promise.all([
     readFile(new URL("../app/api/forecast/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/published-forecast/route.ts", import.meta.url), "utf8"),
   ]);
   assert.match(route, /api\.weather\.gov\/gridpoints\/\$\{location\.wfo\}/);
   assert.match(route, /apparentTemperature/);
@@ -54,7 +55,8 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /const FORECAST_DAYS = \[0, 1, 2\]/);
   assert.match(component, /const \[dayIndex, setDayIndex\] = useState\(0\)/);
   assert.match(component, /NEXT_PUBLIC_FORECAST_ASSET_BASE_URL/);
-  assert.match(component, /latest\.json\?ts=/);
+  assert.match(component, /\/api\/published-forecast/);
+  assert.match(publishedRoute, /latest\.json/);
   assert.match(component, /PublishedForecastPlot/);
   assert.match(component, /data-render-state=/);
   assert.match(component, /data-product-file=/);

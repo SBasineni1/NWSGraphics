@@ -548,7 +548,7 @@ export function ForecastGraphic() {
   const loadPublishedForecast = useCallback(async () => {
     if (!PUBLISHED_ASSET_BASE_URL) return false;
     try {
-      const response = await fetch(`${PUBLISHED_ASSET_BASE_URL}/latest.json?ts=${Date.now()}`, { cache: "no-store" });
+      const response = await fetch(`/api/published-forecast?ts=${Date.now()}`, { cache: "no-store" });
       if (!response.ok) return false;
       const manifest = await response.json() as PublishedForecastManifest;
       if (manifest.schemaVersion !== 1 || manifest.days.length < FORECAST_DAYS.length) return false;
