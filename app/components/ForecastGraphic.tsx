@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PLOT_FONT_FAMILY } from "../fonts";
 
 type ProductId = "apparentTemperature" | "temperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
 type ForecastPoint = {
@@ -36,42 +37,62 @@ type CountyBoundaries = {
     properties: Record<string, unknown>;
   }>;
 };
+type LineFeatures = {
+  type: "FeatureCollection";
+  features: Array<{
+    type: "Feature";
+    geometry: { type: "LineString"; coordinates: number[][] } | { type: "MultiLineString"; coordinates: number[][][] };
+    properties: Record<string, unknown>;
+  }>;
+};
 type Bounds = { west: number; south: number; east: number; north: number };
 type MapExtent = { left: number; top: number; right: number; bottom: number; zoom: number };
 type ColorStop = { value: number; color: string };
+type ProductGroupId = "temperature" | "wind" | "precipitation";
 type ProductSpec = {
   id: ProductId;
   title: string;
+  nav: string;
+  group: ProductGroupId;
+  description: string;
   legend: string;
   unit: string;
   file: string;
   decimals: number;
   stops: ColorStop[];
   verticalLegend?: boolean;
+  fillAlpha?: number;
+  maskFar?: boolean;
 };
 
 const DAY = 0;
 const PRODUCTS: ProductSpec[] = [
   {
-    id: "apparentTemperature", title: "Maximum Apparent Temperature", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0, verticalLegend: true,
+    id: "apparentTemperature", title: "Maximum Apparent Temperature", nav: "Feels Like", group: "temperature", description: "Daily peak heat index or wind chill from the NWS apparent temperature grid.", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0, verticalLegend: true,
     stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
-    id: "temperature", title: "Maximum Temperature", legend: "TEMPERATURE (°F)", unit: "°", file: "max-temperature", decimals: 0, verticalLegend: true,
+    id: "temperature", title: "Maximum Temperature", nav: "Temperature", group: "temperature", description: "Daily maximum air temperature sampled across the Philadelphia / Mount Holly area.", legend: "TEMPERATURE (°F)", unit: "°", file: "max-temperature", decimals: 0, verticalLegend: true,
     stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
-    id: "windGust", title: "Maximum Wind Gust", legend: "WIND GUST (MPH)", unit: " mph", file: "max-wind-gust", decimals: 0,
+    id: "windGust", title: "Maximum Wind Gust", nav: "Wind Gust", group: "wind", description: "Highest forecast wind gust for the day, shown in miles per hour.", legend: "WIND GUST (MPH)", unit: " mph", file: "max-wind-gust", decimals: 0,
     stops: [{ value: 0, color: "#f7fbff" }, { value: 10, color: "#c6dbef" }, { value: 20, color: "#6baed6" }, { value: 30, color: "#31a354" }, { value: 40, color: "#fed976" }, { value: 50, color: "#fd8d3c" }, { value: 60, color: "#e31a1c" }, { value: 70, color: "#800026" }],
   },
   {
-    id: "probabilityOfPrecipitation", title: "Maximum Probability of Precipitation", legend: "PROBABILITY OF PRECIPITATION (%)", unit: "%", file: "max-pop", decimals: 0,
+    id: "probabilityOfPrecipitation", title: "Maximum Probability of Precipitation", nav: "Rain Chance", group: "precipitation", description: "Highest daily chance of measurable precipitation from the NWS forecast grid.", legend: "PROBABILITY OF PRECIPITATION (%)", unit: "%", file: "max-pop", decimals: 0, fillAlpha: 235, maskFar: true,
     stops: [{ value: 0, color: "#ffffff" }, { value: 10, color: "#e5f5e0" }, { value: 20, color: "#a1d99b" }, { value: 40, color: "#41ab5d" }, { value: 60, color: "#2b8cbe" }, { value: 80, color: "#756bb1" }, { value: 100, color: "#54278f" }],
   },
   {
-    id: "quantitativePrecipitation", title: "Total Precipitation Forecast", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2,
+    id: "quantitativePrecipitation", title: "Total Precipitation Forecast", nav: "Rainfall", group: "precipitation", description: "Day 1 liquid-equivalent precipitation total, shown in inches.", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2, fillAlpha: 235, maskFar: true,
     stops: [{ value: 0, color: "#ffffff" }, { value: 0.01, color: "#e5f5e0" }, { value: 0.1, color: "#a1d99b" }, { value: 0.25, color: "#41ab5d" }, { value: 0.5, color: "#ffffb2" }, { value: 1, color: "#fe9929" }, { value: 2, color: "#de2d26" }, { value: 3, color: "#756bb1" }],
   },
+];
+
+const PRODUCT_GROUPS: Array<{ id: ProductGroupId; index: string; title: string; description: string }> = [
+  { id: "temperature", index: "01", title: "Temperature & heat", description: "Air temperature and human-perceived temperature guidance." },
+  { id: "wind", index: "02", title: "Wind", description: "Peak gust guidance for the full Day 1 forecast period." },
+  { id: "precipitation", index: "03", title: "Precipitation", description: "Probability and liquid-equivalent accumulation guidance." },
 ];
 
 const tileCache = new Map<string, Promise<ImageBitmap>>();
@@ -113,19 +134,6 @@ function project(lon: number, lat: number, extent: MapExtent, x: number, y: numb
   return [x + (point.x - extent.left) / (extent.right - extent.left) * width, y + (point.y - extent.top) / (extent.bottom - extent.top) * height];
 }
 
-function traceBoundary(context: CanvasRenderingContext2D, boundary: Boundary, projectPoint: (lon: number, lat: number) => [number, number]) {
-  context.beginPath();
-  for (const polygon of boundary.features[0].geometry.coordinates) {
-    for (const ring of polygon) {
-      ring.forEach((position, index) => {
-        const [x, y] = projectPoint(position[0], position[1]);
-        if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
-      });
-      context.closePath();
-    }
-  }
-}
-
 function traceCounties(context: CanvasRenderingContext2D, counties: CountyBoundaries, projectPoint: (lon: number, lat: number) => [number, number]) {
   context.beginPath();
   for (const feature of counties.features) {
@@ -138,6 +146,19 @@ function traceCounties(context: CanvasRenderingContext2D, counties: CountyBounda
         });
         context.closePath();
       }
+    }
+  }
+}
+
+function traceLines(context: CanvasRenderingContext2D, lines: LineFeatures, projectPoint: (lon: number, lat: number) => [number, number]) {
+  context.beginPath();
+  for (const feature of lines.features) {
+    const parts = feature.geometry.type === "LineString" ? [feature.geometry.coordinates] : feature.geometry.coordinates;
+    for (const part of parts) {
+      part.forEach((position, index) => {
+        const [x, y] = projectPoint(position[0], position[1]);
+        if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+      });
     }
   }
 }
@@ -158,21 +179,33 @@ function colorFor(value: number, stops: ColorStop[]) {
   return a.map((channel, index) => Math.round(channel + (b[index] - channel) * amount));
 }
 
-function interpolate(points: ForecastPoint[], product: ProductId, lon: number, lat: number) {
+function sampleField(points: ForecastPoint[], product: ProductId, lon: number, lat: number) {
   let weighted = 0;
   let weights = 0;
+  let nearestSquared = Infinity;
   for (const point of points) {
     const value = point.metrics[product][DAY];
     if (value === null) continue;
     const dx = (lon - point.lon) * Math.cos(lat * Math.PI / 180);
     const dy = lat - point.lat;
     const distanceSquared = dx * dx + dy * dy;
-    if (distanceSquared < 0.00001) return value;
+    if (distanceSquared < nearestSquared) nearestSquared = distanceSquared;
+    if (distanceSquared < 0.00001) return { value, nearest: 0 };
     const weight = 1 / Math.pow(distanceSquared + 0.003, 1.15);
     weighted += value * weight;
     weights += weight;
   }
-  return weights ? weighted / weights : 0;
+  return { value: weights ? weighted / weights : 0, nearest: Math.sqrt(nearestSquared) };
+}
+
+// Beyond the data footprint there is nothing to interpolate from, so fade masked
+// products (precip) to zero rather than letting IDW invent a value at the edges.
+function coverageFalloff(nearest: number) {
+  const near = 0.35;
+  const far = 0.85;
+  if (nearest <= near) return 1;
+  if (nearest >= far) return 0;
+  return (far - nearest) / (far - near);
 }
 
 function loadTile(url: string) {
@@ -194,7 +227,7 @@ async function drawTiles(context: CanvasRenderingContext2D, extent: MapExtent, x
   await Promise.all(Array.from({ length: lastX - firstX + 1 }, (_, xi) => firstX + xi).flatMap((tileX) =>
     Array.from({ length: lastY - firstY + 1 }, (_, yi) => firstY + yi).map(async (tileY) => {
       try {
-        const url = `https://a.basemaps.cartocdn.com/rastertiles/voyager/${extent.zoom}/${tileX}/${tileY}@2x.png`;
+        const url = `https://a.basemaps.cartocdn.com/rastertiles/voyager_nolabels/${extent.zoom}/${tileX}/${tileY}@2x.png`;
         const bitmap = await loadTile(url);
         context.drawImage(bitmap, x + (tileX * 256 - extent.left) * scale, y + (tileY * 256 - extent.top) * scale, 256 * scale, 256 * scale);
       } catch {
@@ -213,27 +246,18 @@ function displayValue(value: number, spec: ProductSpec) {
   return `${value.toFixed(spec.decimals)}${spec.unit}`;
 }
 
-async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, spec: ProductSpec) {
+async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: ProductSpec) {
   const width = 900;
   const height = 760;
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d")!;
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, width, height);
-  context.fillStyle = "#0f172a";
-  context.font = "700 25px Arial, sans-serif";
-  context.fillText(spec.title, 24, 33);
-  context.textAlign = "right";
-  context.font = "700 14px Arial, sans-serif";
-  context.fillText(forecast.days[DAY]?.label ?? "Day 1", 876, 25);
-  context.font = "12px Arial, sans-serif";
-  context.fillStyle = "#64748b";
-  context.fillText(`NWS issued ${formatTime(forecast.updatedAt || forecast.generatedAt)}`, 876, 44);
-  context.textAlign = "left";
+  context.lineJoin = "round";
+  if (document.fonts?.ready) await document.fonts.ready;
 
-  const plot = { x: 24, y: 56, width: 852, height: 650 };
-  context.fillStyle = "#e6f1f5";
+  // Map fills the entire canvas edge-to-edge — the card header carries the title.
+  const plot = { x: 0, y: 0, width, height };
+  context.fillStyle = "#dfe8ee";
   context.fillRect(plot.x, plot.y, plot.width, plot.height);
   const bounds = boundaryBounds(boundary);
   const extent = plotExtent(bounds, plot.width, plot.height);
@@ -244,7 +268,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   context.rect(plot.x, plot.y, plot.width, plot.height);
   context.clip();
 
-  context.strokeStyle = "#64748b";
+  context.strokeStyle = "#64748b40";
   context.lineWidth = 0.8;
   context.setLineDash([2, 4]);
   for (let lon = Math.ceil(bounds.west * 2) / 2; lon <= bounds.east; lon += 0.5) {
@@ -260,6 +284,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   context.setLineDash([]);
 
   const points = forecast.points.filter((point) => point.metrics[spec.id][DAY] !== null);
+  const fillAlpha = spec.fillAlpha ?? 185;
   const raster = document.createElement("canvas");
   raster.width = 760;
   raster.height = 640;
@@ -270,25 +295,34 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
       const worldX = extent.left + x / (raster.width - 1) * (extent.right - extent.left);
       const worldY = extent.top + y / (raster.height - 1) * (extent.bottom - extent.top);
       const coordinate = inverseWorld(worldX, worldY, extent.zoom);
-      const [red, green, blue] = colorFor(interpolate(points, spec.id, coordinate.lon, coordinate.lat), spec.stops);
+      const sample = sampleField(points, spec.id, coordinate.lon, coordinate.lat);
+      const value = spec.maskFar ? sample.value * coverageFalloff(sample.nearest) : sample.value;
+      const [red, green, blue] = colorFor(value, spec.stops);
       const offset = (y * raster.width + x) * 4;
       image.data[offset] = red;
       image.data[offset + 1] = green;
       image.data[offset + 2] = blue;
-      image.data[offset + 3] = 185;
+      image.data[offset + 3] = fillAlpha;
     }
   }
   rasterContext.putImageData(image, 0, 0);
   context.drawImage(raster, plot.x, plot.y, plot.width, plot.height);
 
-  traceCounties(context, counties, (lon, lat) => project(lon, lat, extent, plot.x, plot.y, plot.width, plot.height));
-  context.strokeStyle = "#00000033";
-  context.lineWidth = 0.8;
+  const projectPoint = (lon: number, lat: number) => project(lon, lat, extent, plot.x, plot.y, plot.width, plot.height);
+
+  traceCounties(context, counties, projectPoint);
+  context.strokeStyle = "rgba(0, 0, 0, 0.42)";
+  context.lineWidth = 0.9;
   context.stroke();
 
-  traceBoundary(context, boundary, (lon, lat) => project(lon, lat, extent, plot.x, plot.y, plot.width, plot.height));
-  context.strokeStyle = "#102a43";
-  context.lineWidth = 2.5;
+  traceCounties(context, states, projectPoint);
+  context.strokeStyle = "rgba(8, 13, 24, 0.9)";
+  context.lineWidth = 1.7;
+  context.stroke();
+
+  traceLines(context, interstates, projectPoint);
+  context.strokeStyle = "#c02b1f";
+  context.lineWidth = 1.4;
   context.stroke();
   context.restore();
 
@@ -298,94 +332,99 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     if (value === null) continue;
     const [x, y] = project(point.lon, point.lat, extent, plot.x, plot.y, plot.width, plot.height);
     const formatted = displayValue(value, spec);
-    context.font = "700 14px Arial, sans-serif";
+    context.font = `600 16px ${PLOT_FONT_FAMILY}`;
     context.fillStyle = "#ffffff";
     context.strokeStyle = "#111827";
     context.lineWidth = 4;
     context.strokeText(formatted, x, y - 9);
     context.fillText(formatted, x, y - 9);
     context.beginPath(); context.arc(x, y, 3.2, 0, Math.PI * 2); context.fillStyle = "#dc2626"; context.fill(); context.strokeStyle = "#fff"; context.lineWidth = 1.5; context.stroke();
-    context.font = "700 9px Arial, sans-serif";
+    context.font = `600 11px ${PLOT_FONT_FAMILY}`;
     context.fillStyle = "#fff"; context.strokeStyle = "#111827"; context.lineWidth = 3;
     context.strokeText(point.name, x, y + 12); context.fillText(point.name, x, y + 12);
   }
   context.textAlign = "left";
 
   if (spec.verticalLegend) {
-    const panelX = 36;
-    const panelY = 80;
-    const panelWidth = 98;
-    const panelHeight = 596;
-    const barX = 61;
-    const barY = 98;
-    const barWidth = 20;
-    const arrow = 9;
-    const colorHeight = 552;
+    const barX = 30;
+    const barTop = 54;
+    const barWidth = 17;
+    const arrow = 8;
+    const colorHeight = 612;
     const bandHeight = colorHeight / spec.stops.length;
-    context.fillStyle = "#ffffffe8";
-    context.fillRect(panelX, panelY, panelWidth, panelHeight);
+    const reversed = [...spec.stops].reverse();
     context.save();
-    context.translate(50, panelY + panelHeight / 2);
+    context.translate(18, barTop + colorHeight / 2);
     context.rotate(-Math.PI / 2);
     context.textAlign = "center";
-    context.fillStyle = "#111827";
-    context.font = "700 10px Arial, sans-serif";
+    context.font = `600 12px ${PLOT_FONT_FAMILY}`;
+    context.fillStyle = "#0f172a";
     context.fillText(spec.legend, 0, 0);
     context.restore();
-    const reversed = [...spec.stops].reverse();
     reversed.forEach((stop, index) => {
       context.fillStyle = stop.color;
-      context.fillRect(barX, barY + arrow + index * bandHeight, barWidth, bandHeight + 0.5);
+      context.fillRect(barX, barTop + arrow + index * bandHeight, barWidth, bandHeight + 0.5);
     });
     context.fillStyle = reversed[0].color;
-    context.beginPath(); context.moveTo(barX, barY + arrow); context.lineTo(barX + barWidth / 2, barY); context.lineTo(barX + barWidth, barY + arrow); context.closePath(); context.fill();
+    context.beginPath(); context.moveTo(barX, barTop + arrow); context.lineTo(barX + barWidth / 2, barTop); context.lineTo(barX + barWidth, barTop + arrow); context.closePath(); context.fill();
     context.fillStyle = reversed.at(-1)!.color;
-    const bottomY = barY + arrow + colorHeight;
+    const bottomY = barTop + arrow + colorHeight;
     context.beginPath(); context.moveTo(barX, bottomY); context.lineTo(barX + barWidth / 2, bottomY + arrow); context.lineTo(barX + barWidth, bottomY); context.closePath(); context.fill();
+    context.strokeStyle = "rgba(0, 0, 0, 0.35)";
+    context.lineWidth = 1;
+    context.strokeRect(barX, barTop + arrow, barWidth, colorHeight);
     context.textAlign = "left";
-    context.font = "700 9px Arial, sans-serif";
-    context.fillStyle = "#111827";
-    reversed.forEach((stop, index) => context.fillText(`${stop.value}°`, barX + barWidth + 6, barY + arrow + (index + 0.64) * bandHeight));
+    context.font = `600 11px ${PLOT_FONT_FAMILY}`;
+    context.fillStyle = "#0f172a";
+    reversed.forEach((stop, index) => context.fillText(`${stop.value}°`, barX + barWidth + 7, barTop + arrow + (index + 0.64) * bandHeight));
   } else {
-    const legendX = 46;
-    const legendY = 660;
+    const legendX = 26;
+    const legendY = height - 78;
     const legendWidth = 300;
-    context.fillStyle = "#ffffffdf";
-    context.fillRect(36, 612, 326, 84);
-    context.fillStyle = "#111827";
-    context.font = "700 10px Arial, sans-serif";
-    context.fillText(spec.legend, legendX, 636);
+    context.textAlign = "left";
+    context.font = `600 12px ${PLOT_FONT_FAMILY}`;
+    context.fillStyle = "#0f172a";
+    context.fillText(spec.legend, legendX, legendY - 9);
     const gradient = context.createLinearGradient(legendX, 0, legendX + legendWidth, 0);
     spec.stops.forEach((stop, index) => gradient.addColorStop(index / (spec.stops.length - 1), stop.color));
     context.fillStyle = gradient;
     context.fillRect(legendX, legendY, legendWidth, 12);
-    context.font = "9px Arial, sans-serif";
-    context.fillStyle = "#111827";
-    spec.stops.forEach((stop, index) => context.fillText(String(stop.value), legendX + index / (spec.stops.length - 1) * legendWidth - 4, 685));
+    context.strokeStyle = "rgba(0, 0, 0, 0.35)";
+    context.lineWidth = 1;
+    context.strokeRect(legendX, legendY, legendWidth, 12);
+    context.font = `600 11px ${PLOT_FONT_FAMILY}`;
+    context.fillStyle = "#0f172a";
+    spec.stops.forEach((stop, index) => context.fillText(String(stop.value), legendX + index / (spec.stops.length - 1) * legendWidth - 4, legendY + 25));
   }
-  context.strokeStyle = "#0f172a";
-  context.lineWidth = 1.5;
-  context.strokeRect(plot.x, plot.y, plot.width, plot.height);
 
-  context.fillStyle = "#64748b";
-  context.font = "10px Arial, sans-serif";
-  context.fillText(`Forecast: NOAA / NWS · ${points.length} PHI grid samples · Counties: US Census · Basemap: CARTO Voyager`, 24, 728);
+  // Signature tag (bottom-right) — X logo + handle, no plate.
   context.textAlign = "right";
-  context.font = "700 10px Arial, sans-serif";
-  context.fillText("PHI FORECAST GRAPHICS", 876, 728);
+  context.textBaseline = "alphabetic";
+  context.font = `600 13px ${PLOT_FONT_FAMILY}`;
+  context.fillStyle = "rgba(15, 23, 42, 0.9)";
+  const tag = "suchit_wx";
+  context.fillText(tag, width - 14, height - 13);
+  const tagWidth = context.measureText(tag).width;
+  const logoSize = 13;
+  context.save();
+  context.translate(width - 14 - tagWidth - 7 - logoSize, height - 13 - logoSize + 1);
+  context.scale(logoSize / 24, logoSize / 24);
+  context.fillStyle = "rgba(15, 23, 42, 0.9)";
+  context.fill(new Path2D("M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"));
+  context.restore();
   context.textAlign = "left";
 }
 
-function ForecastPlot({ spec, forecast, boundary, counties }: { spec: ProductSpec; forecast: ForecastPayload; boundary: Boundary; counties: CountyBoundaries }) {
+function ForecastPlot({ spec, forecast, boundary, counties, states, interstates }: { spec: ProductSpec; forecast: ForecastPayload; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [ready, setReady] = useState(false);
   useEffect(() => {
     if (!canvas.current) return;
     let active = true;
     setReady(false);
-    void renderPlot(canvas.current, forecast, boundary, counties, spec).then(() => { if (active) setReady(true); });
+    void renderPlot(canvas.current, forecast, boundary, counties, states, interstates, spec).then(() => { if (active) setReady(true); });
     return () => { active = false; };
-  }, [forecast, boundary, counties, spec]);
+  }, [forecast, boundary, counties, states, interstates, spec]);
 
   const download = useCallback(() => {
     if (!canvas.current || !ready) return;
@@ -400,9 +439,17 @@ function ForecastPlot({ spec, forecast, boundary, counties }: { spec: ProductSpe
   }, [forecast, ready, spec]);
 
   return (
-    <article className="forecast-product">
-      <div className="product-bar"><div><span>DAY 1 FORECAST</span><strong>{spec.title}</strong></div><button onClick={download} disabled={!ready}>{ready ? "Download PNG" : "Rendering…"}</button></div>
+    <article className="forecast-product" id={`product-${spec.id}`}>
+      <div className="product-bar">
+        <div className="product-heading">
+          <span>DAY 1 · STATIC FORECAST</span>
+          <strong>{spec.title}</strong>
+          <p>{spec.description}</p>
+        </div>
+        <button onClick={download} disabled={!ready}>{ready ? "Download PNG ↓" : "Rendering…"}</button>
+      </div>
       <canvas ref={canvas} className="forecast-canvas" role="img" aria-label={`${spec.title} forecast plot for the NWS Philadelphia and Mount Holly forecast area`} />
+      <footer className="product-meta"><span>PHI CWA</span><span>900 × 760 PNG</span><span>NWS GRID DATA</span></footer>
     </article>
   );
 }
@@ -411,18 +458,24 @@ export function ForecastGraphic() {
   const [forecast, setForecast] = useState<ForecastPayload | null>(null);
   const [boundary, setBoundary] = useState<Boundary | null>(null);
   const [counties, setCounties] = useState<CountyBoundaries | null>(null);
+  const [states, setStates] = useState<CountyBoundaries | null>(null);
+  const [interstates, setInterstates] = useState<LineFeatures | null>(null);
   const [error, setError] = useState(false);
   const loadData = useCallback(async () => {
     try {
-      const [forecastResponse, boundaryResponse, countyResponse] = await Promise.all([
+      const [forecastResponse, boundaryResponse, countyResponse, stateResponse, interstateResponse] = await Promise.all([
         fetch("/api/forecast", { cache: "no-store" }),
         fetch("/phi-cwa.geojson"),
         fetch("/counties.geojson"),
+        fetch("/states.geojson"),
+        fetch("/interstates.geojson"),
       ]);
-      if (!forecastResponse.ok || !boundaryResponse.ok || !countyResponse.ok) throw new Error("Data unavailable");
+      if (!forecastResponse.ok || !boundaryResponse.ok || !countyResponse.ok || !stateResponse.ok || !interstateResponse.ok) throw new Error("Data unavailable");
       setForecast(await forecastResponse.json() as ForecastPayload);
       setBoundary(await boundaryResponse.json() as Boundary);
       setCounties(await countyResponse.json() as CountyBoundaries);
+      setStates(await stateResponse.json() as CountyBoundaries);
+      setInterstates(await interstateResponse.json() as LineFeatures);
       setError(false);
     } catch {
       setError(true);
@@ -436,17 +489,78 @@ export function ForecastGraphic() {
   const availableProducts = useMemo(() => PRODUCTS, []);
   return (
     <main className="app-shell">
-      <nav className="site-nav">
-        <a className="site-brand" href="https://www.weather.gov/phi/" target="_blank" rel="noreferrer"><span>PHI</span> FORECAST GRAPHICS</a>
-        <span className="live-status"><i /> LIVE NWS DATA · REFRESHES EVERY 15 MIN</span>
-      </nav>
-      <header className="gallery-header">
-        <div><p>PHILADELPHIA / MOUNT HOLLY</p><h1>Day 1 Forecast Graphics</h1></div>
-        <div><strong>{forecast?.days[DAY]?.label ?? "Latest forecast"}</strong><span>NWS issued {formatTime(forecast?.updatedAt || forecast?.generatedAt || "")}</span></div>
-      </header>
-      {!forecast && !error && <div className="gallery-message">Rendering the latest NWS forecast plots…</div>}
-      {error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
-      {forecast && boundary && counties && <section className="forecast-gallery">{availableProducts.map((spec) => <ForecastPlot key={spec.id} spec={spec} forecast={forecast} boundary={boundary} counties={counties} />)}</section>}
+      <aside className="catalog-sidebar">
+        <a className="catalog-brand" href="https://www.weather.gov/phi/" target="_blank" rel="noreferrer">
+          <span className="brand-mark">PHI</span>
+          <span><strong>Forecast Graphics</strong><small>Philadelphia / Mount Holly</small></span>
+        </a>
+        <nav className="catalog-nav" aria-label="Forecast product catalogue">
+          <p>FORECAST PRODUCTS</p>
+          <a className="is-active" href="#overview"><span>Overview</span><b>5</b></a>
+          {PRODUCT_GROUPS.map((group) => (
+            <a key={group.id} href={`#${group.id}`}>
+              <span>{group.title}</span>
+              <b>{availableProducts.filter((product) => product.group === group.id).length}</b>
+            </a>
+          ))}
+        </nav>
+        <div className="catalog-divider" />
+        <nav className="product-index" aria-label="Individual forecast products">
+          <p>QUICK ACCESS</p>
+          {availableProducts.map((spec) => <a key={spec.id} href={`#product-${spec.id}`}>{spec.nav}</a>)}
+        </nav>
+        <footer className="catalog-footer">
+          <span className="live-status"><i /> AUTO-UPDATING</span>
+          <p>Source: National Weather Service<br />Forecast grids refresh every 15 minutes.</p>
+        </footer>
+      </aside>
+
+      <section className="catalog-workspace">
+        <header className="workspace-topbar">
+          <div className="breadcrumbs"><span>Forecast catalogue</span><i>/</i><strong>Day 1</strong></div>
+          <a href="https://api.weather.gov/" target="_blank" rel="noreferrer">NWS data source ↗</a>
+        </header>
+
+        <div className="forecast-context" aria-label="Forecast context">
+          <div><span>FORECAST AREA</span><strong>PHI · Mount Holly</strong></div>
+          <div><span>FORECAST DAY</span><strong>{forecast?.days[DAY]?.shortLabel ?? "Day 1"}</strong></div>
+          <div><span>VALID PERIOD</span><strong>{forecast?.days[DAY]?.label ?? "Latest forecast"}</strong></div>
+          <div><span>GRID COVERAGE</span><strong>{forecast ? `${forecast.points.length} points` : "Loading…"}</strong></div>
+          <div className="issued-context"><span>NWS ISSUED</span><strong>{formatTime(forecast?.updatedAt || forecast?.generatedAt || "")}</strong></div>
+        </div>
+
+        <div className="workspace-content" id="overview">
+          <header className="catalog-heading">
+            <div>
+              <p>PHILADELPHIA / MOUNT HOLLY</p>
+              <h1>Day 1 Forecast Graphics</h1>
+              <span>Clean, publication-ready weather maps built from the latest NWS forecast grids.</span>
+            </div>
+            <div className="catalog-summary"><strong>5</strong><span>forecast<br />products</span></div>
+          </header>
+
+          <nav className="forecast-tabs" aria-label="Forecast families">
+            <a className="is-active" href="#overview">All charts</a>
+            {PRODUCT_GROUPS.map((group) => <a key={group.id} href={`#${group.id}`}>{group.title}</a>)}
+          </nav>
+
+          {!forecast && !error && <div className="gallery-message">Rendering the latest NWS forecast plots…</div>}
+          {error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
+          {forecast && boundary && counties && states && interstates && PRODUCT_GROUPS.map((group) => (
+            <section className="product-section" id={group.id} key={group.id}>
+              <header className="section-heading">
+                <span>{group.index}</span>
+                <div><h2>{group.title}</h2><p>{group.description}</p></div>
+              </header>
+              <div className="forecast-gallery">
+                {availableProducts.filter((spec) => spec.group === group.id).map((spec) => (
+                  <ForecastPlot key={spec.id} spec={spec} forecast={forecast} boundary={boundary} counties={counties} states={states} interstates={interstates} />
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      </section>
     </main>
   );
 }

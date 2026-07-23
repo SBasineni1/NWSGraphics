@@ -21,6 +21,9 @@ test("server-renders the PHI apparent-temperature product", async () => {
   assert.match(html, /PHI Forecast Graphics/);
   assert.match(html, /Day 1 Forecast Graphics/);
   assert.match(html, /Philadelphia \/ Mount Holly/);
+  assert.match(html, /Forecast catalogue/);
+  assert.match(html, /Temperature &amp; heat/);
+  assert.match(html, /NWS data source/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
 
@@ -29,17 +32,15 @@ test("uses official NWS apparent-temperature grid data", async () => {
     readFile(new URL("../app/api/forecast/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
   ]);
-  assert.match(route, /api\.weather\.gov\/gridpoints\/PHI/);
+  assert.match(route, /api\.weather\.gov\/gridpoints\/\$\{location\.wfo\}/);
   assert.match(route, /apparentTemperature/);
   assert.match(route, /temperature/);
   assert.match(route, /windGust/);
   assert.match(route, /probabilityOfPrecipitation/);
   assert.match(route, /quantitativePrecipitation/);
   assert.match(route, /GRID_LOCATIONS/);
-  assert.match(route, /100/);
-  assert.match(route, /138/);
+  assert.match(route, /grid-points\.json/);
   assert.match(route, /index \+= 12/);
-  assert.match(route, /OUTSIDE_PHI_GRID/);
   assert.match(route, /label: false/);
   assert.match(route, /Cache-Control/);
   assert.match(component, /15 \* 60 \* 1000/);
@@ -49,6 +50,9 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /Maximum Probability of Precipitation/);
   assert.match(component, /Total Precipitation Forecast/);
   assert.match(component, /Download PNG/);
+  assert.match(component, /PRODUCT_GROUPS/);
+  assert.match(component, /FORECAST AREA/);
+  assert.match(component, /STATIC FORECAST/);
   assert.match(component, /const width = 900/);
   assert.match(component, /value: -50/);
   assert.match(component, /value: 120/);
@@ -78,5 +82,20 @@ test("bundles trimmed county boundaries for the region", async () => {
   const states = new Set(counties.features.map((feature) => String(feature.id).slice(0, 2)));
   for (const fips of ["10", "24", "34", "36", "42"]) {
     assert.ok(states.has(fips), `expected state FIPS ${fips}`);
+  }
+});
+
+test("bundles multi-office gridpoints covering the Northeast frame", async () => {
+  const source = await readFile(new URL("../app/api/forecast/grid-points.json", import.meta.url), "utf8");
+  const points = JSON.parse(source);
+  assert.ok(Array.isArray(points) && points.length > 80, "expected a broad grid of gridpoints");
+  for (const point of points.slice(0, 5)) {
+    assert.match(point.wfo, /^[A-Z]{3}$/);
+    assert.equal(typeof point.x, "number");
+    assert.equal(typeof point.y, "number");
+  }
+  const offices = new Set(points.map((point) => point.wfo));
+  for (const wfo of ["PHI", "OKX", "LWX"]) {
+    assert.ok(offices.has(wfo), `expected office ${wfo}`);
   }
 });

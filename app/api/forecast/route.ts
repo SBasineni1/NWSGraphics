@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import gridPoints from "./grid-points.json";
 
 export const runtime = "edge";
 
@@ -22,21 +23,21 @@ const LABEL_LOCATIONS = [
   { id: "eas", name: "Easton", state: "MD", lat: 38.7743, lon: -76.0763, x: 26, y: 21, label: true },
 ] as const;
 
-const GRID_X = [16, 28, 40, 52, 64, 76, 88, 100] as const;
-const GRID_Y = [18, 42, 66, 90, 114, 138] as const;
-const OUTSIDE_PHI_GRID = new Set([
-  "grid-16-66", "grid-16-114", "grid-88-114", "grid-100-114",
-  "grid-16-138", "grid-28-138", "grid-76-138", "grid-88-138", "grid-100-138",
-]);
-const GRID_LOCATIONS = GRID_Y.flatMap((y) => GRID_X.map((x) => ({
-  id: `grid-${x}-${y}`,
+// Fill grid across the Northeast frame, each point tagged with its owning NWS
+// office (see scripts/build-grid-points.mjs). This gives real data outside PHI.
+const GRID_LOCATIONS = (gridPoints as Array<{ id: string; wfo: string; x: number; y: number }>).map((point) => ({
+  id: point.id,
   name: "",
   state: "",
-  x,
-  y,
+  wfo: point.wfo,
+  x: point.x,
+  y: point.y,
   label: false,
-}))).filter((location) => !OUTSIDE_PHI_GRID.has(location.id));
-const LOCATIONS = [...LABEL_LOCATIONS, ...GRID_LOCATIONS];
+}));
+const LOCATIONS = [
+  ...LABEL_LOCATIONS.map((location) => ({ ...location, wfo: "PHI" })),
+  ...GRID_LOCATIONS,
+];
 
 type ProductId = "apparentTemperature" | "temperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
 type GridValue = { validTime: string; value: number | null };
@@ -90,7 +91,7 @@ function dailyValues(
 }
 
 async function fetchLocation(location: (typeof LOCATIONS)[number], dates: string[]) {
-  const response = await fetch(`https://api.weather.gov/gridpoints/PHI/${location.x},${location.y}`, {
+  const response = await fetch(`https://api.weather.gov/gridpoints/${location.wfo}/${location.x},${location.y}`, {
     headers: { Accept: "application/geo+json", "User-Agent": "PHI Forecast Graphics (weather.gov/phi)" },
     signal: AbortSignal.timeout(12000),
     cf: { cacheTtl: 900, cacheEverything: true },
