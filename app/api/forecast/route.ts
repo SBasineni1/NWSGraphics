@@ -22,8 +22,12 @@ const LABEL_LOCATIONS = [
   { id: "eas", name: "Easton", state: "MD", lat: 38.7743, lon: -76.0763, x: 26, y: 21, label: true },
 ] as const;
 
-const GRID_X = [20, 35, 50, 65, 80, 95] as const;
-const GRID_Y = [24, 48, 72, 96, 120] as const;
+const GRID_X = [16, 28, 40, 52, 64, 76, 88, 100] as const;
+const GRID_Y = [18, 42, 66, 90, 114, 138] as const;
+const OUTSIDE_PHI_GRID = new Set([
+  "grid-16-66", "grid-16-114", "grid-88-114", "grid-100-114",
+  "grid-16-138", "grid-28-138", "grid-76-138", "grid-88-138", "grid-100-138",
+]);
 const GRID_LOCATIONS = GRID_Y.flatMap((y) => GRID_X.map((x) => ({
   id: `grid-${x}-${y}`,
   name: "",
@@ -31,7 +35,7 @@ const GRID_LOCATIONS = GRID_Y.flatMap((y) => GRID_X.map((x) => ({
   x,
   y,
   label: false,
-})));
+}))).filter((location) => !OUTSIDE_PHI_GRID.has(location.id));
 const LOCATIONS = [...LABEL_LOCATIONS, ...GRID_LOCATIONS];
 
 type ProductId = "apparentTemperature" | "temperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
@@ -117,7 +121,13 @@ export async function GET() {
   const today = easternDate(now);
   const [year, month, day] = today.split("-").map(Number);
   const dates = Array.from({ length: 4 }, (_, index) => easternDate(new Date(Date.UTC(year, month - 1, day + index, 16))));
-  const results = await Promise.allSettled(LOCATIONS.map((location) => fetchLocation(location, dates)));
+  const results: PromiseSettledResult<Awaited<ReturnType<typeof fetchLocation>>>[] = [];
+  // Keep pressure on api.weather.gov modest; small batches are more reliable
+  // than opening every PHI grid-cell request at once.
+  for (let index = 0; index < LOCATIONS.length; index += 12) {
+    const batch = LOCATIONS.slice(index, index + 12);
+    results.push(...await Promise.allSettled(batch.map((location) => fetchLocation(location, dates))));
+  }
   const successful = results.filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof fetchLocation>>> => result.status === "fulfilled");
   const updatedAt = successful.map((result) => result.value.updatedAt).filter(Boolean).sort().at(-1) ?? now.toISOString();
   return NextResponse.json({

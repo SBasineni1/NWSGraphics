@@ -36,6 +36,10 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(route, /probabilityOfPrecipitation/);
   assert.match(route, /quantitativePrecipitation/);
   assert.match(route, /GRID_LOCATIONS/);
+  assert.match(route, /100/);
+  assert.match(route, /138/);
+  assert.match(route, /index \+= 12/);
+  assert.match(route, /OUTSIDE_PHI_GRID/);
   assert.match(route, /label: false/);
   assert.match(route, /Cache-Control/);
   assert.match(component, /15 \* 60 \* 1000/);
@@ -46,6 +50,9 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /Total Precipitation Forecast/);
   assert.match(component, /Download PNG/);
   assert.match(component, /const width = 1200/);
+  assert.match(component, /value: -50/);
+  assert.match(component, /value: 120/);
+  assert.match(component, /verticalLegend: true/);
   assert.match(component, /destination-in/);
   assert.match(component, /item\.label/);
 });

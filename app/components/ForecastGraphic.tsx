@@ -38,17 +38,18 @@ type ProductSpec = {
   file: string;
   decimals: number;
   stops: ColorStop[];
+  verticalLegend?: boolean;
 };
 
 const DAY = 0;
 const PRODUCTS: ProductSpec[] = [
   {
-    id: "apparentTemperature", title: "Maximum Apparent Temperature", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0,
-    stops: [{ value: 60, color: "#313695" }, { value: 70, color: "#4575b4" }, { value: 80, color: "#74add1" }, { value: 85, color: "#abd9e9" }, { value: 90, color: "#fee090" }, { value: 95, color: "#fdae61" }, { value: 100, color: "#f46d43" }, { value: 105, color: "#d73027" }, { value: 110, color: "#a50026" }],
+    id: "apparentTemperature", title: "Maximum Apparent Temperature", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0, verticalLegend: true,
+    stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
-    id: "temperature", title: "Maximum Temperature", legend: "TEMPERATURE (°F)", unit: "°", file: "max-temperature", decimals: 0,
-    stops: [{ value: 55, color: "#313695" }, { value: 65, color: "#4575b4" }, { value: 75, color: "#74add1" }, { value: 80, color: "#abd9e9" }, { value: 85, color: "#fee090" }, { value: 90, color: "#fdae61" }, { value: 95, color: "#f46d43" }, { value: 100, color: "#d73027" }, { value: 105, color: "#a50026" }],
+    id: "temperature", title: "Maximum Temperature", legend: "TEMPERATURE (°F)", unit: "°", file: "max-temperature", decimals: 0, verticalLegend: true,
+    stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
     id: "windGust", title: "Maximum Wind Gust", legend: "WIND GUST (MPH)", unit: " mph", file: "max-wind-gust", decimals: 0,
@@ -286,21 +287,58 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   }
   context.textAlign = "left";
 
-  const legendX = 52;
-  const legendY = 675;
-  const legendWidth = 315;
-  context.fillStyle = "#ffffffdf";
-  context.fillRect(42, 627, 340, 88);
-  context.fillStyle = "#111827";
-  context.font = "700 10px Arial, sans-serif";
-  context.fillText(spec.legend, legendX, 650);
-  const gradient = context.createLinearGradient(legendX, 0, legendX + legendWidth, 0);
-  spec.stops.forEach((stop, index) => gradient.addColorStop(index / (spec.stops.length - 1), stop.color));
-  context.fillStyle = gradient;
-  context.fillRect(legendX, legendY, legendWidth, 12);
-  context.font = "9px Arial, sans-serif";
-  context.fillStyle = "#111827";
-  spec.stops.forEach((stop, index) => context.fillText(String(stop.value), legendX + index / (spec.stops.length - 1) * legendWidth - 4, 700));
+  if (spec.verticalLegend) {
+    const panelX = 43;
+    const panelY = 91;
+    const panelWidth = 110;
+    const panelHeight = 612;
+    const barX = 72;
+    const barY = 112;
+    const barWidth = 22;
+    const arrow = 10;
+    const colorHeight = 566;
+    const bandHeight = colorHeight / spec.stops.length;
+    context.fillStyle = "#ffffffe8";
+    context.fillRect(panelX, panelY, panelWidth, panelHeight);
+    context.save();
+    context.translate(57, panelY + panelHeight / 2);
+    context.rotate(-Math.PI / 2);
+    context.textAlign = "center";
+    context.fillStyle = "#111827";
+    context.font = "700 10px Arial, sans-serif";
+    context.fillText(spec.legend, 0, 0);
+    context.restore();
+    const reversed = [...spec.stops].reverse();
+    reversed.forEach((stop, index) => {
+      context.fillStyle = stop.color;
+      context.fillRect(barX, barY + arrow + index * bandHeight, barWidth, bandHeight + 0.5);
+    });
+    context.fillStyle = reversed[0].color;
+    context.beginPath(); context.moveTo(barX, barY + arrow); context.lineTo(barX + barWidth / 2, barY); context.lineTo(barX + barWidth, barY + arrow); context.closePath(); context.fill();
+    context.fillStyle = reversed.at(-1)!.color;
+    const bottomY = barY + arrow + colorHeight;
+    context.beginPath(); context.moveTo(barX, bottomY); context.lineTo(barX + barWidth / 2, bottomY + arrow); context.lineTo(barX + barWidth, bottomY); context.closePath(); context.fill();
+    context.textAlign = "left";
+    context.font = "700 9px Arial, sans-serif";
+    context.fillStyle = "#111827";
+    reversed.forEach((stop, index) => context.fillText(`${stop.value}°`, barX + barWidth + 7, barY + arrow + (index + 0.64) * bandHeight));
+  } else {
+    const legendX = 52;
+    const legendY = 675;
+    const legendWidth = 315;
+    context.fillStyle = "#ffffffdf";
+    context.fillRect(42, 627, 340, 88);
+    context.fillStyle = "#111827";
+    context.font = "700 10px Arial, sans-serif";
+    context.fillText(spec.legend, legendX, 650);
+    const gradient = context.createLinearGradient(legendX, 0, legendX + legendWidth, 0);
+    spec.stops.forEach((stop, index) => gradient.addColorStop(index / (spec.stops.length - 1), stop.color));
+    context.fillStyle = gradient;
+    context.fillRect(legendX, legendY, legendWidth, 12);
+    context.font = "9px Arial, sans-serif";
+    context.fillStyle = "#111827";
+    spec.stops.forEach((stop, index) => context.fillText(String(stop.value), legendX + index / (spec.stops.length - 1) * legendWidth - 4, 700));
+  }
   context.strokeStyle = "#111827";
   context.lineWidth = 1.5;
   context.strokeRect(plot.x, plot.y, plot.width, plot.height);
