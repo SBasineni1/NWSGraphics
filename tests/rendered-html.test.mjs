@@ -49,11 +49,13 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /Maximum Probability of Precipitation/);
   assert.match(component, /Total Precipitation Forecast/);
   assert.match(component, /Download PNG/);
-  assert.match(component, /const width = 1200/);
+  assert.match(component, /const width = 900/);
   assert.match(component, /value: -50/);
   assert.match(component, /value: 120/);
   assert.match(component, /verticalLegend: true/);
-  assert.match(component, /destination-in/);
+  assert.match(component, /traceCounties/);
+  assert.match(component, /rastertiles\/voyager/);
+  assert.match(component, /counties\.geojson/);
   assert.match(component, /item\.label/);
 });
 
