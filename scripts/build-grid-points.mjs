@@ -1,16 +1,21 @@
 import { readFile, writeFile } from "node:fs/promises";
 
-// Resolve a lat/lon grid over the Northeast render frame to the NWS gridpoints
-// that own each sample. Every point carries its forecast office (gridId), so the
-// runtime route can fetch real data across office boundaries (PHI, OKX, LWX, BGM,
-// ALY, CTP, …) instead of extrapolating PHI's grid across the whole frame.
-// Ocean samples are dropped: isolated offshore points create IDW "bullseyes",
-// and water areas fill smoothly from the coastal land points instead.
+// Resolve a dense lat/lon lattice inside the official PHI County Warning Area
+// to its owning NWS gridpoints. The published maps are clipped to this same
+// boundary, so concentrating requests here gives a cleaner field with fewer API
+// calls than a sparse grid spread over the entire Northeast.
 const USER_AGENT = "PHI Forecast Graphics (weather.gov/phi)";
-const FRAME = { west: -78.2, east: -71.8, south: 37.4, north: 42.6 };
-const STEP = 0.45;
+const STEP = 0.22;
 
-const states = JSON.parse(await readFile(new URL("../public/states.geojson", import.meta.url), "utf8"));
+const boundary = JSON.parse(await readFile(new URL("../public/phi-cwa.geojson", import.meta.url), "utf8"));
+const polygons = boundary.features[0].geometry.coordinates;
+const positions = polygons.flat(2);
+const frame = {
+  west: Math.min(...positions.map((position) => position[0])),
+  east: Math.max(...positions.map((position) => position[0])),
+  south: Math.min(...positions.map((position) => position[1])),
+  north: Math.max(...positions.map((position) => position[1])),
+};
 
 function pointInRing(lon, lat, ring) {
   let inside = false;
@@ -22,14 +27,11 @@ function pointInRing(lon, lat, ring) {
   return inside;
 }
 
-function onLand(lon, lat) {
-  for (const feature of states.features) {
-    const polygons = feature.geometry.type === "Polygon" ? [feature.geometry.coordinates] : feature.geometry.coordinates;
-    for (const polygon of polygons) {
-      if (!pointInRing(lon, lat, polygon[0])) continue;
-      if (polygon.slice(1).some((hole) => pointInRing(lon, lat, hole))) continue;
-      return true;
-    }
+function inForecastArea(lon, lat) {
+  for (const polygon of polygons) {
+    if (!pointInRing(lon, lat, polygon[0])) continue;
+    if (polygon.slice(1).some((hole) => pointInRing(lon, lat, hole))) continue;
+    return true;
   }
   return false;
 }
@@ -50,12 +52,12 @@ async function resolve(lat, lon) {
 }
 
 const samples = [];
-for (let lat = FRAME.south; lat <= FRAME.north + 1e-9; lat += STEP) {
-  for (let lon = FRAME.west; lon <= FRAME.east + 1e-9; lon += STEP) {
-    if (onLand(lon, lat)) samples.push([lat, lon]);
+for (let lat = frame.south; lat <= frame.north + 1e-9; lat += STEP) {
+  for (let lon = frame.west; lon <= frame.east + 1e-9; lon += STEP) {
+    if (inForecastArea(lon, lat)) samples.push([lat, lon]);
   }
 }
-console.log(`resolving ${samples.length} land samples…`);
+console.log(`resolving ${samples.length} PHI CWA samples…`);
 
 const seen = new Set();
 const points = [];

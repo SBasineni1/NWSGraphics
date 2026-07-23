@@ -69,9 +69,15 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /value: 120/);
   assert.match(component, /verticalLegend: true/);
   assert.match(component, /id: "windGust"[^\n]*verticalLegend: true/);
+  assert.match(component, /id: "probabilityOfPrecipitation"[^\n]*verticalLegend: true/);
   assert.match(component, /id: "quantitativePrecipitation"[^\n]*verticalLegend: true/);
   assert.match(component, /outlinedText/);
   assert.match(component, /traceCounties/);
+  assert.match(component, /traceBoundary/);
+  assert.match(component, /context\.clip\("evenodd"\)/);
+  assert.match(component, /const neighborCount = 8/);
+  assert.match(component, /points\.filter\(\(point\) => !point\.label\)/);
+  assert.doesNotMatch(component, /coverageFalloff|maskFar/);
   assert.match(component, /rastertiles\/voyager/);
   assert.match(component, /counties\.geojson/);
   assert.match(component, /item\.label/);
@@ -99,17 +105,15 @@ test("bundles trimmed county boundaries for the region", async () => {
   }
 });
 
-test("bundles multi-office gridpoints covering the Northeast frame", async () => {
+test("bundles a dense grid of forecast points for the PHI area", async () => {
   const source = await readFile(new URL("../app/api/forecast/grid-points.json", import.meta.url), "utf8");
   const points = JSON.parse(source);
-  assert.ok(Array.isArray(points) && points.length > 80, "expected a broad grid of gridpoints");
+  assert.ok(Array.isArray(points) && points.length > 50, "expected a dense grid of PHI-area gridpoints");
   for (const point of points.slice(0, 5)) {
     assert.match(point.wfo, /^[A-Z]{3}$/);
     assert.equal(typeof point.x, "number");
     assert.equal(typeof point.y, "number");
   }
-  const offices = new Set(points.map((point) => point.wfo));
-  for (const wfo of ["PHI", "OKX", "LWX"]) {
-    assert.ok(offices.has(wfo), `expected office ${wfo}`);
-  }
+  const phiPoints = points.filter((point) => point.wfo === "PHI");
+  assert.ok(phiPoints.length / points.length > 0.8, "expected the sampling grid to concentrate on PHI");
 });

@@ -61,7 +61,6 @@ type ProductSpec = {
   stops: ColorStop[];
   verticalLegend?: boolean;
   fillAlpha?: number;
-  maskFar?: boolean;
 };
 
 const RENDER_SCALE = 2;
@@ -82,11 +81,11 @@ const PRODUCTS: ProductSpec[] = [
     stops: [{ value: 0, color: "#f7fbff" }, { value: 10, color: "#c6dbef" }, { value: 20, color: "#6baed6" }, { value: 30, color: "#31a354" }, { value: 40, color: "#fed976" }, { value: 50, color: "#fd8d3c" }, { value: 60, color: "#e31a1c" }, { value: 70, color: "#800026" }],
   },
   {
-    id: "probabilityOfPrecipitation", title: "Maximum Probability of Precipitation", nav: "Rain Chance", group: "precipitation", legend: "PROBABILITY OF PRECIPITATION (%)", unit: "%", file: "max-pop", decimals: 0, fillAlpha: 235, maskFar: true,
+    id: "probabilityOfPrecipitation", title: "Maximum Probability of Precipitation", nav: "Rain Chance", group: "precipitation", legend: "PROBABILITY OF PRECIPITATION (%)", unit: "%", file: "max-pop", decimals: 0, fillAlpha: 235, verticalLegend: true,
     stops: [{ value: 0, color: "#ffffff" }, { value: 10, color: "#e5f5e0" }, { value: 20, color: "#a1d99b" }, { value: 40, color: "#41ab5d" }, { value: 60, color: "#2b8cbe" }, { value: 80, color: "#756bb1" }, { value: 100, color: "#54278f" }],
   },
   {
-    id: "quantitativePrecipitation", title: "Total Precipitation Forecast", nav: "Rainfall", group: "precipitation", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2, fillAlpha: 235, maskFar: true, verticalLegend: true,
+    id: "quantitativePrecipitation", title: "Total Precipitation Forecast", nav: "Rainfall", group: "precipitation", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2, fillAlpha: 235, verticalLegend: true,
     stops: [{ value: 0, color: "#ffffff" }, { value: 0.01, color: "#e5f5e0" }, { value: 0.1, color: "#a1d99b" }, { value: 0.25, color: "#41ab5d" }, { value: 0.5, color: "#ffffb2" }, { value: 1, color: "#fe9929" }, { value: 2, color: "#de2d26" }, { value: 3, color: "#756bb1" }],
   },
 ];
@@ -152,6 +151,21 @@ function traceCounties(context: CanvasRenderingContext2D, counties: CountyBounda
   }
 }
 
+function traceBoundary(context: CanvasRenderingContext2D, boundary: Boundary, projectPoint: (lon: number, lat: number) => [number, number]) {
+  context.beginPath();
+  for (const feature of boundary.features) {
+    for (const polygon of feature.geometry.coordinates) {
+      for (const ring of polygon) {
+        ring.forEach((position, index) => {
+          const [x, y] = projectPoint(position[0], position[1]);
+          if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+        });
+        context.closePath();
+      }
+    }
+  }
+}
+
 function traceLines(context: CanvasRenderingContext2D, lines: LineFeatures, projectPoint: (lon: number, lat: number) => [number, number]) {
   context.beginPath();
   for (const feature of lines.features) {
@@ -182,32 +196,31 @@ function colorFor(value: number, stops: ColorStop[]) {
 }
 
 function sampleField(points: ForecastPoint[], product: ProductId, dayIndex: number, lon: number, lat: number) {
-  let weighted = 0;
-  let weights = 0;
-  let nearestSquared = Infinity;
+  const neighborCount = 8;
+  const neighbors: Array<{ distanceSquared: number; value: number }> = [];
   for (const point of points) {
     const value = point.metrics[product][dayIndex];
     if (value === null) continue;
     const dx = (lon - point.lon) * Math.cos(lat * Math.PI / 180);
     const dy = lat - point.lat;
     const distanceSquared = dx * dx + dy * dy;
-    if (distanceSquared < nearestSquared) nearestSquared = distanceSquared;
-    if (distanceSquared < 0.00001) return { value, nearest: 0 };
-    const weight = 1 / Math.pow(distanceSquared + 0.003, 1.15);
-    weighted += value * weight;
+    if (distanceSquared < 0.000001) return value;
+    const insertAt = neighbors.findIndex((neighbor) => distanceSquared < neighbor.distanceSquared);
+    if (insertAt === -1) {
+      if (neighbors.length < neighborCount) neighbors.push({ distanceSquared, value });
+    } else {
+      neighbors.splice(insertAt, 0, { distanceSquared, value });
+      if (neighbors.length > neighborCount) neighbors.pop();
+    }
+  }
+  let weighted = 0;
+  let weights = 0;
+  for (const neighbor of neighbors) {
+    const weight = 1 / Math.pow(neighbor.distanceSquared + 0.0005, 1.35);
+    weighted += neighbor.value * weight;
     weights += weight;
   }
-  return { value: weights ? weighted / weights : 0, nearest: Math.sqrt(nearestSquared) };
-}
-
-// Beyond the data footprint there is nothing to interpolate from, so fade masked
-// products (precip) to zero rather than letting IDW invent a value at the edges.
-function coverageFalloff(nearest: number) {
-  const near = 0.35;
-  const far = 0.85;
-  if (nearest <= near) return 1;
-  if (nearest >= far) return 0;
-  return (far - nearest) / (far - near);
+  return weights ? weighted / weights : 0;
 }
 
 function loadTile(url: string) {
@@ -275,6 +288,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   context.fillRect(plot.x, plot.y, plot.width, plot.height);
   const bounds = boundaryBounds(boundary);
   const extent = plotExtent(bounds, plot.width, plot.height);
+  const projectPoint = (lon: number, lat: number) => project(lon, lat, extent, plot.x, plot.y, plot.width, plot.height);
   await drawTiles(context, extent, plot.x, plot.y, plot.width, plot.height);
 
   context.save();
@@ -298,6 +312,8 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   context.setLineDash([]);
 
   const points = forecast.points.filter((point) => point.metrics[spec.id][dayIndex] !== null);
+  const gridPoints = points.filter((point) => !point.label);
+  const fieldPoints = gridPoints.length ? gridPoints : points;
   const fillAlpha = spec.fillAlpha ?? 185;
   const raster = document.createElement("canvas");
   raster.width = PLOT_WIDTH;
@@ -309,8 +325,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
       const worldX = extent.left + x / (raster.width - 1) * (extent.right - extent.left);
       const worldY = extent.top + y / (raster.height - 1) * (extent.bottom - extent.top);
       const coordinate = inverseWorld(worldX, worldY, extent.zoom);
-      const sample = sampleField(points, spec.id, dayIndex, coordinate.lon, coordinate.lat);
-      const value = spec.maskFar ? sample.value * coverageFalloff(sample.nearest) : sample.value;
+      const value = sampleField(fieldPoints, spec.id, dayIndex, coordinate.lon, coordinate.lat);
       const [red, green, blue] = colorFor(value, spec.stops);
       const offset = (y * raster.width + x) * 4;
       image.data[offset] = red;
@@ -320,9 +335,11 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     }
   }
   rasterContext.putImageData(image, 0, 0);
+  context.save();
+  traceBoundary(context, boundary, projectPoint);
+  context.clip("evenodd");
   context.drawImage(raster, plot.x, plot.y, plot.width, plot.height);
-
-  const projectPoint = (lon: number, lat: number) => project(lon, lat, extent, plot.x, plot.y, plot.width, plot.height);
+  context.restore();
 
   traceCounties(context, counties, projectPoint);
   context.strokeStyle = "rgba(0, 0, 0, 0.42)";
@@ -337,6 +354,11 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   traceLines(context, interstates, projectPoint);
   context.strokeStyle = "#c02b1f";
   context.lineWidth = 1.4;
+  context.stroke();
+
+  traceBoundary(context, boundary, projectPoint);
+  context.strokeStyle = "rgba(8, 13, 24, 0.98)";
+  context.lineWidth = 2.4;
   context.stroke();
   context.restore();
 

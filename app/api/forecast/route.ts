@@ -23,8 +23,8 @@ const LABEL_LOCATIONS = [
   { id: "eas", name: "Easton", state: "MD", lat: 38.7743, lon: -76.0763, x: 26, y: 21, label: true },
 ] as const;
 
-// Fill grid across the Northeast frame, each point tagged with its owning NWS
-// office (see scripts/build-grid-points.mjs). This gives real data outside PHI.
+// Dense background lattice inside the PHI CWA (see build-grid-points.mjs).
+// City points remain separate so labels never distort the interpolated field.
 const GRID_LOCATIONS = (gridPoints as Array<{ id: string; wfo: string; x: number; y: number }>).map((point) => ({
   id: point.id,
   name: "",
