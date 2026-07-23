@@ -64,3 +64,17 @@ test("uses the official PHI County Warning Area boundary", async () => {
   assert.equal(boundary.features[0].geometry.type, "MultiPolygon");
   assert.equal(boundary.features[0].properties.wfo, "PHI");
 });
+
+test("bundles trimmed county boundaries for the region", async () => {
+  const source = await readFile(new URL("../public/counties.geojson", import.meta.url), "utf8");
+  const counties = JSON.parse(source);
+  assert.equal(counties.type, "FeatureCollection");
+  assert.ok(counties.features.length > 30, "expected county coverage for the region");
+  for (const feature of counties.features.slice(0, 5)) {
+    assert.match(feature.geometry.type, /^(Polygon|MultiPolygon)$/);
+  }
+  const states = new Set(counties.features.map((feature) => String(feature.id).slice(0, 2)));
+  for (const fips of ["10", "24", "34", "36", "42"]) {
+    assert.ok(states.has(fips), `expected state FIPS ${fips}`);
+  }
+});
