@@ -23,6 +23,9 @@ test("server-renders the PHI apparent-temperature product", async () => {
   assert.match(html, /Forecast catalogue/);
   assert.match(html, /Temperature &amp; heat/);
   assert.match(html, /NWS data source/);
+  assert.match(html, />Menu</);
+  assert.match(html, /\[5\]/);
+  assert.match(html, /Data status/);
   assert.doesNotMatch(html, /STATIC FORECAST|900 × 760 PNG|publication-ready/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });

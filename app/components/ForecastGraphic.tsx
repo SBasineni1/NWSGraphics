@@ -495,21 +495,22 @@ export function ForecastGraphic() {
           <span><strong>Forecast Graphics</strong></span>
         </a>
         <nav className="catalog-nav" aria-label="Forecast product catalogue">
-          <p>FORECAST PRODUCTS</p>
-          <a className="is-active" href="#overview"><span>Overview</span><b>5</b></a>
+          <p>Menu</p>
+          <a className="is-active" href="#overview"><span>Overview</span><b>[5]</b></a>
           {PRODUCT_GROUPS.map((group) => (
             <a key={group.id} href={`#${group.id}`}>
               <span>{group.title}</span>
-              <b>{availableProducts.filter((product) => product.group === group.id).length}</b>
+              <b>[{availableProducts.filter((product) => product.group === group.id).length}]</b>
             </a>
           ))}
         </nav>
         <div className="catalog-divider" />
         <nav className="product-index" aria-label="Individual forecast products">
-          <p>QUICK ACCESS</p>
+          <p>Products</p>
           {availableProducts.map((spec) => <a key={spec.id} href={`#product-${spec.id}`}>{spec.nav}</a>)}
         </nav>
         <footer className="catalog-footer">
+          <span className="status-label">Data status</span>
           <span className="live-status"><i /> AUTO-UPDATING</span>
           <p>Source: National Weather Service<br />Forecast grids refresh every 15 minutes.</p>
         </footer>
