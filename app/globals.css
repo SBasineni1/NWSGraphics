@@ -183,7 +183,8 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
   margin-bottom: 9px;
 }
 .product-bar h3 { margin: 0; font-size: 20px; line-height: 1.05; font-weight: 570; letter-spacing: -.045em; }
-.product-bar button {
+.product-bar button,
+.product-bar a {
   flex: 0 0 auto;
   padding: 4px 0;
   border: 0;
@@ -192,8 +193,10 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
   font: 600 12px var(--font-geist-sans), Arial, sans-serif;
   letter-spacing: -.025em;
   cursor: pointer;
+  text-decoration: none;
 }
-.product-bar button:hover { text-decoration: underline; text-underline-offset: 3px; }
+.product-bar button:hover,
+.product-bar a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .product-bar button:disabled { color: var(--faint); cursor: wait; }
 .forecast-canvas { display: block; width: 100%; height: auto; border: 1px solid var(--line-strong); background: #dfe8ee; }
 

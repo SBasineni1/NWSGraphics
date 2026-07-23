@@ -53,9 +53,14 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /15 \* 60 \* 1000/);
   assert.match(component, /const FORECAST_DAYS = \[0, 1, 2\]/);
   assert.match(component, /const \[dayIndex, setDayIndex\] = useState\(0\)/);
+  assert.match(component, /NEXT_PUBLIC_FORECAST_ASSET_BASE_URL/);
+  assert.match(component, /latest\.json\?ts=/);
+  assert.match(component, /PublishedForecastPlot/);
+  assert.match(component, /data-render-state=/);
+  assert.match(component, /data-product-file=/);
   assert.match(component, /Maximum Temperature/);
   assert.match(component, /Maximum Wind Gust/);
-  assert.match(component, /Maximum Probability of Precipitation/);
+  assert.match(component, /Maximum POP %/);
   assert.match(component, /Total Precipitation Forecast/);
   assert.match(component, /Download PNG/);
   assert.match(component, /PRODUCT_GROUPS/);
@@ -81,6 +86,26 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /rastertiles\/voyager/);
   assert.match(component, /counties\.geojson/);
   assert.match(component, /item\.label/);
+});
+
+test("publishes changed forecast canvases on the issuance-aware schedule", async () => {
+  const [publisher, workflow] = await Promise.all([
+    readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../.github/workflows/publish-forecast-plots.yml", import.meta.url), "utf8"),
+  ]);
+  assert.match(publisher, /previous\?\.updatedAt === forecast\.updatedAt/);
+  assert.match(publisher, /previous\?\.sourceRevision === sourceRevision/);
+  assert.match(publisher, /dataset\.renderState === "ready"/);
+  assert.match(publisher, /preview\.width = 900/);
+  assert.match(publisher, /width: 1800/);
+  assert.match(publisher, /releases\/\$\{id\}\/day-/);
+  assert.match(publisher, /publishObject\("latest\.json"/);
+  assert.match(workflow, /cron: "27 \* \* \* \*"/);
+  assert.match(workflow, /cron: "5,15,25,35,45,55 3,15 \* \* \*"/);
+  assert.match(workflow, /timezone: "America\/New_York"/);
+  assert.match(workflow, /workflow_dispatch/);
+  assert.match(workflow, /R2_PUBLIC_BASE_URL/);
+  assert.match(workflow, /cancel-in-progress: false/);
 });
 
 test("uses the official PHI County Warning Area boundary", async () => {

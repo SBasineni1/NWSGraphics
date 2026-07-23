@@ -1,98 +1,107 @@
-# vinext-starter
+# PHI Forecast Graphics
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+Publication-ready forecast graphics for the National Weather Service
+Philadelphia / Mount Holly forecast area. The site uses official
+`api.weather.gov` grid data and produces three forecast days for every product.
 
-## Prerequisites
+## Local development
 
-- Node.js `>=22.13.0`
-
-## Quick Start
+Requires Node.js 22 or newer.
 
 ```bash
 npm install
 npm run dev
-npm run build
+npm test
 ```
 
-This starter does not use `wrangler.jsonc`.
+Without a published-image URL, the site uses its built-in live canvas renderer.
+That fallback keeps local development and unconfigured deployments functional.
 
-## Included Shape
+## Scheduled image publication
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+The workflow at `.github/workflows/publish-forecast-plots.yml`:
 
-## Workspace Auth Headers
+1. Checks once an hour throughout the day.
+2. Checks every ten minutes from 2:45–4:25 AM and PM in
+   `America/New_York`.
+3. Reads the NWS `updateTime` before doing expensive work.
+4. Skips publication when both the forecast and source revision are unchanged.
+5. Generates a 900×760 web preview and 1800×1520 download for every product
+   across all three days.
+6. Uploads immutable, versioned PNGs and replaces `latest.json` only after the
+   full release succeeds.
 
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
+The workflow can also be run manually from GitHub Actions. Select **force** to
+republish an unchanged forecast.
 
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
+### One-time Cloudflare R2 setup
 
-Treat the full name as optional and fall back to email when it is absent:
+Create a public R2 bucket and an R2 API token with object read/write access to
+that bucket. Add these GitHub repository settings:
 
-```tsx
-import { headers } from "next/headers";
+**Actions secrets**
 
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
+- `R2_ACCOUNT_ID`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
 
-  const displayName = fullName ?? email;
-  // ...
-}
+**Actions variables**
+
+- `R2_BUCKET` — the bucket name
+- `R2_PUBLIC_BASE_URL` — the public bucket or custom-domain URL, without a
+  trailing slash
+
+Until all five values exist, scheduled workflow runs exit successfully without
+publishing.
+
+Because the website fetches `latest.json` in the browser, allow `GET` and
+`HEAD` requests from the production website in the bucket CORS policy:
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://your-forecast-domain.example"],
+    "AllowedMethods": ["GET", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+An R2 lifecycle rule can remove objects under `releases/` after the desired
+history period. Keep `latest.json` excluded from that rule.
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+### Website configuration
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+Set this build-time environment variable on Vercel or another web host:
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+```bash
+NEXT_PUBLIC_FORECAST_ASSET_BASE_URL=https://your-public-r2-domain.example
+```
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+Redeploy after setting it. The frontend will then load pre-generated previews,
+lazy-load plots below the fold, and link downloads directly to the
+high-resolution PNGs. If R2 is temporarily unavailable, the live renderer
+remains available as a fallback.
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+### Local publisher test
 
-## Useful Commands
+Install the Playwright Chromium browser, start the site, and write a release to
+`outputs/forecast-publish` without uploading:
 
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
+```bash
+npx playwright install chromium
+PLOT_OUTPUT_ONLY=true npm run plots:publish
+```
 
-## Learn More
+The output directory is ignored by Git.
 
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+## Forecast-point maintenance
+
+`app/api/forecast/grid-points.json` contains the dense PHI sampling lattice.
+Rebuild it from the official CWA boundary with:
+
+```bash
+node scripts/build-grid-points.mjs
+```

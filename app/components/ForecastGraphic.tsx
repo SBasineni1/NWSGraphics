@@ -20,6 +20,25 @@ type ForecastPayload = {
   points: ForecastPoint[];
   failures: number;
 };
+type PublishedForecastAsset = {
+  preview: string;
+  download: string;
+  width: number;
+  height: number;
+};
+type PublishedForecastManifest = {
+  schemaVersion: 1;
+  releaseId: string;
+  updatedAt: string;
+  generatedAt: string;
+  sourceRevision: string;
+  days: Array<{
+    date: string;
+    label: string;
+    shortLabel: string;
+    products: Partial<Record<ProductId, PublishedForecastAsset>>;
+  }>;
+};
 type Boundary = {
   type: "FeatureCollection";
   features: Array<{
@@ -67,6 +86,7 @@ const RENDER_SCALE = 2;
 const PLOT_WIDTH = 900;
 const PLOT_HEIGHT = 760;
 const FORECAST_DAYS = [0, 1, 2];
+const PUBLISHED_ASSET_BASE_URL = (process.env.NEXT_PUBLIC_FORECAST_ASSET_BASE_URL ?? "").replace(/\/+$/, "");
 const PRODUCTS: ProductSpec[] = [
   {
     id: "apparentTemperature", title: "Maximum Apparent Temperature", nav: "Feels Like", group: "temperature", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0, verticalLegend: true,
@@ -81,7 +101,7 @@ const PRODUCTS: ProductSpec[] = [
     stops: [{ value: 0, color: "#f7fbff" }, { value: 10, color: "#c6dbef" }, { value: 20, color: "#6baed6" }, { value: 30, color: "#31a354" }, { value: 40, color: "#fed976" }, { value: 50, color: "#fd8d3c" }, { value: 60, color: "#e31a1c" }, { value: 70, color: "#800026" }],
   },
   {
-    id: "probabilityOfPrecipitation", title: "Maximum Probability of Precipitation", nav: "Rain Chance", group: "precipitation", legend: "PROBABILITY OF PRECIPITATION (%)", unit: "%", file: "max-pop", decimals: 0, fillAlpha: 235, verticalLegend: true,
+    id: "probabilityOfPrecipitation", title: "Maximum POP %", nav: "Rain Chance", group: "precipitation", legend: "PROBABILITY OF PRECIPITATION (%)", unit: "%", file: "max-pop", decimals: 0, fillAlpha: 235, verticalLegend: true,
     stops: [{ value: 0, color: "#ffffff" }, { value: 10, color: "#e5f5e0" }, { value: 20, color: "#a1d99b" }, { value: 40, color: "#41ab5d" }, { value: 60, color: "#2b8cbe" }, { value: 80, color: "#756bb1" }, { value: 100, color: "#54278f" }],
   },
   {
@@ -233,7 +253,7 @@ function loadTile(url: string) {
   return tileCache.get(url)!;
 }
 
-async function drawTiles(context: CanvasRenderingContext2D, extent: MapExtent, x: number, y: number, width: number, height: number) {
+async function drawTiles(context: CanvasRenderingContext2D, extent: MapExtent, x: number, y: number, width: number) {
   const firstX = Math.floor(extent.left / 256);
   const lastX = Math.floor(extent.right / 256);
   const firstY = Math.floor(extent.top / 256);
@@ -289,7 +309,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   const bounds = boundaryBounds(boundary);
   const extent = plotExtent(bounds, plot.width, plot.height);
   const projectPoint = (lon: number, lat: number) => project(lon, lat, extent, plot.x, plot.y, plot.width, plot.height);
-  await drawTiles(context, extent, plot.x, plot.y, plot.width, plot.height);
+  await drawTiles(context, extent, plot.x, plot.y, plot.width);
 
   context.save();
   context.beginPath();
@@ -471,24 +491,74 @@ function ForecastPlot({ spec, forecast, boundary, counties, states, interstates,
   }, [forecast, ready, spec, dayIndex]);
 
   return (
-    <article className="forecast-product" id={`product-${spec.id}`}>
+    <article className="forecast-product" id={`product-${spec.id}`} data-product-id={spec.id} data-product-file={spec.file}>
       <div className="product-bar">
         <h3>{spec.title}</h3>
         <button onClick={download} disabled={!ready}>{ready ? "Download PNG ↓" : "Rendering…"}</button>
       </div>
-      <canvas ref={canvas} className="forecast-canvas" role="img" aria-label={`${spec.title}, Day ${dayIndex + 1}, for the PHI forecast area`} />
+      <canvas
+        ref={canvas}
+        className="forecast-canvas"
+        role="img"
+        aria-label={`${spec.title}, Day ${dayIndex + 1}, for the PHI forecast area`}
+        data-product-id={spec.id}
+        data-product-file={spec.file}
+        data-day-index={dayIndex}
+        data-render-state={ready ? "ready" : "rendering"}
+      />
+    </article>
+  );
+}
+
+function publishedAssetUrl(path: string) {
+  return `${PUBLISHED_ASSET_BASE_URL}/${path.replace(/^\/+/, "")}`;
+}
+
+function PublishedForecastPlot({ spec, asset, dayIndex, eager }: { spec: ProductSpec; asset: PublishedForecastAsset; dayIndex: number; eager: boolean }) {
+  return (
+    <article className="forecast-product" id={`product-${spec.id}`} data-product-id={spec.id} data-product-file={spec.file}>
+      <div className="product-bar">
+        <h3>{spec.title}</h3>
+        <a href={publishedAssetUrl(asset.download)} download={`phi-${spec.file}-day-${dayIndex + 1}.png`}>Download PNG ↓</a>
+      </div>
+      {/* Direct CDN images avoid an image-proxy function and preserve the exact forecast PNG. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        className="forecast-canvas"
+        src={publishedAssetUrl(asset.preview)}
+        width={PLOT_WIDTH}
+        height={PLOT_HEIGHT}
+        loading={eager ? "eager" : "lazy"}
+        fetchPriority={eager ? "high" : "auto"}
+        alt={`${spec.title}, Day ${dayIndex + 1}, for the PHI forecast area`}
+      />
     </article>
   );
 }
 
 export function ForecastGraphic() {
   const [forecast, setForecast] = useState<ForecastPayload | null>(null);
+  const [publishedForecast, setPublishedForecast] = useState<PublishedForecastManifest | null>(null);
   const [boundary, setBoundary] = useState<Boundary | null>(null);
   const [counties, setCounties] = useState<CountyBoundaries | null>(null);
   const [states, setStates] = useState<CountyBoundaries | null>(null);
   const [interstates, setInterstates] = useState<LineFeatures | null>(null);
   const [dayIndex, setDayIndex] = useState(0);
   const [error, setError] = useState(false);
+  const loadPublishedForecast = useCallback(async () => {
+    if (!PUBLISHED_ASSET_BASE_URL) return false;
+    try {
+      const response = await fetch(`${PUBLISHED_ASSET_BASE_URL}/latest.json?ts=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) return false;
+      const manifest = await response.json() as PublishedForecastManifest;
+      if (manifest.schemaVersion !== 1 || manifest.days.length < FORECAST_DAYS.length) return false;
+      setPublishedForecast(manifest);
+      setError(false);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
   const loadData = useCallback(async () => {
     try {
       const [forecastResponse, boundaryResponse, countyResponse, stateResponse, interstateResponse] = await Promise.all([
@@ -510,11 +580,16 @@ export function ForecastGraphic() {
     }
   }, []);
   useEffect(() => {
-    void loadData();
-    const refresh = window.setInterval(loadData, 15 * 60 * 1000);
+    const refreshForecast = async () => {
+      const loadedPublishedForecast = await loadPublishedForecast();
+      if (!loadedPublishedForecast) await loadData();
+    };
+    void refreshForecast();
+    const refresh = window.setInterval(refreshForecast, 15 * 60 * 1000);
     return () => window.clearInterval(refresh);
-  }, [loadData]);
+  }, [loadData, loadPublishedForecast]);
   const availableProducts = useMemo(() => PRODUCTS, []);
+  const publishedDay = publishedForecast?.days[dayIndex];
   return (
     <main className="app-shell">
       <aside className="catalog-sidebar">
@@ -539,8 +614,8 @@ export function ForecastGraphic() {
         </nav>
         <footer className="catalog-footer">
           <span className="status-label">Data status</span>
-          <span className="live-status"><i /> AUTO-UPDATING</span>
-          <p>Source: National Weather Service<br />Forecast grids refresh every 15 minutes.</p>
+          <span className="live-status"><i /> {publishedForecast ? "PUBLISHED IMAGES" : "AUTO-UPDATING"}</span>
+          <p>Source: National Weather Service<br />Latest available forecast graphics.</p>
         </footer>
       </aside>
 
@@ -551,7 +626,7 @@ export function ForecastGraphic() {
             <i>/</i>
             <nav className="day-switcher" aria-label="Forecast day">
               {FORECAST_DAYS.map((index) => (
-                <button key={index} type="button" className={dayIndex === index ? "is-active" : ""} aria-pressed={dayIndex === index} onClick={() => setDayIndex(index)}>
+                <button key={index} type="button" data-day-index={index} className={dayIndex === index ? "is-active" : ""} aria-pressed={dayIndex === index} onClick={() => setDayIndex(index)}>
                   Day {index + 1}
                 </button>
               ))}
@@ -565,9 +640,17 @@ export function ForecastGraphic() {
             <h1>Day {dayIndex + 1} Forecast Graphics</h1>
           </header>
 
-          {!forecast && !error && <div className="gallery-message">Rendering the latest NWS forecast plots…</div>}
-          {error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
-          {forecast && boundary && counties && states && interstates && (
+          {!publishedForecast && !forecast && !error && <div className="gallery-message">Loading the latest NWS forecast plots…</div>}
+          {!publishedForecast && error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
+          {publishedDay && (
+            <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} published forecast plots`} data-forecast-source="published">
+              {availableProducts.map((spec, index) => {
+                const asset = publishedDay.products[spec.id];
+                return asset ? <PublishedForecastPlot key={spec.id} spec={spec} asset={asset} dayIndex={dayIndex} eager={index === 0} /> : null;
+              })}
+            </section>
+          )}
+          {!publishedForecast && forecast && boundary && counties && states && interstates && (
             <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} forecast plots`}>
               {availableProducts.map((spec) => (
                 <ForecastPlot key={spec.id} spec={spec} forecast={forecast} boundary={boundary} counties={counties} states={states} interstates={interstates} dayIndex={dayIndex} />
