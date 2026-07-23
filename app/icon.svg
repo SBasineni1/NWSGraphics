@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0a0b0d"/>
+  <path d="M10 17.5h44M10 46.5h44" stroke="#343941" stroke-width="1"/>
+  <path d="M15 12v40M49 12v40" stroke="#168cff" stroke-width="2"/>
+  <circle cx="49" cy="47" r="3.5" fill="#f05a16"/>
+  <text x="14" y="39" fill="#fff" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="700" letter-spacing="-1">PHI</text>
+</svg>

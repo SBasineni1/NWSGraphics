@@ -4,10 +4,21 @@ import "./globals.css";
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
+    metadataBase: new URL("https://nws-graphics.vercel.app"),
     title: "PHI Forecast Graphics | 3-Day Weather Forecasts",
     description: "Continuously updated Day 1–3 temperature, apparent temperature, wind gust, precipitation probability, and precipitation graphics for the PHI forecast area.",
-    openGraph: { title: "PHI Forecast Graphics", description: "Three-day graphics for the PHI forecast area." },
-    twitter: { card: "summary", title: "PHI Forecast Graphics", description: "Three-day graphics for the PHI forecast area." },
+    openGraph: {
+      title: "PHI Forecast Graphics",
+      description: "Three-day graphics for the PHI forecast area.",
+      type: "website",
+      siteName: "PHI Forecast Graphics",
+    },
+    twitter: {
+      card: "summary_large_image",
+      title: "PHI Forecast Graphics",
+      description: "Three-day graphics for the PHI forecast area.",
+      creator: "@suchit_wx",
+    },
   };
 }
 
