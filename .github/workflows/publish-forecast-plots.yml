@@ -1,0 +1,88 @@
+name: Publish forecast plots
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Regenerate even when the NWS update time is unchanged
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    # Normal monitoring: once per hour, away from the busiest top-of-hour window.
+    - cron: "27 * * * *"
+      timezone: "America/New_York"
+    # Higher-frequency checks around the normal 03–04 and 15–16 issuance windows.
+    - cron: "45,55 2,14 * * *"
+      timezone: "America/New_York"
+    - cron: "5,15,25,35,45,55 3,15 * * *"
+      timezone: "America/New_York"
+    - cron: "5,15,25 4,16 * * *"
+      timezone: "America/New_York"
+
+concurrency:
+  group: forecast-plot-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      FORCE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.force == true }}
+      PLOT_SITE_URL: http://127.0.0.1:3000
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+
+    steps:
+      - name: Check publication configuration
+        id: publication
+        shell: bash
+        run: |
+          if [[ -n "$R2_ACCOUNT_ID" && -n "$R2_ACCESS_KEY_ID" && -n "$R2_SECRET_ACCESS_KEY" && -n "$R2_BUCKET" && -n "$R2_PUBLIC_BASE_URL" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Forecast publication is waiting for the documented R2 secrets and variables."
+          fi
+
+      - name: Check out source
+        if: steps.publication.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        if: steps.publication.outputs.enabled == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.publication.outputs.enabled == 'true'
+        run: npm ci
+
+      - name: Install Chromium
+        if: steps.publication.outputs.enabled == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Start forecast site
+        if: steps.publication.outputs.enabled == 'true'
+        run: |
+          npm run dev -- --host 127.0.0.1 --port 3000 > /tmp/phi-forecast-site.log 2>&1 &
+          for attempt in {1..90}; do
+            if curl --fail --silent http://127.0.0.1:3000/ > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/phi-forecast-site.log
+          exit 1
+
+      - name: Publish changed forecast plots
+        if: steps.publication.outputs.enabled == 'true'
+        run: npm run plots:publish
