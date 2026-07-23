@@ -121,7 +121,7 @@ export async function GET() {
   const now = new Date();
   const today = easternDate(now);
   const [year, month, day] = today.split("-").map(Number);
-  const dates = Array.from({ length: 4 }, (_, index) => easternDate(new Date(Date.UTC(year, month - 1, day + index, 16))));
+  const dates = Array.from({ length: 3 }, (_, index) => easternDate(new Date(Date.UTC(year, month - 1, day + index, 16))));
   const results: PromiseSettledResult<Awaited<ReturnType<typeof fetchLocation>>>[] = [];
   // Keep pressure on api.weather.gov modest; small batches are more reliable
   // than opening every PHI grid-cell request at once.

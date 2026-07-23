@@ -64,10 +64,10 @@ type ProductSpec = {
   maskFar?: boolean;
 };
 
-const DAY = 0;
 const RENDER_SCALE = 2;
 const PLOT_WIDTH = 900;
 const PLOT_HEIGHT = 760;
+const FORECAST_DAYS = [0, 1, 2];
 const PRODUCTS: ProductSpec[] = [
   {
     id: "apparentTemperature", title: "Maximum Apparent Temperature", nav: "Feels Like", group: "temperature", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0, verticalLegend: true,
@@ -78,7 +78,7 @@ const PRODUCTS: ProductSpec[] = [
     stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
-    id: "windGust", title: "Maximum Wind Gust", nav: "Wind Gust", group: "wind", legend: "WIND GUST (MPH)", unit: " mph", file: "max-wind-gust", decimals: 0,
+    id: "windGust", title: "Maximum Wind Gust", nav: "Wind Gust", group: "wind", legend: "WIND GUST (MPH)", unit: " mph", file: "max-wind-gust", decimals: 0, verticalLegend: true,
     stops: [{ value: 0, color: "#f7fbff" }, { value: 10, color: "#c6dbef" }, { value: 20, color: "#6baed6" }, { value: 30, color: "#31a354" }, { value: 40, color: "#fed976" }, { value: 50, color: "#fd8d3c" }, { value: 60, color: "#e31a1c" }, { value: 70, color: "#800026" }],
   },
   {
@@ -86,7 +86,7 @@ const PRODUCTS: ProductSpec[] = [
     stops: [{ value: 0, color: "#ffffff" }, { value: 10, color: "#e5f5e0" }, { value: 20, color: "#a1d99b" }, { value: 40, color: "#41ab5d" }, { value: 60, color: "#2b8cbe" }, { value: 80, color: "#756bb1" }, { value: 100, color: "#54278f" }],
   },
   {
-    id: "quantitativePrecipitation", title: "Total Precipitation Forecast", nav: "Rainfall", group: "precipitation", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2, fillAlpha: 235, maskFar: true,
+    id: "quantitativePrecipitation", title: "Total Precipitation Forecast", nav: "Rainfall", group: "precipitation", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2, fillAlpha: 235, maskFar: true, verticalLegend: true,
     stops: [{ value: 0, color: "#ffffff" }, { value: 0.01, color: "#e5f5e0" }, { value: 0.1, color: "#a1d99b" }, { value: 0.25, color: "#41ab5d" }, { value: 0.5, color: "#ffffb2" }, { value: 1, color: "#fe9929" }, { value: 2, color: "#de2d26" }, { value: 3, color: "#756bb1" }],
   },
 ];
@@ -181,12 +181,12 @@ function colorFor(value: number, stops: ColorStop[]) {
   return a.map((channel, index) => Math.round(channel + (b[index] - channel) * amount));
 }
 
-function sampleField(points: ForecastPoint[], product: ProductId, lon: number, lat: number) {
+function sampleField(points: ForecastPoint[], product: ProductId, dayIndex: number, lon: number, lat: number) {
   let weighted = 0;
   let weights = 0;
   let nearestSquared = Infinity;
   for (const point of points) {
-    const value = point.metrics[product][DAY];
+    const value = point.metrics[product][dayIndex];
     if (value === null) continue;
     const dx = (lon - point.lon) * Math.cos(lat * Math.PI / 180);
     const dy = lat - point.lat;
@@ -243,7 +243,21 @@ function displayValue(value: number, spec: ProductSpec) {
   return `${value.toFixed(spec.decimals)}${spec.unit}`;
 }
 
-async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: ProductSpec) {
+function legendValue(value: number, spec: ProductSpec) {
+  if (spec.id === "apparentTemperature" || spec.id === "temperature") return `${value}°`;
+  if (spec.id === "quantitativePrecipitation") return value < 0.1 && value > 0 ? value.toFixed(2) : String(value);
+  return String(value);
+}
+
+function outlinedText(context: CanvasRenderingContext2D, value: string, x: number, y: number, lineWidth = 3) {
+  context.strokeStyle = "rgba(15, 23, 42, 0.92)";
+  context.lineWidth = lineWidth;
+  context.strokeText(value, x, y);
+  context.fillStyle = "#ffffff";
+  context.fillText(value, x, y);
+}
+
+async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: ProductSpec, dayIndex: number) {
   const width = PLOT_WIDTH;
   const height = PLOT_HEIGHT;
   canvas.width = width * RENDER_SCALE;
@@ -283,7 +297,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   }
   context.setLineDash([]);
 
-  const points = forecast.points.filter((point) => point.metrics[spec.id][DAY] !== null);
+  const points = forecast.points.filter((point) => point.metrics[spec.id][dayIndex] !== null);
   const fillAlpha = spec.fillAlpha ?? 185;
   const raster = document.createElement("canvas");
   raster.width = PLOT_WIDTH;
@@ -295,7 +309,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
       const worldX = extent.left + x / (raster.width - 1) * (extent.right - extent.left);
       const worldY = extent.top + y / (raster.height - 1) * (extent.bottom - extent.top);
       const coordinate = inverseWorld(worldX, worldY, extent.zoom);
-      const sample = sampleField(points, spec.id, coordinate.lon, coordinate.lat);
+      const sample = sampleField(points, spec.id, dayIndex, coordinate.lon, coordinate.lat);
       const value = spec.maskFar ? sample.value * coverageFalloff(sample.nearest) : sample.value;
       const [red, green, blue] = colorFor(value, spec.stops);
       const offset = (y * raster.width + x) * 4;
@@ -328,7 +342,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
 
   context.textAlign = "center";
   for (const point of points.filter((item) => item.label)) {
-    const value = point.metrics[spec.id][DAY];
+    const value = point.metrics[spec.id][dayIndex];
     if (value === null) continue;
     const [x, y] = project(point.lon, point.lat, extent, plot.x, plot.y, plot.width, plot.height);
     const formatted = displayValue(value, spec);
@@ -358,8 +372,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     context.rotate(-Math.PI / 2);
     context.textAlign = "center";
     context.font = `600 12px ${PLOT_FONT_FAMILY}`;
-    context.fillStyle = "#0f172a";
-    context.fillText(spec.legend, 0, 0);
+    outlinedText(context, spec.legend, 0, 0, 3);
     context.restore();
     reversed.forEach((stop, index) => {
       context.fillStyle = stop.color;
@@ -375,16 +388,14 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     context.strokeRect(barX, barTop + arrow, barWidth, colorHeight);
     context.textAlign = "left";
     context.font = `600 11px ${PLOT_FONT_FAMILY}`;
-    context.fillStyle = "#0f172a";
-    reversed.forEach((stop, index) => context.fillText(`${stop.value}°`, barX + barWidth + 7, barTop + arrow + (index + 0.64) * bandHeight));
+    reversed.forEach((stop, index) => outlinedText(context, legendValue(stop.value, spec), barX + barWidth + 7, barTop + arrow + (index + 0.64) * bandHeight, 3));
   } else {
     const legendX = 26;
     const legendY = height - 78;
     const legendWidth = 300;
     context.textAlign = "left";
     context.font = `600 12px ${PLOT_FONT_FAMILY}`;
-    context.fillStyle = "#0f172a";
-    context.fillText(spec.legend, legendX, legendY - 9);
+    outlinedText(context, spec.legend, legendX, legendY - 9, 3);
     const gradient = context.createLinearGradient(legendX, 0, legendX + legendWidth, 0);
     spec.stops.forEach((stop, index) => gradient.addColorStop(index / (spec.stops.length - 1), stop.color));
     context.fillStyle = gradient;
@@ -393,8 +404,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     context.lineWidth = 1;
     context.strokeRect(legendX, legendY, legendWidth, 12);
     context.font = `600 11px ${PLOT_FONT_FAMILY}`;
-    context.fillStyle = "#0f172a";
-    spec.stops.forEach((stop, index) => context.fillText(String(stop.value), legendX + index / (spec.stops.length - 1) * legendWidth - 4, legendY + 25));
+    spec.stops.forEach((stop, index) => outlinedText(context, legendValue(stop.value, spec), legendX + index / (spec.stops.length - 1) * legendWidth - 4, legendY + 25, 3));
   }
 
   // Signature tag (bottom-right) — X logo + handle, no plate.
@@ -415,16 +425,16 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   context.textAlign = "left";
 }
 
-function ForecastPlot({ spec, forecast, boundary, counties, states, interstates }: { spec: ProductSpec; forecast: ForecastPayload; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures }) {
+function ForecastPlot({ spec, forecast, boundary, counties, states, interstates, dayIndex }: { spec: ProductSpec; forecast: ForecastPayload; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures; dayIndex: number }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [ready, setReady] = useState(false);
   useEffect(() => {
     if (!canvas.current) return;
     let active = true;
     setReady(false);
-    void renderPlot(canvas.current, forecast, boundary, counties, states, interstates, spec).then(() => { if (active) setReady(true); });
+    void renderPlot(canvas.current, forecast, boundary, counties, states, interstates, spec, dayIndex).then(() => { if (active) setReady(true); });
     return () => { active = false; };
-  }, [forecast, boundary, counties, states, interstates, spec]);
+  }, [forecast, boundary, counties, states, interstates, spec, dayIndex]);
 
   const download = useCallback(() => {
     if (!canvas.current || !ready) return;
@@ -432,11 +442,11 @@ function ForecastPlot({ spec, forecast, boundary, counties, states, interstates 
       if (!blob) return;
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
-      link.download = `phi-${spec.file}-${forecast.days[DAY]?.date || "day-1"}.png`;
+      link.download = `phi-${spec.file}-${forecast.days[dayIndex]?.date || `day-${dayIndex + 1}`}.png`;
       link.click();
       URL.revokeObjectURL(link.href);
     }, "image/png");
-  }, [forecast, ready, spec]);
+  }, [forecast, ready, spec, dayIndex]);
 
   return (
     <article className="forecast-product" id={`product-${spec.id}`}>
@@ -444,7 +454,7 @@ function ForecastPlot({ spec, forecast, boundary, counties, states, interstates 
         <h3>{spec.title}</h3>
         <button onClick={download} disabled={!ready}>{ready ? "Download PNG ↓" : "Rendering…"}</button>
       </div>
-      <canvas ref={canvas} className="forecast-canvas" role="img" aria-label={`${spec.title} forecast plot for the PHI forecast area`} />
+      <canvas ref={canvas} className="forecast-canvas" role="img" aria-label={`${spec.title}, Day ${dayIndex + 1}, for the PHI forecast area`} />
     </article>
   );
 }
@@ -455,6 +465,7 @@ export function ForecastGraphic() {
   const [counties, setCounties] = useState<CountyBoundaries | null>(null);
   const [states, setStates] = useState<CountyBoundaries | null>(null);
   const [interstates, setInterstates] = useState<LineFeatures | null>(null);
+  const [dayIndex, setDayIndex] = useState(0);
   const [error, setError] = useState(false);
   const loadData = useCallback(async () => {
     try {
@@ -513,21 +524,31 @@ export function ForecastGraphic() {
 
       <section className="catalog-workspace">
         <header className="workspace-topbar">
-          <div className="breadcrumbs"><span>Forecast catalogue</span><i>/</i><strong>Day 1</strong></div>
+          <div className="breadcrumbs">
+            <span>Forecast catalogue</span>
+            <i>/</i>
+            <nav className="day-switcher" aria-label="Forecast day">
+              {FORECAST_DAYS.map((index) => (
+                <button key={index} type="button" className={dayIndex === index ? "is-active" : ""} aria-pressed={dayIndex === index} onClick={() => setDayIndex(index)}>
+                  Day {index + 1}
+                </button>
+              ))}
+            </nav>
+          </div>
           <a href="https://api.weather.gov/" target="_blank" rel="noreferrer">NWS data source ↗</a>
         </header>
 
         <div className="workspace-content" id="overview">
           <header className="catalog-heading">
-            <h1>Day 1 Forecast Graphics</h1>
+            <h1>Day {dayIndex + 1} Forecast Graphics</h1>
           </header>
 
           {!forecast && !error && <div className="gallery-message">Rendering the latest NWS forecast plots…</div>}
           {error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
           {forecast && boundary && counties && states && interstates && (
-            <section className="forecast-gallery" aria-label="Day 1 forecast plots">
+            <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} forecast plots`}>
               {availableProducts.map((spec) => (
-                <ForecastPlot key={spec.id} spec={spec} forecast={forecast} boundary={boundary} counties={counties} states={states} interstates={interstates} />
+                <ForecastPlot key={spec.id} spec={spec} forecast={forecast} boundary={boundary} counties={counties} states={states} interstates={interstates} dayIndex={dayIndex} />
               ))}
             </section>
           )}

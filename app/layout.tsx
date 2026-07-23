@@ -4,10 +4,10 @@ import "./globals.css";
 
 export async function generateMetadata(): Promise<Metadata> {
   return {
-    title: "PHI Forecast Graphics | Day 1 Weather Forecasts",
-    description: "Continuously updated temperature, apparent temperature, wind gust, precipitation probability, and precipitation graphics for the PHI forecast area.",
-    openGraph: { title: "PHI Forecast Graphics", description: "Day 1 graphics for the PHI forecast area." },
-    twitter: { card: "summary", title: "PHI Forecast Graphics", description: "Day 1 graphics for the PHI forecast area." },
+    title: "PHI Forecast Graphics | 3-Day Weather Forecasts",
+    description: "Continuously updated Day 1–3 temperature, apparent temperature, wind gust, precipitation probability, and precipitation graphics for the PHI forecast area.",
+    openGraph: { title: "PHI Forecast Graphics", description: "Three-day graphics for the PHI forecast area." },
+    twitter: { card: "summary", title: "PHI Forecast Graphics", description: "Three-day graphics for the PHI forecast area." },
   };
 }
 

@@ -147,7 +147,19 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
 .breadcrumbs { display: flex; align-items: center; gap: 10px; font-size: 13px; letter-spacing: -.025em; }
 .breadcrumbs span { color: #a8a8a8; }
 .breadcrumbs i { color: #6d6d6d; font-style: normal; }
-.breadcrumbs strong { font-weight: 570; }
+.day-switcher { display: flex; align-items: center; gap: 14px; }
+.day-switcher button {
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  color: #717171;
+  font-size: 13px;
+  font-weight: 570;
+  letter-spacing: -.025em;
+  cursor: pointer;
+}
+.day-switcher button:hover { color: #bdbdbd; }
+.day-switcher button.is-active { color: #fff; }
 .workspace-topbar a { color: #fff; text-decoration: none; font-size: 12px; font-weight: 550; letter-spacing: -.025em; }
 .workspace-topbar a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
@@ -228,6 +240,9 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
   html { scroll-behavior: auto; }
   .workspace-topbar { padding: 0 16px; }
   .workspace-topbar a { display: none; }
+  .breadcrumbs { gap: 8px; }
+  .breadcrumbs > span { display: none; }
+  .day-switcher { gap: 16px; }
   .workspace-content { padding: 28px 12px 48px; }
   .catalog-heading { margin-bottom: 34px; }
   h1 { font-size: clamp(38px, 12vw, 54px); }

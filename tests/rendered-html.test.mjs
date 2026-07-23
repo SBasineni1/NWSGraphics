@@ -19,7 +19,9 @@ test("server-renders the PHI apparent-temperature product", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /PHI Forecast Graphics/);
-  assert.match(html, /Day 1 Forecast Graphics/);
+  assert.match(html, /Day (?:<!-- -->)?1(?:<!-- -->)? Forecast Graphics/);
+  assert.match(html, /Day (?:<!-- -->)?2/);
+  assert.match(html, /Day (?:<!-- -->)?3/);
   assert.match(html, /Forecast catalogue/);
   assert.match(html, /Temperature &amp; heat/);
   assert.match(html, /NWS data source/);
@@ -47,8 +49,10 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(route, /index \+= 12/);
   assert.match(route, /label: false/);
   assert.match(route, /Cache-Control/);
+  assert.match(route, /Array\.from\(\{ length: 3 \}/);
   assert.match(component, /15 \* 60 \* 1000/);
-  assert.match(component, /const DAY = 0/);
+  assert.match(component, /const FORECAST_DAYS = \[0, 1, 2\]/);
+  assert.match(component, /const \[dayIndex, setDayIndex\] = useState\(0\)/);
   assert.match(component, /Maximum Temperature/);
   assert.match(component, /Maximum Wind Gust/);
   assert.match(component, /Maximum Probability of Precipitation/);
@@ -64,6 +68,9 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /value: -50/);
   assert.match(component, /value: 120/);
   assert.match(component, /verticalLegend: true/);
+  assert.match(component, /id: "windGust"[^\n]*verticalLegend: true/);
+  assert.match(component, /id: "quantitativePrecipitation"[^\n]*verticalLegend: true/);
+  assert.match(component, /outlinedText/);
   assert.match(component, /traceCounties/);
   assert.match(component, /rastertiles\/voyager/);
   assert.match(component, /counties\.geojson/);
