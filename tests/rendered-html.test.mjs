@@ -56,6 +56,7 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /const \[dayIndex, setDayIndex\] = useState\(0\)/);
   assert.match(component, /NEXT_PUBLIC_FORECAST_ASSET_BASE_URL/);
   assert.match(component, /\/api\/published-forecast/);
+  assert.match(component, /\/api\/forecast-assets\//);
   assert.match(publishedRoute, /latest\.json/);
   assert.match(component, /PublishedForecastPlot/);
   assert.match(component, /data-render-state=/);

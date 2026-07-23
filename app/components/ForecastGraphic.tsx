@@ -511,7 +511,7 @@ function ForecastPlot({ spec, forecast, boundary, counties, states, interstates,
 }
 
 function publishedAssetUrl(path: string) {
-  return `${PUBLISHED_ASSET_BASE_URL}/${path.replace(/^\/+/, "")}`;
+  return `/api/forecast-assets/${path.replace(/^\/+/, "")}`;
 }
 
 function PublishedForecastPlot({ spec, asset, dayIndex, eager }: { spec: ProductSpec; asset: PublishedForecastAsset; dayIndex: number; eager: boolean }) {
