@@ -27,6 +27,15 @@ type Boundary = {
     properties: { wfo: string; cwa: string; citystate: string };
   }>;
 };
+type CountyBoundaries = {
+  type: "FeatureCollection";
+  features: Array<{
+    type: "Feature";
+    id?: string;
+    geometry: { type: "Polygon"; coordinates: number[][][] } | { type: "MultiPolygon"; coordinates: number[][][][] };
+    properties: Record<string, unknown>;
+  }>;
+};
 type Bounds = { west: number; south: number; east: number; north: number };
 type MapExtent = { left: number; top: number; right: number; bottom: number; zoom: number };
 type ColorStop = { value: number; color: string };
@@ -92,8 +101,8 @@ function plotExtent(bounds: Bounds, width: number, height: number, zoom = 7): Ma
   const bottomRight = worldPoint(bounds.east, bounds.south, zoom);
   const centerX = (topLeft.x + bottomRight.x) / 2;
   const centerY = (topLeft.y + bottomRight.y) / 2;
-  let spanX = (bottomRight.x - topLeft.x) * 1.1;
-  let spanY = (bottomRight.y - topLeft.y) * 1.08;
+  let spanX = (bottomRight.x - topLeft.x) * 1.02;
+  let spanY = (bottomRight.y - topLeft.y) * 1.03;
   if (spanX / spanY < width / height) spanX = spanY * width / height;
   else spanY = spanX * height / width;
   return { left: centerX - spanX / 2, right: centerX + spanX / 2, top: centerY - spanY / 2, bottom: centerY + spanY / 2, zoom };
@@ -113,6 +122,22 @@ function traceBoundary(context: CanvasRenderingContext2D, boundary: Boundary, pr
         if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
       });
       context.closePath();
+    }
+  }
+}
+
+function traceCounties(context: CanvasRenderingContext2D, counties: CountyBoundaries, projectPoint: (lon: number, lat: number) => [number, number]) {
+  context.beginPath();
+  for (const feature of counties.features) {
+    const polygons = feature.geometry.type === "Polygon" ? [feature.geometry.coordinates] : feature.geometry.coordinates;
+    for (const polygon of polygons) {
+      for (const ring of polygon) {
+        ring.forEach((position, index) => {
+          const [x, y] = projectPoint(position[0], position[1]);
+          if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+        });
+        context.closePath();
+      }
     }
   }
 }
@@ -169,7 +194,7 @@ async function drawTiles(context: CanvasRenderingContext2D, extent: MapExtent, x
   await Promise.all(Array.from({ length: lastX - firstX + 1 }, (_, xi) => firstX + xi).flatMap((tileX) =>
     Array.from({ length: lastY - firstY + 1 }, (_, yi) => firstY + yi).map(async (tileY) => {
       try {
-        const url = `https://a.basemaps.cartocdn.com/light_all/${extent.zoom}/${tileX}/${tileY}.png`;
+        const url = `https://a.basemaps.cartocdn.com/rastertiles/voyager/${extent.zoom}/${tileX}/${tileY}@2x.png`;
         const bitmap = await loadTile(url);
         context.drawImage(bitmap, x + (tileX * 256 - extent.left) * scale, y + (tileY * 256 - extent.top) * scale, 256 * scale, 256 * scale);
       } catch {
@@ -188,26 +213,26 @@ function displayValue(value: number, spec: ProductSpec) {
   return `${value.toFixed(spec.decimals)}${spec.unit}`;
 }
 
-async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, spec: ProductSpec) {
-  const width = 1200;
-  const height = 800;
+async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, spec: ProductSpec) {
+  const width = 900;
+  const height = 760;
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d")!;
   context.fillStyle = "#ffffff";
   context.fillRect(0, 0, width, height);
-  context.fillStyle = "#111827";
-  context.font = "700 29px Arial, sans-serif";
-  context.fillText(spec.title, 30, 37);
+  context.fillStyle = "#0f172a";
+  context.font = "700 25px Arial, sans-serif";
+  context.fillText(spec.title, 24, 33);
   context.textAlign = "right";
-  context.font = "700 16px Arial, sans-serif";
-  context.fillText(forecast.days[DAY]?.label ?? "Day 1", 1170, 29);
+  context.font = "700 14px Arial, sans-serif";
+  context.fillText(forecast.days[DAY]?.label ?? "Day 1", 876, 25);
   context.font = "12px Arial, sans-serif";
-  context.fillStyle = "#4b5563";
-  context.fillText(`NWS issued ${formatTime(forecast.updatedAt || forecast.generatedAt)}`, 1170, 49);
+  context.fillStyle = "#64748b";
+  context.fillText(`NWS issued ${formatTime(forecast.updatedAt || forecast.generatedAt)}`, 876, 44);
   context.textAlign = "left";
 
-  const plot = { x: 30, y: 65, width: 1140, height: 670 };
+  const plot = { x: 24, y: 56, width: 852, height: 650 };
   context.fillStyle = "#e6f1f5";
   context.fillRect(plot.x, plot.y, plot.width, plot.height);
   const bounds = boundaryBounds(boundary);
@@ -218,6 +243,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   context.beginPath();
   context.rect(plot.x, plot.y, plot.width, plot.height);
   context.clip();
+
   context.strokeStyle = "#64748b";
   context.lineWidth = 0.8;
   context.setLineDash([2, 4]);
@@ -236,7 +262,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   const points = forecast.points.filter((point) => point.metrics[spec.id][DAY] !== null);
   const raster = document.createElement("canvas");
   raster.width = 760;
-  raster.height = 450;
+  raster.height = 640;
   const rasterContext = raster.getContext("2d")!;
   const image = rasterContext.createImageData(raster.width, raster.height);
   for (let y = 0; y < raster.height; y += 1) {
@@ -249,22 +275,20 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
       image.data[offset] = red;
       image.data[offset + 1] = green;
       image.data[offset + 2] = blue;
-      image.data[offset + 3] = 210;
+      image.data[offset + 3] = 185;
     }
   }
   rasterContext.putImageData(image, 0, 0);
-  rasterContext.globalCompositeOperation = "destination-in";
-  traceBoundary(rasterContext, boundary, (lon, lat) => {
-    const point = worldPoint(lon, lat, extent.zoom);
-    return [(point.x - extent.left) / (extent.right - extent.left) * raster.width, (point.y - extent.top) / (extent.bottom - extent.top) * raster.height];
-  });
-  rasterContext.fillStyle = "#fff";
-  rasterContext.fill("evenodd");
   context.drawImage(raster, plot.x, plot.y, plot.width, plot.height);
+
+  traceCounties(context, counties, (lon, lat) => project(lon, lat, extent, plot.x, plot.y, plot.width, plot.height));
+  context.strokeStyle = "#00000033";
+  context.lineWidth = 0.8;
+  context.stroke();
 
   traceBoundary(context, boundary, (lon, lat) => project(lon, lat, extent, plot.x, plot.y, plot.width, plot.height));
   context.strokeStyle = "#102a43";
-  context.lineWidth = 3;
+  context.lineWidth = 2.5;
   context.stroke();
   context.restore();
 
@@ -274,34 +298,34 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     if (value === null) continue;
     const [x, y] = project(point.lon, point.lat, extent, plot.x, plot.y, plot.width, plot.height);
     const formatted = displayValue(value, spec);
-    context.font = "700 15px Arial, sans-serif";
+    context.font = "700 14px Arial, sans-serif";
     context.fillStyle = "#ffffff";
     context.strokeStyle = "#111827";
     context.lineWidth = 4;
-    context.strokeText(formatted, x, y - 10);
-    context.fillText(formatted, x, y - 10);
-    context.beginPath(); context.arc(x, y, 3.5, 0, Math.PI * 2); context.fillStyle = "#dc2626"; context.fill(); context.strokeStyle = "#fff"; context.lineWidth = 1.5; context.stroke();
+    context.strokeText(formatted, x, y - 9);
+    context.fillText(formatted, x, y - 9);
+    context.beginPath(); context.arc(x, y, 3.2, 0, Math.PI * 2); context.fillStyle = "#dc2626"; context.fill(); context.strokeStyle = "#fff"; context.lineWidth = 1.5; context.stroke();
     context.font = "700 9px Arial, sans-serif";
     context.fillStyle = "#fff"; context.strokeStyle = "#111827"; context.lineWidth = 3;
-    context.strokeText(point.name, x, y + 13); context.fillText(point.name, x, y + 13);
+    context.strokeText(point.name, x, y + 12); context.fillText(point.name, x, y + 12);
   }
   context.textAlign = "left";
 
   if (spec.verticalLegend) {
-    const panelX = 43;
-    const panelY = 91;
-    const panelWidth = 110;
-    const panelHeight = 612;
-    const barX = 72;
-    const barY = 112;
-    const barWidth = 22;
-    const arrow = 10;
-    const colorHeight = 566;
+    const panelX = 36;
+    const panelY = 80;
+    const panelWidth = 98;
+    const panelHeight = 596;
+    const barX = 61;
+    const barY = 98;
+    const barWidth = 20;
+    const arrow = 9;
+    const colorHeight = 552;
     const bandHeight = colorHeight / spec.stops.length;
     context.fillStyle = "#ffffffe8";
     context.fillRect(panelX, panelY, panelWidth, panelHeight);
     context.save();
-    context.translate(57, panelY + panelHeight / 2);
+    context.translate(50, panelY + panelHeight / 2);
     context.rotate(-Math.PI / 2);
     context.textAlign = "center";
     context.fillStyle = "#111827";
@@ -321,46 +345,47 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     context.textAlign = "left";
     context.font = "700 9px Arial, sans-serif";
     context.fillStyle = "#111827";
-    reversed.forEach((stop, index) => context.fillText(`${stop.value}°`, barX + barWidth + 7, barY + arrow + (index + 0.64) * bandHeight));
+    reversed.forEach((stop, index) => context.fillText(`${stop.value}°`, barX + barWidth + 6, barY + arrow + (index + 0.64) * bandHeight));
   } else {
-    const legendX = 52;
-    const legendY = 675;
-    const legendWidth = 315;
+    const legendX = 46;
+    const legendY = 660;
+    const legendWidth = 300;
     context.fillStyle = "#ffffffdf";
-    context.fillRect(42, 627, 340, 88);
+    context.fillRect(36, 612, 326, 84);
     context.fillStyle = "#111827";
     context.font = "700 10px Arial, sans-serif";
-    context.fillText(spec.legend, legendX, 650);
+    context.fillText(spec.legend, legendX, 636);
     const gradient = context.createLinearGradient(legendX, 0, legendX + legendWidth, 0);
     spec.stops.forEach((stop, index) => gradient.addColorStop(index / (spec.stops.length - 1), stop.color));
     context.fillStyle = gradient;
     context.fillRect(legendX, legendY, legendWidth, 12);
     context.font = "9px Arial, sans-serif";
     context.fillStyle = "#111827";
-    spec.stops.forEach((stop, index) => context.fillText(String(stop.value), legendX + index / (spec.stops.length - 1) * legendWidth - 4, 700));
+    spec.stops.forEach((stop, index) => context.fillText(String(stop.value), legendX + index / (spec.stops.length - 1) * legendWidth - 4, 685));
   }
-  context.strokeStyle = "#111827";
+  context.strokeStyle = "#0f172a";
   context.lineWidth = 1.5;
   context.strokeRect(plot.x, plot.y, plot.width, plot.height);
 
-  context.fillStyle = "#4b5563";
+  context.fillStyle = "#64748b";
   context.font = "10px Arial, sans-serif";
-  context.fillText(`Forecast: NOAA / National Weather Service · ${points.length} PHI grid samples · Boundary: NWS CWA · Basemap: OpenStreetMap / CARTO`, 30, 763);
+  context.fillText(`Forecast: NOAA / NWS · ${points.length} PHI grid samples · Counties: US Census · Basemap: CARTO Voyager`, 24, 728);
   context.textAlign = "right";
   context.font = "700 10px Arial, sans-serif";
-  context.fillText("PHI FORECAST GRAPHICS", 1170, 763);
+  context.fillText("PHI FORECAST GRAPHICS", 876, 728);
+  context.textAlign = "left";
 }
 
-function ForecastPlot({ spec, forecast, boundary }: { spec: ProductSpec; forecast: ForecastPayload; boundary: Boundary }) {
+function ForecastPlot({ spec, forecast, boundary, counties }: { spec: ProductSpec; forecast: ForecastPayload; boundary: Boundary; counties: CountyBoundaries }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [ready, setReady] = useState(false);
   useEffect(() => {
     if (!canvas.current) return;
     let active = true;
     setReady(false);
-    void renderPlot(canvas.current, forecast, boundary, spec).then(() => { if (active) setReady(true); });
+    void renderPlot(canvas.current, forecast, boundary, counties, spec).then(() => { if (active) setReady(true); });
     return () => { active = false; };
-  }, [forecast, boundary, spec]);
+  }, [forecast, boundary, counties, spec]);
 
   const download = useCallback(() => {
     if (!canvas.current || !ready) return;
@@ -385,13 +410,19 @@ function ForecastPlot({ spec, forecast, boundary }: { spec: ProductSpec; forecas
 export function ForecastGraphic() {
   const [forecast, setForecast] = useState<ForecastPayload | null>(null);
   const [boundary, setBoundary] = useState<Boundary | null>(null);
+  const [counties, setCounties] = useState<CountyBoundaries | null>(null);
   const [error, setError] = useState(false);
   const loadData = useCallback(async () => {
     try {
-      const [forecastResponse, boundaryResponse] = await Promise.all([fetch("/api/forecast", { cache: "no-store" }), fetch("/phi-cwa.geojson")]);
-      if (!forecastResponse.ok || !boundaryResponse.ok) throw new Error("Data unavailable");
+      const [forecastResponse, boundaryResponse, countyResponse] = await Promise.all([
+        fetch("/api/forecast", { cache: "no-store" }),
+        fetch("/phi-cwa.geojson"),
+        fetch("/counties.geojson"),
+      ]);
+      if (!forecastResponse.ok || !boundaryResponse.ok || !countyResponse.ok) throw new Error("Data unavailable");
       setForecast(await forecastResponse.json() as ForecastPayload);
       setBoundary(await boundaryResponse.json() as Boundary);
+      setCounties(await countyResponse.json() as CountyBoundaries);
       setError(false);
     } catch {
       setError(true);
@@ -415,7 +446,7 @@ export function ForecastGraphic() {
       </header>
       {!forecast && !error && <div className="gallery-message">Rendering the latest NWS forecast plots…</div>}
       {error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
-      {forecast && boundary && <section className="forecast-gallery">{availableProducts.map((spec) => <ForecastPlot key={spec.id} spec={spec} forecast={forecast} boundary={boundary} />)}</section>}
+      {forecast && boundary && counties && <section className="forecast-gallery">{availableProducts.map((spec) => <ForecastPlot key={spec.id} spec={spec} forecast={forecast} boundary={boundary} counties={counties} />)}</section>}
     </main>
   );
 }
