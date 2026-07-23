@@ -26,6 +26,7 @@ test("server-renders the PHI apparent-temperature product", async () => {
   assert.match(html, />Menu</);
   assert.match(html, /\[5\]/);
   assert.match(html, /Data status/);
+  assert.doesNotMatch(html, /FORECAST AREA|VALID PERIOD|NWS ISSUED|All charts/);
   assert.doesNotMatch(html, /STATIC FORECAST|900 × 760 PNG|publication-ready/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
@@ -54,7 +55,7 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /Total Precipitation Forecast/);
   assert.match(component, /Download PNG/);
   assert.match(component, /PRODUCT_GROUPS/);
-  assert.match(component, /FORECAST AREA/);
+  assert.doesNotMatch(component, /FORECAST AREA|forecast-context|forecast-tabs|section-heading/);
   assert.doesNotMatch(component, /STATIC FORECAST/);
   assert.doesNotMatch(component, /product-meta/);
   assert.match(component, /const RENDER_SCALE = 2/);

@@ -91,10 +91,10 @@ const PRODUCTS: ProductSpec[] = [
   },
 ];
 
-const PRODUCT_GROUPS: Array<{ id: ProductGroupId; index: string; title: string }> = [
-  { id: "temperature", index: "01", title: "Temperature & heat" },
-  { id: "wind", index: "02", title: "Wind" },
-  { id: "precipitation", index: "03", title: "Precipitation" },
+const PRODUCT_GROUPS: Array<{ id: ProductGroupId; title: string }> = [
+  { id: "temperature", title: "Temperature & heat" },
+  { id: "wind", title: "Wind" },
+  { id: "precipitation", title: "Precipitation" },
 ];
 
 const tileCache = new Map<string, Promise<ImageBitmap>>();
@@ -237,11 +237,6 @@ async function drawTiles(context: CanvasRenderingContext2D, extent: MapExtent, x
       }
     }),
   ));
-}
-
-function formatTime(value: string) {
-  if (!value) return "Awaiting NWS update";
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short", timeZone: "America/New_York" }).format(new Date(value));
 }
 
 function displayValue(value: number, spec: ProductSpec) {
@@ -498,7 +493,7 @@ export function ForecastGraphic() {
           <p>Menu</p>
           <a className="is-active" href="#overview"><span>Overview</span><b>[5]</b></a>
           {PRODUCT_GROUPS.map((group) => (
-            <a key={group.id} href={`#${group.id}`}>
+            <a key={group.id} href={`#product-${availableProducts.find((product) => product.group === group.id)!.id}`}>
               <span>{group.title}</span>
               <b>[{availableProducts.filter((product) => product.group === group.id).length}]</b>
             </a>
@@ -522,38 +517,20 @@ export function ForecastGraphic() {
           <a href="https://api.weather.gov/" target="_blank" rel="noreferrer">NWS data source ↗</a>
         </header>
 
-        <div className="forecast-context" aria-label="Forecast context">
-          <div><span>FORECAST AREA</span><strong>PHI CWA</strong></div>
-          <div><span>FORECAST DAY</span><strong>{forecast?.days[DAY]?.shortLabel ?? "Day 1"}</strong></div>
-          <div><span>VALID PERIOD</span><strong>{forecast?.days[DAY]?.label ?? "Latest forecast"}</strong></div>
-          <div className="issued-context"><span>NWS ISSUED</span><strong>{formatTime(forecast?.updatedAt || forecast?.generatedAt || "")}</strong></div>
-        </div>
-
         <div className="workspace-content" id="overview">
           <header className="catalog-heading">
             <h1>Day 1 Forecast Graphics</h1>
           </header>
 
-          <nav className="forecast-tabs" aria-label="Forecast families">
-            <a className="is-active" href="#overview">All charts</a>
-            {PRODUCT_GROUPS.map((group) => <a key={group.id} href={`#${group.id}`}>{group.title}</a>)}
-          </nav>
-
           {!forecast && !error && <div className="gallery-message">Rendering the latest NWS forecast plots…</div>}
           {error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
-          {forecast && boundary && counties && states && interstates && PRODUCT_GROUPS.map((group) => (
-            <section className="product-section" id={group.id} key={group.id}>
-              <header className="section-heading">
-                <span>{group.index}</span>
-                <h2>{group.title}</h2>
-              </header>
-              <div className="forecast-gallery">
-                {availableProducts.filter((spec) => spec.group === group.id).map((spec) => (
-                  <ForecastPlot key={spec.id} spec={spec} forecast={forecast} boundary={boundary} counties={counties} states={states} interstates={interstates} />
-                ))}
-              </div>
+          {forecast && boundary && counties && states && interstates && (
+            <section className="forecast-gallery" aria-label="Day 1 forecast plots">
+              {availableProducts.map((spec) => (
+                <ForecastPlot key={spec.id} spec={spec} forecast={forecast} boundary={boundary} counties={counties} states={states} interstates={interstates} />
+              ))}
             </section>
-          ))}
+          )}
         </div>
       </section>
     </main>
