@@ -32,7 +32,7 @@ jobs:
       contents: read
     env:
       FORCE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.force == true }}
-      PLOT_SITE_URL: http://127.0.0.1:3000
+      PLOT_SITE_URL: http://localhost:3000
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -75,7 +75,7 @@ jobs:
         run: |
           npm run dev -- --host 127.0.0.1 --port 3000 > /tmp/phi-forecast-site.log 2>&1 &
           for attempt in {1..90}; do
-            if curl --fail --silent http://127.0.0.1:3000/ > /dev/null; then
+            if curl --fail --silent http://localhost:3000/ > /dev/null; then
               exit 0
             fi
             sleep 2
