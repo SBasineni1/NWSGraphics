@@ -20,10 +20,10 @@ test("server-renders the PHI apparent-temperature product", async () => {
   const html = await response.text();
   assert.match(html, /PHI Forecast Graphics/);
   assert.match(html, /Day 1 Forecast Graphics/);
-  assert.match(html, /Philadelphia \/ Mount Holly/);
   assert.match(html, /Forecast catalogue/);
   assert.match(html, /Temperature &amp; heat/);
   assert.match(html, /NWS data source/);
+  assert.doesNotMatch(html, /STATIC FORECAST|900 × 760 PNG|publication-ready/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
 
@@ -52,8 +52,11 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /Download PNG/);
   assert.match(component, /PRODUCT_GROUPS/);
   assert.match(component, /FORECAST AREA/);
-  assert.match(component, /STATIC FORECAST/);
-  assert.match(component, /const width = 900/);
+  assert.doesNotMatch(component, /STATIC FORECAST/);
+  assert.doesNotMatch(component, /product-meta/);
+  assert.match(component, /const RENDER_SCALE = 2/);
+  assert.match(component, /canvas\.width = width \* RENDER_SCALE/);
+  assert.match(component, /raster\.width = PLOT_WIDTH/);
   assert.match(component, /value: -50/);
   assert.match(component, /value: 120/);
   assert.match(component, /verticalLegend: true/);

@@ -54,7 +54,6 @@ type ProductSpec = {
   title: string;
   nav: string;
   group: ProductGroupId;
-  description: string;
   legend: string;
   unit: string;
   file: string;
@@ -66,33 +65,36 @@ type ProductSpec = {
 };
 
 const DAY = 0;
+const RENDER_SCALE = 2;
+const PLOT_WIDTH = 900;
+const PLOT_HEIGHT = 760;
 const PRODUCTS: ProductSpec[] = [
   {
-    id: "apparentTemperature", title: "Maximum Apparent Temperature", nav: "Feels Like", group: "temperature", description: "Daily peak heat index or wind chill from the NWS apparent temperature grid.", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0, verticalLegend: true,
+    id: "apparentTemperature", title: "Maximum Apparent Temperature", nav: "Feels Like", group: "temperature", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0, verticalLegend: true,
     stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
-    id: "temperature", title: "Maximum Temperature", nav: "Temperature", group: "temperature", description: "Daily maximum air temperature sampled across the Philadelphia / Mount Holly area.", legend: "TEMPERATURE (°F)", unit: "°", file: "max-temperature", decimals: 0, verticalLegend: true,
+    id: "temperature", title: "Maximum Temperature", nav: "Temperature", group: "temperature", legend: "TEMPERATURE (°F)", unit: "°", file: "max-temperature", decimals: 0, verticalLegend: true,
     stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
-    id: "windGust", title: "Maximum Wind Gust", nav: "Wind Gust", group: "wind", description: "Highest forecast wind gust for the day, shown in miles per hour.", legend: "WIND GUST (MPH)", unit: " mph", file: "max-wind-gust", decimals: 0,
+    id: "windGust", title: "Maximum Wind Gust", nav: "Wind Gust", group: "wind", legend: "WIND GUST (MPH)", unit: " mph", file: "max-wind-gust", decimals: 0,
     stops: [{ value: 0, color: "#f7fbff" }, { value: 10, color: "#c6dbef" }, { value: 20, color: "#6baed6" }, { value: 30, color: "#31a354" }, { value: 40, color: "#fed976" }, { value: 50, color: "#fd8d3c" }, { value: 60, color: "#e31a1c" }, { value: 70, color: "#800026" }],
   },
   {
-    id: "probabilityOfPrecipitation", title: "Maximum Probability of Precipitation", nav: "Rain Chance", group: "precipitation", description: "Highest daily chance of measurable precipitation from the NWS forecast grid.", legend: "PROBABILITY OF PRECIPITATION (%)", unit: "%", file: "max-pop", decimals: 0, fillAlpha: 235, maskFar: true,
+    id: "probabilityOfPrecipitation", title: "Maximum Probability of Precipitation", nav: "Rain Chance", group: "precipitation", legend: "PROBABILITY OF PRECIPITATION (%)", unit: "%", file: "max-pop", decimals: 0, fillAlpha: 235, maskFar: true,
     stops: [{ value: 0, color: "#ffffff" }, { value: 10, color: "#e5f5e0" }, { value: 20, color: "#a1d99b" }, { value: 40, color: "#41ab5d" }, { value: 60, color: "#2b8cbe" }, { value: 80, color: "#756bb1" }, { value: 100, color: "#54278f" }],
   },
   {
-    id: "quantitativePrecipitation", title: "Total Precipitation Forecast", nav: "Rainfall", group: "precipitation", description: "Day 1 liquid-equivalent precipitation total, shown in inches.", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2, fillAlpha: 235, maskFar: true,
+    id: "quantitativePrecipitation", title: "Total Precipitation Forecast", nav: "Rainfall", group: "precipitation", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2, fillAlpha: 235, maskFar: true,
     stops: [{ value: 0, color: "#ffffff" }, { value: 0.01, color: "#e5f5e0" }, { value: 0.1, color: "#a1d99b" }, { value: 0.25, color: "#41ab5d" }, { value: 0.5, color: "#ffffb2" }, { value: 1, color: "#fe9929" }, { value: 2, color: "#de2d26" }, { value: 3, color: "#756bb1" }],
   },
 ];
 
-const PRODUCT_GROUPS: Array<{ id: ProductGroupId; index: string; title: string; description: string }> = [
-  { id: "temperature", index: "01", title: "Temperature & heat", description: "Air temperature and human-perceived temperature guidance." },
-  { id: "wind", index: "02", title: "Wind", description: "Peak gust guidance for the full Day 1 forecast period." },
-  { id: "precipitation", index: "03", title: "Precipitation", description: "Probability and liquid-equivalent accumulation guidance." },
+const PRODUCT_GROUPS: Array<{ id: ProductGroupId; index: string; title: string }> = [
+  { id: "temperature", index: "01", title: "Temperature & heat" },
+  { id: "wind", index: "02", title: "Wind" },
+  { id: "precipitation", index: "03", title: "Precipitation" },
 ];
 
 const tileCache = new Map<string, Promise<ImageBitmap>>();
@@ -247,15 +249,18 @@ function displayValue(value: number, spec: ProductSpec) {
 }
 
 async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: ProductSpec) {
-  const width = 900;
-  const height = 760;
-  canvas.width = width;
-  canvas.height = height;
+  const width = PLOT_WIDTH;
+  const height = PLOT_HEIGHT;
+  canvas.width = width * RENDER_SCALE;
+  canvas.height = height * RENDER_SCALE;
   const context = canvas.getContext("2d")!;
+  context.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
   context.lineJoin = "round";
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
   if (document.fonts?.ready) await document.fonts.ready;
 
-  // Map fills the entire canvas edge-to-edge — the card header carries the title.
+  // Work in logical pixels while the backing canvas renders at 2× resolution.
   const plot = { x: 0, y: 0, width, height };
   context.fillStyle = "#dfe8ee";
   context.fillRect(plot.x, plot.y, plot.width, plot.height);
@@ -286,8 +291,8 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   const points = forecast.points.filter((point) => point.metrics[spec.id][DAY] !== null);
   const fillAlpha = spec.fillAlpha ?? 185;
   const raster = document.createElement("canvas");
-  raster.width = 760;
-  raster.height = 640;
+  raster.width = PLOT_WIDTH;
+  raster.height = PLOT_HEIGHT;
   const rasterContext = raster.getContext("2d")!;
   const image = rasterContext.createImageData(raster.width, raster.height);
   for (let y = 0; y < raster.height; y += 1) {
@@ -441,15 +446,10 @@ function ForecastPlot({ spec, forecast, boundary, counties, states, interstates 
   return (
     <article className="forecast-product" id={`product-${spec.id}`}>
       <div className="product-bar">
-        <div className="product-heading">
-          <span>DAY 1 · STATIC FORECAST</span>
-          <strong>{spec.title}</strong>
-          <p>{spec.description}</p>
-        </div>
+        <h3>{spec.title}</h3>
         <button onClick={download} disabled={!ready}>{ready ? "Download PNG ↓" : "Rendering…"}</button>
       </div>
-      <canvas ref={canvas} className="forecast-canvas" role="img" aria-label={`${spec.title} forecast plot for the NWS Philadelphia and Mount Holly forecast area`} />
-      <footer className="product-meta"><span>PHI CWA</span><span>900 × 760 PNG</span><span>NWS GRID DATA</span></footer>
+      <canvas ref={canvas} className="forecast-canvas" role="img" aria-label={`${spec.title} forecast plot for the PHI forecast area`} />
     </article>
   );
 }
@@ -492,7 +492,7 @@ export function ForecastGraphic() {
       <aside className="catalog-sidebar">
         <a className="catalog-brand" href="https://www.weather.gov/phi/" target="_blank" rel="noreferrer">
           <span className="brand-mark">PHI</span>
-          <span><strong>Forecast Graphics</strong><small>Philadelphia / Mount Holly</small></span>
+          <span><strong>Forecast Graphics</strong></span>
         </a>
         <nav className="catalog-nav" aria-label="Forecast product catalogue">
           <p>FORECAST PRODUCTS</p>
@@ -522,21 +522,15 @@ export function ForecastGraphic() {
         </header>
 
         <div className="forecast-context" aria-label="Forecast context">
-          <div><span>FORECAST AREA</span><strong>PHI · Mount Holly</strong></div>
+          <div><span>FORECAST AREA</span><strong>PHI CWA</strong></div>
           <div><span>FORECAST DAY</span><strong>{forecast?.days[DAY]?.shortLabel ?? "Day 1"}</strong></div>
           <div><span>VALID PERIOD</span><strong>{forecast?.days[DAY]?.label ?? "Latest forecast"}</strong></div>
-          <div><span>GRID COVERAGE</span><strong>{forecast ? `${forecast.points.length} points` : "Loading…"}</strong></div>
           <div className="issued-context"><span>NWS ISSUED</span><strong>{formatTime(forecast?.updatedAt || forecast?.generatedAt || "")}</strong></div>
         </div>
 
         <div className="workspace-content" id="overview">
           <header className="catalog-heading">
-            <div>
-              <p>PHILADELPHIA / MOUNT HOLLY</p>
-              <h1>Day 1 Forecast Graphics</h1>
-              <span>Clean, publication-ready weather maps built from the latest NWS forecast grids.</span>
-            </div>
-            <div className="catalog-summary"><strong>5</strong><span>forecast<br />products</span></div>
+            <h1>Day 1 Forecast Graphics</h1>
           </header>
 
           <nav className="forecast-tabs" aria-label="Forecast families">
@@ -550,7 +544,7 @@ export function ForecastGraphic() {
             <section className="product-section" id={group.id} key={group.id}>
               <header className="section-heading">
                 <span>{group.index}</span>
-                <div><h2>{group.title}</h2><p>{group.description}</p></div>
+                <h2>{group.title}</h2>
               </header>
               <div className="forecast-gallery">
                 {availableProducts.filter((spec) => spec.group === group.id).map((spec) => (
