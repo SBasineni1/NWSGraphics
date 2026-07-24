@@ -75,10 +75,32 @@ Because the website fetches `latest.json` in the browser, allow `GET` and
 ]
 ```
 
-The publisher prunes release prefixes older than `RELEASE_RETENTION_DAYS`
-(default 7) after each successful publish, so no R2 lifecycle rule is required.
-Set the repository variable to override it, or to `0` to disable pruning and
-keep every release. `latest.json` is never pruned.
+After each successful publish the publisher keeps only the newest
+`RELEASE_RETENTION_COUNT` releases (default **1**) and deletes the rest, so no
+R2 lifecycle rule is required. Set the repository variable to override it, or
+to `0` to disable pruning. `latest.json` is never pruned, and the release just
+written is always kept.
+
+Retention is a **count, not an age**, because age doesn't bound storage — the
+number of publishes per day depends on how often NWS revises the forecast. A
+count gives a hard ceiling:
+
+| Releases kept | Storage |
+| --- | --- |
+| 1 (default) | ~174 MB |
+| 3 | ~522 MB |
+| 10 | ~1.7 GB |
+
+One release is ~174 MB: 60 canvases (4 offices × 3 days × 5 products) written
+as 120 PNGs, since each is stored at full resolution for download (~127 MB
+total) and downscaled for display (~47 MB). R2's free tier allows 10 GB-month,
+so the default uses under 2% of it.
+
+Keeping a single release means a browser holding a manifest from before the
+last publish points at deleted objects. The page handles that: a failed image
+triggers a throttled manifest re-fetch (at most one per 30 seconds) rather than
+staying broken until the next scheduled refresh. Raise the count to 2 or more
+if you would rather have a real grace window.
 
 ### Website configuration
 

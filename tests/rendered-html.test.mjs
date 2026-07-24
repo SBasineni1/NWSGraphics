@@ -69,7 +69,8 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /Maximum Wind Gust/);
   assert.match(component, /Maximum POP %/);
   assert.match(component, /Total Precipitation Forecast/);
-  assert.match(component, /NWS ISSUED/);
+  // The graphic must name the issuing office, not just "NWS".
+  assert.match(component, /NWS \$\{office\} ISSUED/);
   assert.match(component, /12:00 AM–11:59 PM/);
   assert.match(component, /weather-mark-white\.png/);
   assert.match(component, /drawImage\(headerMark/);
@@ -180,14 +181,53 @@ test("publishes every office and prunes aged-out releases", async () => {
   assert.match(publisher, /ListObjectsV2Command/);
   assert.match(publisher, /DeleteObjectsCommand/);
   assert.match(publisher, /function pruneOldReleases/);
-  assert.match(publisher, /RELEASE_RETENTION_DAYS/);
-  // The release being published must never be a prune candidate.
-  assert.match(publisher, /release === id\) continue/);
-  // The client must refuse a manifest it doesn't understand.
-  assert.match(component, /manifest\.schemaVersion !== 2/);
-  assert.match(component, /publishedForecast\?\.offices\?\.\[office\.id\]\?\.days/);
-  // The asset path guard has to admit the office segment and nothing else.
-  assert.match(assetRoute, /releases\\\/\\d\{8\}T\\d\{6\}Z\\\/\[A-Z\]\{3\}\\\/day-\[1-3\]/);
+  // Retention is a count, not an age: publishes-per-day is set by NWS issuance
+  // frequency, so an age window doesn't bound storage. N releases does.
+  assert.match(publisher, /RELEASE_RETENTION_COUNT/);
+  assert.doesNotMatch(publisher, /RELEASE_RETENTION_DAYS/);
+  assert.match(publisher, /const keep = new Set\(\[id, \.\.\.ordered\.slice\(0, retentionCount\)\]\)/);
+  // Anything not shaped like a release id must never be a delete candidate.
+  assert.match(publisher, /if \(!release \|\| !releaseDate\(release\)\) continue/);
+  // Keeping only the newest release leaves no grace window for a stale manifest, so a
+  // failed image must trigger a throttled manifest refetch instead of staying broken
+  // until the next scheduled refresh.
+  assert.match(publisher, /retentionSetting \? Number\(retentionSetting\) : 1/);
+  assert.match(component, /onError=\{onAssetMissing\}/);
+  assert.match(component, /function recoverFromMissingAsset|const recoverFromMissingAsset/);
+  assert.match(component, /lastManifestRecovery\.current < 30_000/);
+  assert.match(component, /\}, \[manifestNonce\]\)/);
+  // A v1 manifest must keep serving PHI rather than dropping every visitor onto the
+  // live-canvas path while waiting for the first v2 publish. Deploying the client ahead
+  // of the publisher is the normal order, so this is the normal case, not an edge case.
+  assert.match(component, /function publishedDaysFor/);
+  assert.match(component, /manifest\.schemaVersion === 2/);
+  assert.match(component, /office === "PHI" \? manifest\.days : undefined/);
+  assert.match(component, /schemaVersion !== 1 && manifest\.schemaVersion !== 2/);
+  // The asset path guard admits both key shapes and nothing else.
+  assert.match(assetRoute, /\(\?:\[A-Z\]\{3\}\\\/\)\?day-\[1-3\]/);
+});
+
+test("resolves both published key shapes and rejects anything else", async () => {
+  const source = await readFile(new URL("../app/api/forecast-assets/[...path]/route.ts", import.meta.url), "utf8");
+  const pattern = new RegExp(/^releases\/\d{8}T\d{6}Z\/(?:[A-Z]{3}\/)?day-[1-3]\/[a-z][a-z-]*\.png$/);
+  // Guard against the literal in the route drifting from what this test asserts.
+  assert.ok(source.includes(pattern.source), "route regex no longer matches the tested pattern");
+  for (const key of [
+    "releases/20260724T205317Z/PHI/day-1/max-apparent-temperature.png",
+    "releases/20260724T205317Z/OKX/day-3/total-precipitation-preview.png",
+    "releases/20260724T205317Z/day-1/max-apparent-temperature.png",
+  ]) {
+    assert.ok(pattern.test(key), `expected ${key} to be served`);
+  }
+  for (const key of [
+    "releases/../../etc/passwd.png",
+    "releases/20260724T205317Z/phi/day-1/max-temperature.png",
+    "releases/20260724T205317Z/PHI/day-9/max-temperature.png",
+    "releases/20260724T205317Z/PHI/day-1/../../secret.png",
+    "latest.json",
+  ]) {
+    assert.ok(!pattern.test(key), `expected ${key} to be rejected`);
+  }
 });
 
 test("uses the official County Warning Area boundary for every office", async () => {

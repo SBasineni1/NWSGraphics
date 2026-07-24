@@ -12,10 +12,21 @@ const sourceRevision = process.env.GITHUB_SHA ?? "local";
 // Every covered office is baked each run. Change-detection keys off the first one.
 const OFFICES = ["PHI", "OKX", "CTP", "LWX"];
 // Releases are immutable and only the newest is ever referenced, so old ones are dead
-// weight — without pruning the bucket grows by roughly 150 MB per publish, forever.
-// An unset or blank variable means "use the default"; an explicit 0 disables pruning.
-const retentionSetting = process.env.RELEASE_RETENTION_DAYS?.trim();
-const retentionDays = retentionSetting ? Number(retentionSetting) : 7;
+// weight — without pruning the bucket grows by ~174 MB per publish, forever.
+//
+// Retention is a *count*, not an age, because age doesn't bound storage: the number of
+// publishes per day is driven by how often NWS revises the forecast, so a busy day can
+// multiply usage with the same age setting. Keeping N releases is a hard ceiling of
+// N × ~174 MB regardless of issuance frequency, which is what staying under a fixed
+// storage quota needs. An unset or blank variable means the default; 0 disables pruning.
+//
+// The default keeps only the release just published (~174 MB). That leaves no grace
+// window for a client still holding the previous manifest, so the page recovers by
+// re-fetching the manifest when a published image fails to load — see
+// ForecastGraphic.tsx. Raise this to 2+ if you would rather have the window than rely
+// on that recovery.
+const retentionSetting = process.env.RELEASE_RETENTION_COUNT?.trim();
+const retentionCount = retentionSetting ? Number(retentionSetting) : 1;
 
 function required(name) {
   const value = process.env[name];
@@ -227,14 +238,16 @@ await publishObject(`releases/${id}/manifest.json`, manifestBody, "application/j
 await publishObject("latest.json", manifestBody, "application/json", "no-store, max-age=0");
 
 /**
- * Drop releases older than the retention window. Runs only after latest.json points at
- * the new release, and never touches it — the window is far longer than the 15-minute
- * client refresh, so no viewer can be holding a manifest that references what we delete.
+ * Keep only the newest `retentionCount` releases. Runs after latest.json already points
+ * at the new release, and the release just written is always kept. Retaining more than
+ * one gives clients holding a stale manifest a grace window — they refresh every 15
+ * minutes, so with the default of 3 a viewer would have to be several publishes behind
+ * before an image 404s.
  */
 async function pruneOldReleases() {
-  if (outputOnly || !Number.isFinite(retentionDays) || retentionDays <= 0) return { pruned: 0, releases: 0 };
-  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  const expired = [];
+  if (outputOnly || !Number.isFinite(retentionCount) || retentionCount <= 0) return { pruned: 0, releases: 0, kept: 0 };
+
+  const keysByRelease = new Map();
   let continuationToken;
   do {
     const listing = await s3.send(new ListObjectsV2Command({
@@ -244,24 +257,30 @@ async function pruneOldReleases() {
     }));
     for (const object of listing.Contents ?? []) {
       const release = object.Key?.split("/")[1];
-      if (!release || release === id) continue;
-      const date = releaseDate(release);
-      if (date && date.valueOf() < cutoff) expired.push({ Key: object.Key });
+      // Ignore anything not shaped like a release id so a stray key is never deleted.
+      if (!release || !releaseDate(release)) continue;
+      if (!keysByRelease.has(release)) keysByRelease.set(release, []);
+      keysByRelease.get(release).push({ Key: object.Key });
     }
     continuationToken = listing.IsTruncated ? listing.NextContinuationToken : undefined;
   } while (continuationToken);
 
-  const releases = new Set(expired.map((object) => object.Key.split("/")[1]));
+  // Release ids are YYYYMMDDTHHMMSSZ, so a lexical sort is chronological.
+  const ordered = [...keysByRelease.keys()].sort().reverse();
+  const keep = new Set([id, ...ordered.slice(0, retentionCount)]);
+  const dropped = ordered.filter((release) => !keep.has(release));
+  const expired = dropped.flatMap((release) => keysByRelease.get(release));
+
   for (let index = 0; index < expired.length; index += 1000) {
     await s3.send(new DeleteObjectsCommand({
       Bucket: bucket,
       Delete: { Objects: expired.slice(index, index + 1000), Quiet: true },
     }));
   }
-  return { pruned: expired.length, releases: releases.size };
+  return { pruned: expired.length, releases: dropped.length, kept: keep.size };
 }
 
-let retention = { pruned: 0, releases: 0 };
+let retention = { pruned: 0, releases: 0, kept: 0 };
 try {
   retention = await pruneOldReleases();
 } catch (error) {
@@ -278,5 +297,6 @@ console.log(JSON.stringify({
   days: manifest.offices[OFFICES[0]]?.days.length ?? 0,
   prunedObjects: retention.pruned,
   prunedReleases: retention.releases,
+  retainedReleases: retention.kept,
   destination: outputOnly ? outputDirectory : publicBaseUrl,
 }));

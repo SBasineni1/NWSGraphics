@@ -35,14 +35,30 @@ type PublishedForecastDay = {
   shortLabel: string;
   products: Partial<Record<ProductId, PublishedForecastAsset>>;
 };
-type PublishedForecastManifest = {
-  schemaVersion: 2;
+type PublishedForecastManifestBase = {
   releaseId: string;
   updatedAt: string;
   generatedAt: string;
   sourceRevision: string;
+};
+// v1 predates multi-office support and only ever described PHI. It is still accepted so
+// that deploying a client ahead of the next publish run doesn't black out the published
+// images and drop every visitor onto the live-canvas path.
+type PublishedForecastManifestV1 = PublishedForecastManifestBase & {
+  schemaVersion: 1;
+  days: PublishedForecastDay[];
+};
+type PublishedForecastManifestV2 = PublishedForecastManifestBase & {
+  schemaVersion: 2;
   offices: Partial<Record<OfficeId, { days: PublishedForecastDay[] }>>;
 };
+type PublishedForecastManifest = PublishedForecastManifestV1 | PublishedForecastManifestV2;
+
+function publishedDaysFor(manifest: PublishedForecastManifest | null, office: OfficeId) {
+  if (!manifest) return undefined;
+  if (manifest.schemaVersion === 2) return manifest.offices?.[office]?.days;
+  return office === "PHI" ? manifest.days : undefined;
+}
 type Boundary = {
   type: "FeatureCollection";
   features: Array<{
@@ -328,6 +344,7 @@ function drawForecastHeader(
   spec: ProductSpec,
   dayIndex: number,
   headerMark: ImageBitmap | null,
+  office: OfficeId,
 ) {
   const day = forecast.days[dayIndex];
   const validDate = forecastDate(day.date);
@@ -375,7 +392,8 @@ function drawForecastHeader(
   context.font = `600 14px ${PLOT_FONT_FAMILY}`;
   context.fillText(`VALID  ${validLabel} · 12:00 AM–11:59 PM ${validZone}`, 24, 74);
   context.textAlign = "right";
-  context.fillText(`NWS ISSUED  ${issuedLabel}`, PLOT_WIDTH - 24, 74);
+  // Name the issuing office — with four of them, the graphic has to say whose it is.
+  context.fillText(`NWS ${office} ISSUED  ${issuedLabel}`, PLOT_WIDTH - 24, 74);
   context.textAlign = "left";
 }
 
@@ -593,7 +611,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   output.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
   output.imageSmoothingEnabled = true;
   output.imageSmoothingQuality = "high";
-  drawForecastHeader(output, forecast, spec, dayIndex, await loadHeaderMark());
+  drawForecastHeader(output, forecast, spec, dayIndex, await loadHeaderMark(), office);
   output.drawImage(mapCanvas, 0, HEADER_HEIGHT, width, height);
 }
 
@@ -645,7 +663,7 @@ function publishedAssetUrl(path: string) {
   return `/api/forecast-assets/${path.replace(/^\/+/, "")}`;
 }
 
-function PublishedForecastPlot({ spec, asset, dayIndex, eager, office }: { spec: ProductSpec; asset: PublishedForecastAsset; dayIndex: number; eager: boolean; office: Office }) {
+function PublishedForecastPlot({ spec, asset, dayIndex, eager, office, onAssetMissing }: { spec: ProductSpec; asset: PublishedForecastAsset; dayIndex: number; eager: boolean; office: Office; onAssetMissing: () => void }) {
   return (
     <article className="forecast-product" id={`product-${spec.id}`} data-product-id={spec.id} data-product-file={spec.file}>
       <div className="product-bar">
@@ -662,6 +680,10 @@ function PublishedForecastPlot({ spec, asset, dayIndex, eager, office }: { spec:
         loading={eager ? "eager" : "lazy"}
         fetchPriority={eager ? "high" : "auto"}
         alt={`${spec.title}, Day ${dayIndex + 1}, for the ${office.id} forecast area`}
+        // Retention keeps only the newest release, so a manifest that is a publish out
+        // of date points at deleted objects. Treat a failed image as "the manifest is
+        // stale" and pull a fresh one rather than waiting out the refresh interval.
+        onError={onAssetMissing}
       />
     </article>
   );
@@ -835,6 +857,20 @@ export function ForecastGraphic() {
   }, []);
 
   // One manifest covers every office, so it refreshes independently of the selection.
+  // `manifestNonce` lets a failed image force an off-schedule refresh.
+  const [manifestNonce, setManifestNonce] = useState(0);
+  const lastManifestRecovery = useRef(0);
+
+  // A broken published image almost always means the manifest is a publish behind and
+  // the release it names has been pruned. Throttled so an asset that is genuinely gone
+  // costs one refetch per 30s rather than a request per failed image.
+  const recoverFromMissingAsset = useCallback(() => {
+    const now = Date.now();
+    if (now - lastManifestRecovery.current < 30_000) return;
+    lastManifestRecovery.current = now;
+    setManifestNonce((value) => value + 1);
+  }, []);
+
   useEffect(() => {
     if (!PUBLISHED_ASSET_BASE_URL) return;
     let active = true;
@@ -843,7 +879,7 @@ export function ForecastGraphic() {
         const response = await fetch(`/api/published-forecast?ts=${Date.now()}`, { cache: "no-store" });
         if (!response.ok) return;
         const manifest = await response.json() as PublishedForecastManifest;
-        if (!active || manifest.schemaVersion !== 2) return;
+        if (!active || (manifest.schemaVersion !== 1 && manifest.schemaVersion !== 2)) return;
         setPublishedForecast(manifest);
       } catch {
         // The live canvas path stays available when the manifest can't be read.
@@ -852,9 +888,9 @@ export function ForecastGraphic() {
     void load();
     const refresh = window.setInterval(load, 15 * 60 * 1000);
     return () => { active = false; window.clearInterval(refresh); };
-  }, []);
+  }, [manifestNonce]);
 
-  const publishedDays = publishedForecast?.offices?.[office.id]?.days;
+  const publishedDays = publishedDaysFor(publishedForecast, office.id);
   const hasPublishedOffice = Boolean(publishedDays && publishedDays.length >= FORECAST_DAYS.length);
 
   // Only fetch live gridpoint data when this office has no published imagery to show.
@@ -934,7 +970,6 @@ export function ForecastGraphic() {
         <div className="workspace-content" id="overview">
           <header className="catalog-heading">
             <h1>Day {dayIndex + 1} Forecast Graphics</h1>
-            <p>{office.label} · NWS {office.city}, {office.state}</p>
           </header>
 
           {!hasPublishedOffice && !officeForecast && !error && <div className="gallery-message">Loading the latest NWS forecast plots…</div>}
@@ -943,7 +978,7 @@ export function ForecastGraphic() {
             <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} published forecast plots`} data-forecast-source="published" data-office={office.id}>
               {availableProducts.map((spec, index) => {
                 const asset = publishedDay.products[spec.id];
-                return asset ? <PublishedForecastPlot key={spec.id} spec={spec} asset={asset} dayIndex={dayIndex} eager={index === 0} office={office} /> : null;
+                return asset ? <PublishedForecastPlot key={spec.id} spec={spec} asset={asset} dayIndex={dayIndex} eager={index === 0} office={office} onAssetMissing={recoverFromMissingAsset} /> : null;
               })}
             </section>
           )}

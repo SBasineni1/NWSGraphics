@@ -15,9 +15,12 @@ export async function GET(
     );
   }
 
-  // Anchored to the exact key shape the publisher writes:
-  // releases/{releaseId}/{OFFICE}/day-{n}/{product}[-preview].png
-  const ASSET_KEY = /^releases\/\d{8}T\d{6}Z\/[A-Z]{3}\/day-[1-3]\/[a-z][a-z-]*\.png$/;
+  // Anchored to the key shapes the publisher writes. The office segment is optional so
+  // that v1 releases (which predate multi-office and have no office in the path) keep
+  // resolving until they age out of the retention window.
+  // v2: releases/{releaseId}/{OFFICE}/day-{n}/{product}[-preview].png
+  // v1: releases/{releaseId}/day-{n}/{product}[-preview].png
+  const ASSET_KEY = /^releases\/\d{8}T\d{6}Z\/(?:[A-Z]{3}\/)?day-[1-3]\/[a-z][a-z-]*\.png$/;
 
   const { path } = await context.params;
   const assetKey = path.join("/");

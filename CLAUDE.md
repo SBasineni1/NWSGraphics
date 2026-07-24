@@ -91,10 +91,22 @@ revision are unchanged unless `FORCE_PUBLISH=true`. Driven hourly (and every
 10 min in the early-AM/PM update windows) by
 `.github/workflows/publish-forecast-plots.yml`.
 
-After `latest.json` is written, `pruneOldReleases()` deletes release prefixes
-older than `RELEASE_RETENTION_DAYS` (default 7, `0` disables) and never the one
-just published. Without it the bucket grows ~150 MB per publish forever. A
-failed prune is logged and ignored — the release is already live.
+After `latest.json` is written, `pruneOldReleases()` keeps only the newest
+`RELEASE_RETENTION_COUNT` releases (**default 1**, `0` disables) and always keeps
+the one just published. Without it the bucket grows ~174 MB per publish forever.
+A failed prune is logged and ignored — the release is already live.
+
+**Retention is a count, not an age.** Publishes per day is driven by NWS
+issuance frequency, so an age window doesn't bound storage; N releases is a hard
+ceiling of N × ~174 MB. R2's free tier is 10 GB-month. Don't convert this back
+to a day-based window without recalculating against that quota.
+
+**The default of 1 leaves no grace window**, so a client holding a manifest from
+before the last publish references deleted objects. `PublishedForecastPlot`'s
+`onError` calls `recoverFromMissingAsset()`, which bumps `manifestNonce` to force
+an off-schedule manifest re-fetch, throttled to once per 30s so a genuinely
+missing asset can't spin. If you raise retention, keep that recovery — it also
+covers a publish landing mid-session.
 
 Local dry run: `PLOT_OUTPUT_ONLY=true npm run plots:publish` writes to
 `outputs/forecast-publish/` without uploading or pruning. See `README.md` for
