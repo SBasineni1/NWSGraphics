@@ -1,9 +1,11 @@
 import { writeFile } from "node:fs/promises";
 
 const SOURCE = "https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json";
-// State FIPS prefixes that intersect the render frame: NJ, PA, DE, MD, NY, VA.
-const STATES = new Set(["34", "42", "10", "24", "36", "51"]);
-const BBOX = { west: -77.5, east: -73.0, south: 37.8, north: 42.2 };
+// State FIPS prefixes that intersect the render frames of every covered office:
+// NJ, PA, DE, MD, NY, VA plus WV, CT, RI, MA and DC for the CTP/LWX/OKX frames.
+const STATES = new Set(["34", "42", "10", "24", "36", "51", "54", "09", "44", "25", "11"]);
+// Union of the four office render frames, rounded outward.
+const BBOX = { west: -80.0, east: -71.6, south: 37.1, north: 42.2 };
 
 function touchesBbox(coordinates) {
   const stack = [coordinates];

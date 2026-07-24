@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { PLOT_FONT_FAMILY } from "../fonts";
+import { DEFAULT_OFFICE, findOffice, REGIONS, type Office, type OfficeId } from "../offices";
+import { MAP_HEIGHT, PLOT_WIDTH, inverseWorld, plotExtent, project } from "../../lib/map-frame.mjs";
 
 type ProductId = "apparentTemperature" | "temperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
 type ForecastPoint = {
@@ -14,6 +16,7 @@ type ForecastPoint = {
   metrics: Record<ProductId, Array<number | null>>;
 };
 type ForecastPayload = {
+  office: OfficeId;
   generatedAt: string;
   updatedAt: string;
   days: Array<{ date: string; label: string; shortLabel: string }>;
@@ -26,24 +29,27 @@ type PublishedForecastAsset = {
   width: number;
   height: number;
 };
+type PublishedForecastDay = {
+  date: string;
+  label: string;
+  shortLabel: string;
+  products: Partial<Record<ProductId, PublishedForecastAsset>>;
+};
 type PublishedForecastManifest = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   releaseId: string;
   updatedAt: string;
   generatedAt: string;
   sourceRevision: string;
-  days: Array<{
-    date: string;
-    label: string;
-    shortLabel: string;
-    products: Partial<Record<ProductId, PublishedForecastAsset>>;
-  }>;
+  offices: Partial<Record<OfficeId, { days: PublishedForecastDay[] }>>;
 };
 type Boundary = {
   type: "FeatureCollection";
   features: Array<{
     type: "Feature";
-    geometry: { type: "MultiPolygon"; coordinates: number[][][][] };
+    geometry:
+      | { type: "Polygon"; coordinates: number[][][] }
+      | { type: "MultiPolygon"; coordinates: number[][][][] };
     properties: { wfo: string; cwa: string; citystate: string };
   }>;
 };
@@ -83,11 +89,14 @@ type ProductSpec = {
 };
 
 const RENDER_SCALE = 2;
-const PLOT_WIDTH = 900;
-const MAP_HEIGHT = 760;
 const HEADER_HEIGHT = 96;
 const PLOT_HEIGHT = HEADER_HEIGHT + MAP_HEIGHT;
 const FORECAST_DAYS = [0, 1, 2];
+// The interpolated field is smooth enough that evaluating it every fourth pixel and
+// interpolating between samples is visually identical to a per-pixel solve, for a
+// sixteenth of the work. Without this the regional point count makes rendering crawl.
+const FIELD_STRIDE = 4;
+const COLOR_LUT_SIZE = 1024;
 const PUBLISHED_ASSET_BASE_URL = (process.env.NEXT_PUBLIC_FORECAST_ASSET_BASE_URL ?? "").replace(/\/+$/, "");
 const PRODUCTS: ProductSpec[] = [
   {
@@ -130,41 +139,17 @@ function loadHeaderMark() {
   return headerMarkPromise;
 }
 
-function boundaryBounds(boundary: Boundary): Bounds {
-  const positions = boundary.features[0].geometry.coordinates.flat(2);
+/** Every map is framed on its own office's County Warning Area. */
+function officeFeature(boundary: Boundary, office: OfficeId) {
+  return boundary.features.find((feature) => feature.properties.cwa === office) ?? boundary.features[0];
+}
+
+function boundaryBounds(boundary: Boundary, office: OfficeId): Bounds {
+  const geometry = officeFeature(boundary, office).geometry;
+  const positions = (geometry.type === "Polygon" ? geometry.coordinates.flat(1) : geometry.coordinates.flat(2)) as number[][];
   const lons = positions.map((position) => position[0]);
   const lats = positions.map((position) => position[1]);
   return { west: Math.min(...lons), south: Math.min(...lats), east: Math.max(...lons), north: Math.max(...lats) };
-}
-
-function worldPoint(lon: number, lat: number, zoom: number) {
-  const scale = 256 * 2 ** zoom;
-  const sin = Math.sin(lat * Math.PI / 180);
-  return { x: ((lon + 180) / 360) * scale, y: (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale };
-}
-
-function inverseWorld(x: number, y: number, zoom: number) {
-  const scale = 256 * 2 ** zoom;
-  const lon = x / scale * 360 - 180;
-  const n = Math.PI - 2 * Math.PI * y / scale;
-  return { lon, lat: 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))) };
-}
-
-function plotExtent(bounds: Bounds, width: number, height: number, zoom = 7): MapExtent {
-  const topLeft = worldPoint(bounds.west, bounds.north, zoom);
-  const bottomRight = worldPoint(bounds.east, bounds.south, zoom);
-  const centerX = (topLeft.x + bottomRight.x) / 2;
-  const centerY = (topLeft.y + bottomRight.y) / 2;
-  let spanX = (bottomRight.x - topLeft.x) * 1.02;
-  let spanY = (bottomRight.y - topLeft.y) * 1.03;
-  if (spanX / spanY < width / height) spanX = spanY * width / height;
-  else spanY = spanX * height / width;
-  return { left: centerX - spanX / 2, right: centerX + spanX / 2, top: centerY - spanY / 2, bottom: centerY + spanY / 2, zoom };
-}
-
-function project(lon: number, lat: number, extent: MapExtent, x: number, y: number, width: number, height: number): [number, number] {
-  const point = worldPoint(lon, lat, extent.zoom);
-  return [x + (point.x - extent.left) / (extent.right - extent.left) * width, y + (point.y - extent.top) / (extent.bottom - extent.top) * height];
 }
 
 function traceCounties(context: CanvasRenderingContext2D, counties: CountyBoundaries, projectPoint: (lon: number, lat: number) => [number, number]) {
@@ -183,17 +168,18 @@ function traceCounties(context: CanvasRenderingContext2D, counties: CountyBounda
   }
 }
 
-function traceBoundary(context: CanvasRenderingContext2D, boundary: Boundary, projectPoint: (lon: number, lat: number) => [number, number]) {
+// The NWS source ships some CWAs as Polygon and others as MultiPolygon, so normalize.
+function traceBoundary(context: CanvasRenderingContext2D, boundary: Boundary, office: OfficeId, projectPoint: (lon: number, lat: number) => [number, number]) {
+  const geometry = officeFeature(boundary, office).geometry;
+  const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
   context.beginPath();
-  for (const feature of boundary.features) {
-    for (const polygon of feature.geometry.coordinates) {
-      for (const ring of polygon) {
-        ring.forEach((position, index) => {
-          const [x, y] = projectPoint(position[0], position[1]);
-          if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
-        });
-        context.closePath();
-      }
+  for (const polygon of polygons) {
+    for (const ring of polygon) {
+      ring.forEach((position, index) => {
+        const [x, y] = projectPoint(position[0], position[1]);
+        if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+      });
+      context.closePath();
     }
   }
 }
@@ -225,6 +211,29 @@ function colorFor(value: number, stops: ColorStop[]) {
   const a = hexToRgb(lower.color);
   const b = hexToRgb(upper.color);
   return a.map((channel, index) => Math.round(channel + (b[index] - channel) * amount));
+}
+
+// `colorFor` re-parses hex strings on every call, which is far too slow to run once per
+// pixel. Bake it into a ramp instead. The stops are not evenly spaced (QPF runs 0, 0.01,
+// 0.1, 0.25, 0.5, 1, 2, 3), so each entry has to come from `colorFor` itself rather than
+// from walking between stops at uniform intervals.
+const colorRamps = new WeakMap<ColorStop[], { table: Uint8ClampedArray; min: number; span: number }>();
+
+function colorRamp(stops: ColorStop[]) {
+  const cached = colorRamps.get(stops);
+  if (cached) return cached;
+  const min = stops[0].value;
+  const span = stops.at(-1)!.value - min;
+  const table = new Uint8ClampedArray(COLOR_LUT_SIZE * 3);
+  for (let index = 0; index < COLOR_LUT_SIZE; index += 1) {
+    const [red, green, blue] = colorFor(min + span * (index / (COLOR_LUT_SIZE - 1)), stops);
+    table[index * 3] = red;
+    table[index * 3 + 1] = green;
+    table[index * 3 + 2] = blue;
+  }
+  const ramp = { table, min, span };
+  colorRamps.set(stops, ramp);
+  return ramp;
 }
 
 function sampleField(points: ForecastPoint[], product: ProductId, dayIndex: number, lon: number, lat: number) {
@@ -370,7 +379,7 @@ function drawForecastHeader(
   context.textAlign = "left";
 }
 
-async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: ProductSpec, dayIndex: number) {
+async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: ProductSpec, dayIndex: number, office: OfficeId) {
   const width = PLOT_WIDTH;
   const height = MAP_HEIGHT;
   const mapCanvas = document.createElement("canvas");
@@ -387,7 +396,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   const plot = { x: 0, y: 0, width, height };
   context.fillStyle = "#dfe8ee";
   context.fillRect(plot.x, plot.y, plot.width, plot.height);
-  const bounds = boundaryBounds(boundary);
+  const bounds = boundaryBounds(boundary, office);
   const extent = plotExtent(bounds, plot.width, plot.height);
   const projectPoint = (lon: number, lat: number) => project(lon, lat, extent, plot.x, plot.y, plot.width, plot.height);
   await drawTiles(context, extent, plot.x, plot.y, plot.width);
@@ -421,26 +430,55 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   raster.height = MAP_HEIGHT;
   const rasterContext = raster.getContext("2d")!;
   const image = rasterContext.createImageData(raster.width, raster.height);
-  for (let y = 0; y < raster.height; y += 1) {
-    for (let x = 0; x < raster.width; x += 1) {
+
+  // Solve the field on a coarse lattice. The extra column and row matter: without a
+  // sample at or past each far edge the last stride of pixels has no upper neighbour to
+  // interpolate against and the raster ends in a visible seam.
+  const columns = Math.ceil((raster.width - 1) / FIELD_STRIDE) + 1;
+  const rows = Math.ceil((raster.height - 1) / FIELD_STRIDE) + 1;
+  const field = new Float32Array(columns * rows);
+  for (let row = 0; row < rows; row += 1) {
+    const y = Math.min(row * FIELD_STRIDE, raster.height - 1);
+    const worldY = extent.top + y / (raster.height - 1) * (extent.bottom - extent.top);
+    for (let column = 0; column < columns; column += 1) {
+      const x = Math.min(column * FIELD_STRIDE, raster.width - 1);
       const worldX = extent.left + x / (raster.width - 1) * (extent.right - extent.left);
-      const worldY = extent.top + y / (raster.height - 1) * (extent.bottom - extent.top);
       const coordinate = inverseWorld(worldX, worldY, extent.zoom);
-      const value = sampleField(fieldPoints, spec.id, dayIndex, coordinate.lon, coordinate.lat);
-      const [red, green, blue] = colorFor(value, spec.stops);
+      field[row * columns + column] = sampleField(fieldPoints, spec.id, dayIndex, coordinate.lon, coordinate.lat);
+    }
+  }
+
+  // Bilinearly expand the lattice back to full resolution, colouring each pixel from the
+  // interpolated *value* — interpolating colours instead would muddy the ramp bands.
+  const { table, min, span } = colorRamp(spec.stops);
+  const scale = span === 0 ? 0 : (COLOR_LUT_SIZE - 1) / span;
+  for (let y = 0; y < raster.height; y += 1) {
+    const row = Math.min(Math.floor(y / FIELD_STRIDE), rows - 2 < 0 ? 0 : rows - 2);
+    const rowFraction = (y - row * FIELD_STRIDE) / FIELD_STRIDE;
+    const topOffset = row * columns;
+    const bottomOffset = Math.min(row + 1, rows - 1) * columns;
+    for (let x = 0; x < raster.width; x += 1) {
+      const column = Math.min(Math.floor(x / FIELD_STRIDE), columns - 2 < 0 ? 0 : columns - 2);
+      const columnFraction = (x - column * FIELD_STRIDE) / FIELD_STRIDE;
+      const right = Math.min(column + 1, columns - 1);
+      const top = field[topOffset + column] + (field[topOffset + right] - field[topOffset + column]) * columnFraction;
+      const bottom = field[bottomOffset + column] + (field[bottomOffset + right] - field[bottomOffset + column]) * columnFraction;
+      const value = top + (bottom - top) * rowFraction;
+      let index = Math.round((value - min) * scale);
+      if (index < 0) index = 0;
+      else if (index > COLOR_LUT_SIZE - 1) index = COLOR_LUT_SIZE - 1;
+      const source = index * 3;
       const offset = (y * raster.width + x) * 4;
-      image.data[offset] = red;
-      image.data[offset + 1] = green;
-      image.data[offset + 2] = blue;
+      image.data[offset] = table[source];
+      image.data[offset + 1] = table[source + 1];
+      image.data[offset + 2] = table[source + 2];
       image.data[offset + 3] = fillAlpha;
     }
   }
   rasterContext.putImageData(image, 0, 0);
-  context.save();
-  traceBoundary(context, boundary, projectPoint);
-  context.clip("evenodd");
+  // Deliberately unclipped: the field covers the whole frame using real data from the
+  // neighbouring offices, and the CWA outline below is what marks the forecast area.
   context.drawImage(raster, plot.x, plot.y, plot.width, plot.height);
-  context.restore();
 
   traceCounties(context, counties, projectPoint);
   context.strokeStyle = "rgba(0, 0, 0, 0.42)";
@@ -457,7 +495,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   context.lineWidth = 1.4;
   context.stroke();
 
-  traceBoundary(context, boundary, projectPoint);
+  traceBoundary(context, boundary, office, projectPoint);
   context.strokeStyle = "rgba(8, 13, 24, 0.98)";
   context.lineWidth = 2.4;
   context.stroke();
@@ -559,16 +597,16 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   output.drawImage(mapCanvas, 0, HEADER_HEIGHT, width, height);
 }
 
-function ForecastPlot({ spec, forecast, boundary, counties, states, interstates, dayIndex }: { spec: ProductSpec; forecast: ForecastPayload; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures; dayIndex: number }) {
+function ForecastPlot({ spec, forecast, boundary, counties, states, interstates, dayIndex, office }: { spec: ProductSpec; forecast: ForecastPayload; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures; dayIndex: number; office: Office }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [ready, setReady] = useState(false);
   useEffect(() => {
     if (!canvas.current) return;
     let active = true;
     setReady(false);
-    void renderPlot(canvas.current, forecast, boundary, counties, states, interstates, spec, dayIndex).then(() => { if (active) setReady(true); });
+    void renderPlot(canvas.current, forecast, boundary, counties, states, interstates, spec, dayIndex, office.id).then(() => { if (active) setReady(true); });
     return () => { active = false; };
-  }, [forecast, boundary, counties, states, interstates, spec, dayIndex]);
+  }, [forecast, boundary, counties, states, interstates, spec, dayIndex, office]);
 
   const download = useCallback(() => {
     if (!canvas.current || !ready) return;
@@ -576,11 +614,11 @@ function ForecastPlot({ spec, forecast, boundary, counties, states, interstates,
       if (!blob) return;
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
-      link.download = `phi-${spec.file}-${forecast.days[dayIndex]?.date || `day-${dayIndex + 1}`}.png`;
+      link.download = `${office.id.toLowerCase()}-${spec.file}-${forecast.days[dayIndex]?.date || `day-${dayIndex + 1}`}.png`;
       link.click();
       URL.revokeObjectURL(link.href);
     }, "image/png");
-  }, [forecast, ready, spec, dayIndex]);
+  }, [forecast, ready, spec, dayIndex, office]);
 
   return (
     <article className="forecast-product" id={`product-${spec.id}`} data-product-id={spec.id} data-product-file={spec.file}>
@@ -592,10 +630,11 @@ function ForecastPlot({ spec, forecast, boundary, counties, states, interstates,
         ref={canvas}
         className="forecast-canvas"
         role="img"
-        aria-label={`${spec.title}, Day ${dayIndex + 1}, for the PHI forecast area`}
+        aria-label={`${spec.title}, Day ${dayIndex + 1}, for the ${office.id} forecast area`}
         data-product-id={spec.id}
         data-product-file={spec.file}
         data-day-index={dayIndex}
+        data-office={office.id}
         data-render-state={ready ? "ready" : "rendering"}
       />
     </article>
@@ -606,12 +645,12 @@ function publishedAssetUrl(path: string) {
   return `/api/forecast-assets/${path.replace(/^\/+/, "")}`;
 }
 
-function PublishedForecastPlot({ spec, asset, dayIndex, eager }: { spec: ProductSpec; asset: PublishedForecastAsset; dayIndex: number; eager: boolean }) {
+function PublishedForecastPlot({ spec, asset, dayIndex, eager, office }: { spec: ProductSpec; asset: PublishedForecastAsset; dayIndex: number; eager: boolean; office: Office }) {
   return (
     <article className="forecast-product" id={`product-${spec.id}`} data-product-id={spec.id} data-product-file={spec.file}>
       <div className="product-bar">
         <h3>{spec.title}</h3>
-        <a href={publishedAssetUrl(asset.download)} download={`phi-${spec.file}-day-${dayIndex + 1}.png`}>Download PNG ↓</a>
+        <a href={publishedAssetUrl(asset.download)} download={`${office.id.toLowerCase()}-${spec.file}-day-${dayIndex + 1}.png`}>Download PNG ↓</a>
       </div>
       {/* The same-origin asset route streams the exact immutable PNG from R2. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -622,9 +661,130 @@ function PublishedForecastPlot({ spec, asset, dayIndex, eager }: { spec: Product
         height={asset.height / RENDER_SCALE}
         loading={eager ? "eager" : "lazy"}
         fetchPriority={eager ? "high" : "auto"}
-        alt={`${spec.title}, Day ${dayIndex + 1}, for the PHI forecast area`}
+        alt={`${spec.title}, Day ${dayIndex + 1}, for the ${office.id} forecast area`}
       />
     </article>
+  );
+}
+
+// The `?office=` parameter is the single source of truth for the selection, so deep
+// links, the publisher's per-office navigation, and browser back/forward all agree.
+// `replaceState` doesn't fire `popstate`, hence the companion event.
+const OFFICE_CHANGE_EVENT = "forecast-office-change";
+
+function subscribeToOfficeParam(onChange: () => void) {
+  window.addEventListener("popstate", onChange);
+  window.addEventListener(OFFICE_CHANGE_EVENT, onChange);
+  return () => {
+    window.removeEventListener("popstate", onChange);
+    window.removeEventListener(OFFICE_CHANGE_EVENT, onChange);
+  };
+}
+
+function readOfficeParam(): string {
+  return new URLSearchParams(window.location.search).get("office") ?? DEFAULT_OFFICE;
+}
+
+function writeOfficeParam(id: OfficeId) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("office", id);
+  window.history.replaceState(null, "", url);
+  window.dispatchEvent(new Event(OFFICE_CHANGE_EVENT));
+}
+
+function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office: Office) => void }) {
+  const [open, setOpen] = useState(false);
+  const container = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const flattened = useMemo(() => REGIONS.flatMap((region) => region.offices), []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!container.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [open]);
+
+  const close = useCallback((restoreFocus: boolean) => {
+    setOpen(false);
+    if (restoreFocus) trigger.current?.focus();
+  }, []);
+
+  const move = useCallback((step: number) => {
+    const index = flattened.findIndex((entry) => entry.id === office.id);
+    const next = flattened[(index + step + flattened.length) % flattened.length];
+    onSelect(next);
+  }, [flattened, office, onSelect]);
+
+  // Arrow keys walk the whole list, crossing region headings as if they weren't there.
+  const onKeyDown = useCallback((event: React.KeyboardEvent) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close(true);
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) {
+        setOpen(true);
+        return;
+      }
+      move(event.key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if ((event.key === "Enter" || event.key === " ") && open) {
+      event.preventDefault();
+      close(true);
+    }
+  }, [close, move, open]);
+
+  return (
+    <div className="office-picker" ref={container} onKeyDown={onKeyDown}>
+      <button
+        ref={trigger}
+        type="button"
+        className="office-trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`Forecast office: ${office.label}. Change office`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="brand-mark">{office.id}</span>
+        <span className="office-trigger-text">
+          <strong>Forecast Graphics</strong>
+          <em>{office.label}</em>
+        </span>
+        <span className="office-caret" aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div className="office-menu" role="listbox" aria-label="Forecast office" tabIndex={-1}>
+          {REGIONS.map((region) => (
+            <div className="office-group" key={region.id}>
+              <p>{region.name}</p>
+              {region.offices.map((entry) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  role="option"
+                  aria-selected={entry.id === office.id}
+                  data-office={entry.id}
+                  className={entry.id === office.id ? "is-active" : ""}
+                  onClick={() => {
+                    onSelect(entry);
+                    close(true);
+                  }}
+                >
+                  <b>{entry.id}</b>
+                  <span>{entry.city}, {entry.state}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -637,58 +797,96 @@ export function ForecastGraphic() {
   const [interstates, setInterstates] = useState<LineFeatures | null>(null);
   const [dayIndex, setDayIndex] = useState(0);
   const [error, setError] = useState(false);
-  const loadPublishedForecast = useCallback(async () => {
-    if (!PUBLISHED_ASSET_BASE_URL) return false;
-    try {
-      const response = await fetch(`/api/published-forecast?ts=${Date.now()}`, { cache: "no-store" });
-      if (!response.ok) return false;
-      const manifest = await response.json() as PublishedForecastManifest;
-      if (manifest.schemaVersion !== 1 || manifest.days.length < FORECAST_DAYS.length) return false;
-      setPublishedForecast(manifest);
-      setError(false);
-      return true;
-    } catch {
-      return false;
-    }
-  }, []);
-  const loadData = useCallback(async () => {
-    try {
-      const [forecastResponse, boundaryResponse, countyResponse, stateResponse, interstateResponse] = await Promise.all([
-        fetch("/api/forecast", { cache: "no-store" }),
-        fetch("/phi-cwa.geojson"),
-        fetch("/counties.geojson"),
-        fetch("/states.geojson"),
-        fetch("/interstates.geojson"),
-      ]);
-      if (!forecastResponse.ok || !boundaryResponse.ok || !countyResponse.ok || !stateResponse.ok || !interstateResponse.ok) throw new Error("Data unavailable");
-      setForecast(await forecastResponse.json() as ForecastPayload);
-      setBoundary(await boundaryResponse.json() as Boundary);
-      setCounties(await countyResponse.json() as CountyBoundaries);
-      setStates(await stateResponse.json() as CountyBoundaries);
-      setInterstates(await interstateResponse.json() as LineFeatures);
-      setError(false);
-    } catch {
-      setError(true);
-    }
-  }, []);
+
+  // The server can't see the query string, so it renders the default office; the client
+  // swaps to the requested one on hydration without a markup mismatch.
+  const officeId = useSyncExternalStore(subscribeToOfficeParam, readOfficeParam, () => DEFAULT_OFFICE);
+  const office = useMemo(() => findOffice(officeId), [officeId]);
+  const selectOffice = useCallback((next: Office) => writeOfficeParam(next.id), []);
+
+  // Basemap overlays are the same for every office, so they load once and are reused.
   useEffect(() => {
-    const refreshForecast = async () => {
-      const loadedPublishedForecast = await loadPublishedForecast();
-      if (!loadedPublishedForecast) await loadData();
+    let active = true;
+    void (async () => {
+      try {
+        const [boundaryResponse, countyResponse, stateResponse, interstateResponse] = await Promise.all([
+          fetch("/cwa.geojson"),
+          fetch("/counties.geojson"),
+          fetch("/states.geojson"),
+          fetch("/interstates.geojson"),
+        ]);
+        if (!boundaryResponse.ok || !countyResponse.ok || !stateResponse.ok || !interstateResponse.ok) throw new Error("Overlays unavailable");
+        const [boundaryData, countyData, stateData, interstateData] = await Promise.all([
+          boundaryResponse.json() as Promise<Boundary>,
+          countyResponse.json() as Promise<CountyBoundaries>,
+          stateResponse.json() as Promise<CountyBoundaries>,
+          interstateResponse.json() as Promise<LineFeatures>,
+        ]);
+        if (!active) return;
+        setBoundary(boundaryData);
+        setCounties(countyData);
+        setStates(stateData);
+        setInterstates(interstateData);
+      } catch {
+        if (active) setError(true);
+      }
+    })();
+    return () => { active = false; };
+  }, []);
+
+  // One manifest covers every office, so it refreshes independently of the selection.
+  useEffect(() => {
+    if (!PUBLISHED_ASSET_BASE_URL) return;
+    let active = true;
+    const load = async () => {
+      try {
+        const response = await fetch(`/api/published-forecast?ts=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) return;
+        const manifest = await response.json() as PublishedForecastManifest;
+        if (!active || manifest.schemaVersion !== 2) return;
+        setPublishedForecast(manifest);
+      } catch {
+        // The live canvas path stays available when the manifest can't be read.
+      }
     };
-    void refreshForecast();
-    const refresh = window.setInterval(refreshForecast, 15 * 60 * 1000);
-    return () => window.clearInterval(refresh);
-  }, [loadData, loadPublishedForecast]);
+    void load();
+    const refresh = window.setInterval(load, 15 * 60 * 1000);
+    return () => { active = false; window.clearInterval(refresh); };
+  }, []);
+
+  const publishedDays = publishedForecast?.offices?.[office.id]?.days;
+  const hasPublishedOffice = Boolean(publishedDays && publishedDays.length >= FORECAST_DAYS.length);
+
+  // Only fetch live gridpoint data when this office has no published imagery to show.
+  useEffect(() => {
+    if (hasPublishedOffice) return;
+    let active = true;
+    const load = async () => {
+      try {
+        const response = await fetch(`/api/forecast?office=${office.id}`, { cache: "no-store" });
+        if (!response.ok) throw new Error("Forecast unavailable");
+        const payload = await response.json() as ForecastPayload;
+        if (!active) return;
+        setForecast(payload);
+        setError(false);
+      } catch {
+        if (active) setError(true);
+      }
+    };
+    void load();
+    const refresh = window.setInterval(load, 15 * 60 * 1000);
+    return () => { active = false; window.clearInterval(refresh); };
+  }, [office, hasPublishedOffice]);
+
   const availableProducts = useMemo(() => PRODUCTS, []);
-  const publishedDay = publishedForecast?.days[dayIndex];
+  const publishedDay = publishedDays?.[dayIndex];
+  // Derived rather than cleared on switch, so a previous office's payload can never be
+  // drawn against the newly selected office's boundary.
+  const officeForecast = forecast?.office === office.id ? forecast : null;
   return (
     <main className="app-shell">
       <aside className="catalog-sidebar">
-        <a className="catalog-brand" href="https://www.weather.gov/phi/" target="_blank" rel="noreferrer">
-          <span className="brand-mark">PHI</span>
-          <span><strong>Forecast Graphics</strong></span>
-        </a>
+        <OfficePicker office={office} onSelect={selectOffice} />
         <nav className="catalog-nav" aria-label="Forecast product catalogue">
           <p>Menu</p>
           <a className="is-active" href="#overview"><span>Overview</span><b>[5]</b></a>
@@ -706,8 +904,14 @@ export function ForecastGraphic() {
         </nav>
         <footer className="catalog-footer">
           <span className="status-label">Data status</span>
-          <span className="live-status"><i /> {publishedForecast ? "PUBLISHED IMAGES" : "AUTO-UPDATING"}</span>
-          <p>Source: National Weather Service<br />Latest available forecast graphics.</p>
+          <span className="live-status"><i /> {hasPublishedOffice ? "PUBLISHED IMAGES" : "AUTO-UPDATING"}</span>
+          <p>
+            Source: National Weather Service<br />
+            {/* The picker's trigger is a button, so the office link lives here instead. */}
+            <a href={`https://www.weather.gov/${office.id.toLowerCase()}/`} target="_blank" rel="noreferrer">
+              NWS {office.label} ↗
+            </a>
+          </p>
         </footer>
       </aside>
 
@@ -730,22 +934,23 @@ export function ForecastGraphic() {
         <div className="workspace-content" id="overview">
           <header className="catalog-heading">
             <h1>Day {dayIndex + 1} Forecast Graphics</h1>
+            <p>{office.label} · NWS {office.city}, {office.state}</p>
           </header>
 
-          {!publishedForecast && !forecast && !error && <div className="gallery-message">Loading the latest NWS forecast plots…</div>}
-          {!publishedForecast && error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
+          {!hasPublishedOffice && !officeForecast && !error && <div className="gallery-message">Loading the latest NWS forecast plots…</div>}
+          {!hasPublishedOffice && error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
           {publishedDay && (
-            <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} published forecast plots`} data-forecast-source="published">
+            <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} published forecast plots`} data-forecast-source="published" data-office={office.id}>
               {availableProducts.map((spec, index) => {
                 const asset = publishedDay.products[spec.id];
-                return asset ? <PublishedForecastPlot key={spec.id} spec={spec} asset={asset} dayIndex={dayIndex} eager={index === 0} /> : null;
+                return asset ? <PublishedForecastPlot key={spec.id} spec={spec} asset={asset} dayIndex={dayIndex} eager={index === 0} office={office} /> : null;
               })}
             </section>
           )}
-          {!publishedForecast && forecast && boundary && counties && states && interstates && (
-            <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} forecast plots`}>
+          {!hasPublishedOffice && officeForecast && boundary && counties && states && interstates && (
+            <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} forecast plots`} data-office={office.id}>
               {availableProducts.map((spec) => (
-                <ForecastPlot key={spec.id} spec={spec} forecast={forecast} boundary={boundary} counties={counties} states={states} interstates={interstates} dayIndex={dayIndex} />
+                <ForecastPlot key={spec.id} spec={spec} forecast={officeForecast} boundary={boundary} counties={counties} states={states} interstates={interstates} dayIndex={dayIndex} office={office} />
               ))}
             </section>
           )}

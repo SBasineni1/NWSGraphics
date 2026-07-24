@@ -1,43 +1,51 @@
 import { NextResponse } from "next/server";
 import gridPoints from "./grid-points.json";
+import cityPoints from "./city-points.json";
+import { findOffice, type OfficeId } from "../../offices";
 
 export const runtime = "edge";
 
-const LABEL_LOCATIONS = [
-  { id: "phl", name: "Philadelphia", state: "PA", lat: 39.9526, lon: -75.1652, x: 50, y: 79, label: true },
-  { id: "abe", name: "Allentown", state: "PA", lat: 40.6023, lon: -75.4714, x: 35, y: 106, label: true },
-  { id: "rdg", name: "Reading", state: "PA", lat: 40.3356, lon: -75.9269, x: 21, y: 92, label: true },
-  { id: "mpo", name: "Mt Pocono", state: "PA", lat: 41.122, lon: -75.3646, x: 35, y: 130, label: true },
-  { id: "sus", name: "Sussex", state: "NJ", lat: 41.2098, lon: -74.6077, x: 60, y: 138, label: true },
-  { id: "mmu", name: "Morristown", state: "NJ", lat: 40.7968, lon: -74.4815, x: 67, y: 120, label: true },
-  { id: "smq", name: "Somerville", state: "NJ", lat: 40.5743, lon: -74.6099, x: 65, y: 110, label: true },
-  { id: "ttn", name: "Trenton", state: "NJ", lat: 40.2171, lon: -74.7429, x: 62, y: 93, label: true },
-  { id: "lgb", name: "Long Branch", state: "NJ", lat: 40.3043, lon: -73.9924, x: 88, y: 101, label: true },
-  { id: "tom", name: "Toms River", state: "NJ", lat: 39.9537, lon: -74.1979, x: 83, y: 84, label: true },
-  { id: "ilg", name: "Wilmington", state: "DE", lat: 39.7447, lon: -75.5484, x: 38, y: 67, label: true },
-  { id: "vin", name: "Vineland", state: "NJ", lat: 39.4862, lon: -75.0257, x: 58, y: 59, label: true },
-  { id: "dov", name: "Dover", state: "DE", lat: 39.1582, lon: -75.5244, x: 42, y: 41, label: true },
-  { id: "acy", name: "Atlantic City", state: "NJ", lat: 39.3643, lon: -74.4229, x: 79, y: 56, label: true },
-  { id: "cap", name: "Cape May", state: "NJ", lat: 38.9351, lon: -74.906, x: 65, y: 35, label: true },
-  { id: "bet", name: "Bethany Beach", state: "DE", lat: 38.5396, lon: -75.0552, x: 63, y: 16, label: true },
-  { id: "eas", name: "Easton", state: "MD", lat: 38.7743, lon: -76.0763, x: 26, y: 21, label: true },
-] as const;
+type GridPoint = { id: string; wfo: string; x: number; y: number; lat: number; lon: number; offices: string[] };
+type CityPoint = { id: string; name: string; state: string; office: string; lat: number; lon: number; x: number; y: number };
 
-// Dense background lattice inside the PHI CWA (see build-grid-points.mjs).
-// City points remain separate so labels never distort the interpolated field.
-const GRID_LOCATIONS = (gridPoints as Array<{ id: string; wfo: string; x: number; y: number }>).map((point) => ({
+// Labeled cities carry their own coordinates so a label never lands on the centroid of
+// its gridpoint, and stay separate from the lattice so they can't distort the field.
+const LABEL_LOCATIONS = (cityPoints as CityPoint[]).map((city) => ({
+  id: city.id,
+  name: city.name,
+  state: city.state,
+  office: city.office,
+  wfo: city.office,
+  lat: city.lat,
+  lon: city.lon,
+  x: city.x,
+  y: city.y,
+  label: true,
+}));
+
+// Background lattice across every covered office's render frame (see
+// build-grid-points.mjs). `offices` lists the maps each point is needed for.
+const GRID_LOCATIONS = (gridPoints as GridPoint[]).map((point) => ({
   id: point.id,
   name: "",
   state: "",
+  offices: point.offices,
   wfo: point.wfo,
   x: point.x,
   y: point.y,
   label: false,
 }));
-const LOCATIONS = [
-  ...LABEL_LOCATIONS.map((location) => ({ ...location, wfo: "PHI" })),
-  ...GRID_LOCATIONS,
-];
+
+type Location = (typeof LABEL_LOCATIONS)[number] | (typeof GRID_LOCATIONS)[number];
+
+// Each map only needs the points inside its own frame; fetching the whole region on
+// every request would multiply the subrequest count for data that is never drawn.
+function locationsFor(office: OfficeId): Location[] {
+  return [
+    ...LABEL_LOCATIONS.filter((location) => location.office === office),
+    ...GRID_LOCATIONS.filter((location) => location.offices.includes(office)),
+  ];
+}
 
 type ProductId = "apparentTemperature" | "temperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
 type GridValue = { validTime: string; value: number | null };
@@ -90,7 +98,7 @@ function dailyValues(
   });
 }
 
-async function fetchLocation(location: (typeof LOCATIONS)[number], dates: string[]) {
+async function fetchLocation(location: Location, dates: string[]) {
   const response = await fetch(`https://api.weather.gov/gridpoints/${location.wfo}/${location.x},${location.y}`, {
     headers: { Accept: "application/geo+json", "User-Agent": "PHI Forecast Graphics (weather.gov/phi)" },
     signal: AbortSignal.timeout(12000),
@@ -117,21 +125,25 @@ async function fetchLocation(location: (typeof LOCATIONS)[number], dates: string
   };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const office = findOffice(new URL(request.url).searchParams.get("office")).id;
+  const locations = locationsFor(office);
   const now = new Date();
   const today = easternDate(now);
   const [year, month, day] = today.split("-").map(Number);
   const dates = Array.from({ length: 3 }, (_, index) => easternDate(new Date(Date.UTC(year, month - 1, day + index, 16))));
   const results: PromiseSettledResult<Awaited<ReturnType<typeof fetchLocation>>>[] = [];
-  // Keep pressure on api.weather.gov modest; small batches are more reliable
-  // than opening every PHI grid-cell request at once.
-  for (let index = 0; index < LOCATIONS.length; index += 12) {
-    const batch = LOCATIONS.slice(index, index + 12);
+  // Keep pressure on api.weather.gov modest; batching is more reliable than opening
+  // every grid-cell request at once, but the per-office point count needs a wider
+  // batch than the single-office original to keep the response time reasonable.
+  for (let index = 0; index < locations.length; index += 24) {
+    const batch = locations.slice(index, index + 24);
     results.push(...await Promise.allSettled(batch.map((location) => fetchLocation(location, dates))));
   }
   const successful = results.filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof fetchLocation>>> => result.status === "fulfilled");
   const updatedAt = successful.map((result) => result.value.updatedAt).filter(Boolean).sort().at(-1) ?? now.toISOString();
   return NextResponse.json({
+    office,
     generatedAt: now.toISOString(),
     updatedAt,
     days: dates.map(dayInfo),

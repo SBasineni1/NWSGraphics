@@ -1,0 +1,582 @@
+[
+  {
+    "id": "phl",
+    "name": "Philadelphia",
+    "state": "PA",
+    "office": "PHI",
+    "lat": 39.9526,
+    "lon": -75.1652,
+    "x": 50,
+    "y": 79
+  },
+  {
+    "id": "abe",
+    "name": "Allentown",
+    "state": "PA",
+    "office": "PHI",
+    "lat": 40.6023,
+    "lon": -75.4714,
+    "x": 35,
+    "y": 106
+  },
+  {
+    "id": "rdg",
+    "name": "Reading",
+    "state": "PA",
+    "office": "PHI",
+    "lat": 40.3356,
+    "lon": -75.9269,
+    "x": 21,
+    "y": 92
+  },
+  {
+    "id": "mpo",
+    "name": "Mt Pocono",
+    "state": "PA",
+    "office": "PHI",
+    "lat": 41.122,
+    "lon": -75.3646,
+    "x": 35,
+    "y": 130
+  },
+  {
+    "id": "sus",
+    "name": "Sussex",
+    "state": "NJ",
+    "office": "PHI",
+    "lat": 41.2098,
+    "lon": -74.6077,
+    "x": 60,
+    "y": 138
+  },
+  {
+    "id": "mmu",
+    "name": "Morristown",
+    "state": "NJ",
+    "office": "PHI",
+    "lat": 40.7968,
+    "lon": -74.4815,
+    "x": 67,
+    "y": 120
+  },
+  {
+    "id": "smq",
+    "name": "Somerville",
+    "state": "NJ",
+    "office": "PHI",
+    "lat": 40.5743,
+    "lon": -74.6099,
+    "x": 65,
+    "y": 110
+  },
+  {
+    "id": "ttn",
+    "name": "Trenton",
+    "state": "NJ",
+    "office": "PHI",
+    "lat": 40.2171,
+    "lon": -74.7429,
+    "x": 62,
+    "y": 93
+  },
+  {
+    "id": "lgb",
+    "name": "Long Branch",
+    "state": "NJ",
+    "office": "PHI",
+    "lat": 40.3043,
+    "lon": -73.9924,
+    "x": 88,
+    "y": 101
+  },
+  {
+    "id": "tom",
+    "name": "Toms River",
+    "state": "NJ",
+    "office": "PHI",
+    "lat": 39.9537,
+    "lon": -74.1979,
+    "x": 83,
+    "y": 84
+  },
+  {
+    "id": "ilg",
+    "name": "Wilmington",
+    "state": "DE",
+    "office": "PHI",
+    "lat": 39.7447,
+    "lon": -75.5484,
+    "x": 38,
+    "y": 67
+  },
+  {
+    "id": "vin",
+    "name": "Vineland",
+    "state": "NJ",
+    "office": "PHI",
+    "lat": 39.4862,
+    "lon": -75.0257,
+    "x": 58,
+    "y": 59
+  },
+  {
+    "id": "dov",
+    "name": "Dover",
+    "state": "DE",
+    "office": "PHI",
+    "lat": 39.1582,
+    "lon": -75.5244,
+    "x": 42,
+    "y": 41
+  },
+  {
+    "id": "acy",
+    "name": "Atlantic City",
+    "state": "NJ",
+    "office": "PHI",
+    "lat": 39.3643,
+    "lon": -74.4229,
+    "x": 79,
+    "y": 56
+  },
+  {
+    "id": "cap",
+    "name": "Cape May",
+    "state": "NJ",
+    "office": "PHI",
+    "lat": 38.9351,
+    "lon": -74.906,
+    "x": 65,
+    "y": 35
+  },
+  {
+    "id": "bet",
+    "name": "Bethany Beach",
+    "state": "DE",
+    "office": "PHI",
+    "lat": 38.5396,
+    "lon": -75.0552,
+    "x": 63,
+    "y": 16
+  },
+  {
+    "id": "eas",
+    "name": "Easton",
+    "state": "MD",
+    "office": "PHI",
+    "lat": 38.7743,
+    "lon": -76.0763,
+    "x": 26,
+    "y": 21
+  },
+  {
+    "id": "nyc",
+    "name": "New York",
+    "state": "NY",
+    "office": "OKX",
+    "lat": 40.7831,
+    "lon": -73.9712,
+    "x": 34,
+    "y": 45
+  },
+  {
+    "id": "ewr",
+    "name": "Newark",
+    "state": "NJ",
+    "office": "OKX",
+    "lat": 40.7357,
+    "lon": -74.1724,
+    "x": 27,
+    "y": 42
+  },
+  {
+    "id": "jrc",
+    "name": "Jersey City",
+    "state": "NJ",
+    "office": "OKX",
+    "lat": 40.7178,
+    "lon": -74.0431,
+    "x": 32,
+    "y": 42
+  },
+  {
+    "id": "ptn",
+    "name": "Paterson",
+    "state": "NJ",
+    "office": "OKX",
+    "lat": 40.9168,
+    "lon": -74.1718,
+    "x": 26,
+    "y": 50
+  },
+  {
+    "id": "hpn",
+    "name": "White Plains",
+    "state": "NY",
+    "office": "OKX",
+    "lat": 41.034,
+    "lon": -73.7629,
+    "x": 39,
+    "y": 58
+  },
+  {
+    "id": "hem",
+    "name": "Hempstead",
+    "state": "NY",
+    "office": "OKX",
+    "lat": 40.7062,
+    "lon": -73.6187,
+    "x": 47,
+    "y": 44
+  },
+  {
+    "id": "isp",
+    "name": "Islip",
+    "state": "NY",
+    "office": "OKX",
+    "lat": 40.7298,
+    "lon": -73.2107,
+    "x": 60,
+    "y": 47
+  },
+  {
+    "id": "rvh",
+    "name": "Riverhead",
+    "state": "NY",
+    "office": "OKX",
+    "lat": 40.917,
+    "lon": -72.662,
+    "x": 78,
+    "y": 59
+  },
+  {
+    "id": "mtk",
+    "name": "Montauk",
+    "state": "NY",
+    "office": "OKX",
+    "lat": 41.0359,
+    "lon": -71.9545,
+    "x": 101,
+    "y": 68
+  },
+  {
+    "id": "bdr",
+    "name": "Bridgeport",
+    "state": "CT",
+    "office": "OKX",
+    "lat": 41.1865,
+    "lon": -73.1952,
+    "x": 57,
+    "y": 68
+  },
+  {
+    "id": "hvn",
+    "name": "New Haven",
+    "state": "CT",
+    "office": "OKX",
+    "lat": 41.3083,
+    "lon": -72.9279,
+    "x": 66,
+    "y": 75
+  },
+  {
+    "id": "dxr",
+    "name": "Danbury",
+    "state": "CT",
+    "office": "OKX",
+    "lat": 41.3948,
+    "lon": -73.454,
+    "x": 47,
+    "y": 76
+  },
+  {
+    "id": "gon",
+    "name": "New London",
+    "state": "CT",
+    "office": "OKX",
+    "lat": 41.3557,
+    "lon": -72.0995,
+    "x": 93,
+    "y": 82
+  },
+  {
+    "id": "mdt",
+    "name": "Harrisburg",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 40.2732,
+    "lon": -76.8867,
+    "x": 105,
+    "y": 38
+  },
+  {
+    "id": "unv",
+    "name": "State College",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 40.7934,
+    "lon": -77.86,
+    "x": 69,
+    "y": 57
+  },
+  {
+    "id": "ipt",
+    "name": "Williamsport",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 41.2412,
+    "lon": -77.0011,
+    "x": 96,
+    "y": 81
+  },
+  {
+    "id": "aoo",
+    "name": "Altoona",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 40.5187,
+    "lon": -78.3947,
+    "x": 52,
+    "y": 42
+  },
+  {
+    "id": "jst",
+    "name": "Johnstown",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 40.3267,
+    "lon": -78.922,
+    "x": 35,
+    "y": 31
+  },
+  {
+    "id": "lns",
+    "name": "Lancaster",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 40.0379,
+    "lon": -76.3055,
+    "x": 127,
+    "y": 30
+  },
+  {
+    "id": "thv",
+    "name": "York",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 39.9626,
+    "lon": -76.7277,
+    "x": 113,
+    "y": 25
+  },
+  {
+    "id": "dub",
+    "name": "DuBois",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 41.1195,
+    "lon": -78.7603,
+    "x": 36,
+    "y": 68
+  },
+  {
+    "id": "bfd",
+    "name": "Bradford",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 41.9581,
+    "lon": -78.6389,
+    "x": 36,
+    "y": 107
+  },
+  {
+    "id": "wel",
+    "name": "Wellsboro",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 41.7487,
+    "lon": -77.305,
+    "x": 82,
+    "y": 103
+  },
+  {
+    "id": "cbg",
+    "name": "Chambersburg",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 39.9376,
+    "lon": -77.6611,
+    "x": 81,
+    "y": 19
+  },
+  {
+    "id": "som",
+    "name": "Somerset",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 40.0084,
+    "lon": -79.0781,
+    "x": 31,
+    "y": 16
+  },
+  {
+    "id": "lew",
+    "name": "Lewistown",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 40.5992,
+    "lon": -77.5714,
+    "x": 80,
+    "y": 49
+  },
+  {
+    "id": "sel",
+    "name": "Selinsgrove",
+    "state": "PA",
+    "office": "CTP",
+    "lat": 40.7987,
+    "lon": -76.8622,
+    "x": 103,
+    "y": 62
+  },
+  {
+    "id": "dca",
+    "name": "Washington",
+    "state": "DC",
+    "office": "LWX",
+    "lat": 38.9072,
+    "lon": -77.0369,
+    "x": 96,
+    "y": 72
+  },
+  {
+    "id": "bwi",
+    "name": "Baltimore",
+    "state": "MD",
+    "office": "LWX",
+    "lat": 39.2904,
+    "lon": -76.6122,
+    "x": 109,
+    "y": 91
+  },
+  {
+    "id": "fdk",
+    "name": "Frederick",
+    "state": "MD",
+    "office": "LWX",
+    "lat": 39.4143,
+    "lon": -77.4105,
+    "x": 80,
+    "y": 93
+  },
+  {
+    "id": "hgr",
+    "name": "Hagerstown",
+    "state": "MD",
+    "office": "LWX",
+    "lat": 39.6418,
+    "lon": -77.72,
+    "x": 68,
+    "y": 102
+  },
+  {
+    "id": "cbe",
+    "name": "Cumberland",
+    "state": "MD",
+    "office": "LWX",
+    "lat": 39.6529,
+    "lon": -78.7625,
+    "x": 32,
+    "y": 98
+  },
+  {
+    "id": "anp",
+    "name": "Annapolis",
+    "state": "MD",
+    "office": "LWX",
+    "lat": 38.9784,
+    "lon": -76.4922,
+    "x": 115,
+    "y": 78
+  },
+  {
+    "id": "okv",
+    "name": "Winchester",
+    "state": "VA",
+    "office": "LWX",
+    "lat": 39.1857,
+    "lon": -78.1633,
+    "x": 56,
+    "y": 79
+  },
+  {
+    "id": "cho",
+    "name": "Charlottesville",
+    "state": "VA",
+    "office": "LWX",
+    "lat": 38.0293,
+    "lon": -78.4767,
+    "x": 51,
+    "y": 26
+  },
+  {
+    "id": "ezf",
+    "name": "Fredericksburg",
+    "state": "VA",
+    "office": "LWX",
+    "lat": 38.3032,
+    "lon": -77.4605,
+    "x": 85,
+    "y": 43
+  },
+  {
+    "id": "hef",
+    "name": "Manassas",
+    "state": "VA",
+    "office": "LWX",
+    "lat": 38.7509,
+    "lon": -77.4753,
+    "x": 82,
+    "y": 63
+  },
+  {
+    "id": "cjr",
+    "name": "Culpeper",
+    "state": "VA",
+    "office": "LWX",
+    "lat": 38.4735,
+    "lon": -77.9961,
+    "x": 65,
+    "y": 48
+  },
+  {
+    "id": "mrb",
+    "name": "Martinsburg",
+    "state": "WV",
+    "office": "LWX",
+    "lat": 39.4562,
+    "lon": -77.9639,
+    "x": 61,
+    "y": 92
+  },
+  {
+    "id": "lwt",
+    "name": "Leonardtown",
+    "state": "MD",
+    "office": "LWX",
+    "lat": 38.2915,
+    "lon": -76.6358,
+    "x": 114,
+    "y": 46
+  },
+  {
+    "id": "luu",
+    "name": "Luray",
+    "state": "VA",
+    "office": "LWX",
+    "lat": 38.6654,
+    "lon": -78.4594,
+    "x": 48,
+    "y": 55
+  }
+]

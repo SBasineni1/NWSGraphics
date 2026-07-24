@@ -15,9 +15,13 @@ export async function GET(
     );
   }
 
+  // Anchored to the exact key shape the publisher writes:
+  // releases/{releaseId}/{OFFICE}/day-{n}/{product}[-preview].png
+  const ASSET_KEY = /^releases\/\d{8}T\d{6}Z\/[A-Z]{3}\/day-[1-3]\/[a-z][a-z-]*\.png$/;
+
   const { path } = await context.params;
   const assetKey = path.join("/");
-  if (!/^releases\/[A-Za-z0-9._/-]+\.png$/.test(assetKey) || assetKey.includes("..")) {
+  if (!ASSET_KEY.test(assetKey) || assetKey.includes("..")) {
     return NextResponse.json({ error: "Invalid forecast asset path" }, { status: 400 });
   }
 

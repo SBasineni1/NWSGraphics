@@ -1,8 +1,14 @@
-# PHI Forecast Graphics
+# NWS Forecast Graphics
 
-Publication-ready forecast graphics for the National Weather Service
-Philadelphia / Mount Holly forecast area. The site uses official
-`api.weather.gov` grid data and produces three forecast days for every product.
+Publication-ready forecast graphics for four National Weather Service forecast
+offices in Eastern Region — Philadelphia / Mount Holly (PHI), New York City
+(OKX), State College (CTP), and Baltimore / Washington (LWX). Pick an office
+from the sidebar dropdown, or link straight to one with `?office=OKX`.
+
+The site uses official `api.weather.gov` grid data and produces three forecast
+days for every product. Each map's colour field covers the whole frame using
+real gridpoint data from neighbouring offices; the selected office's County
+Warning Area is marked by its outline.
 
 ## Local development
 
@@ -26,7 +32,7 @@ The workflow at `.github/workflows/publish-forecast-plots.yml`:
    `America/New_York`.
 3. Reads the NWS `updateTime` before doing expensive work.
 4. Skips publication when both the forecast and source revision are unchanged.
-5. Generates a 900×760 web preview and 1800×1520 download for every product
+5. Generates a 900-pixel-wide web preview and 1800-pixel-wide download for every product
    across all three days.
 6. Uploads immutable, versioned PNGs and replaces `latest.json` only after the
    full release succeeds.
@@ -69,8 +75,10 @@ Because the website fetches `latest.json` in the browser, allow `GET` and
 ]
 ```
 
-An R2 lifecycle rule can remove objects under `releases/` after the desired
-history period. Keep `latest.json` excluded from that rule.
+The publisher prunes release prefixes older than `RELEASE_RETENTION_DAYS`
+(default 7) after each successful publish, so no R2 lifecycle rule is required.
+Set the repository variable to override it, or to `0` to disable pruning and
+keep every release. `latest.json` is never pruned.
 
 ### Website configuration
 
@@ -99,9 +107,16 @@ The output directory is ignored by Git.
 
 ## Forecast-point maintenance
 
-`app/api/forecast/grid-points.json` contains the dense PHI sampling lattice.
-Rebuild it from the official CWA boundary with:
+`app/api/forecast/grid-points.json` contains the regional sampling lattice for
+every covered office, and `city-points.json` the labeled cities.
+Rebuild them from the official CWA boundaries with:
 
 ```bash
-node scripts/build-grid-points.mjs
+node scripts/build-cwa.mjs          # public/cwa.geojson for every office
+node scripts/build-grid-points.mjs  # regional lattice, tagged per office
+node scripts/build-city-points.mjs  # labeled cities, office-verified
 ```
+
+Run them in that order — `build-grid-points.mjs` reads `public/cwa.geojson`.
+`build-city-points.mjs` checks each city against the office `api.weather.gov`
+actually assigns it to and fails on a mismatch.

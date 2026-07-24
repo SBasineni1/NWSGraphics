@@ -27,7 +27,8 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Four offices × 3 days × 5 products is roughly 4× the original single-office run.
+    timeout-minutes: 90
     permissions:
       contents: read
     env:
@@ -38,6 +39,7 @@ jobs:
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET: ${{ vars.R2_BUCKET }}
       R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+      RELEASE_RETENTION_DAYS: ${{ vars.RELEASE_RETENTION_DAYS }}
 
     steps:
       - name: Check publication configuration

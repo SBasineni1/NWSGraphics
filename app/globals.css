@@ -43,15 +43,94 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
   background: #090909;
   color: #f4f4f4;
 }
-.catalog-brand {
+.office-picker { position: relative; }
+.office-trigger {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px;
+  width: 100%;
   min-height: 38px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: #f4f4f4;
-  text-decoration: none;
+  text-align: left;
+  cursor: pointer;
 }
+.office-trigger-text {
+  order: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.office-trigger-text strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.2;
+  letter-spacing: -.025em;
+  font-weight: 560;
+}
+.office-trigger-text em {
+  display: block;
+  overflow: hidden;
+  color: #8b8b8b;
+  font: 500 11px var(--font-geist-sans), Arial, sans-serif;
+  font-style: normal;
+  letter-spacing: -.015em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.office-caret {
+  order: 3;
+  color: #8b8b8b;
+  font-size: 10px;
+  line-height: 1;
+  transition: color .12s ease;
+}
+.office-trigger:hover .office-caret { color: #f4f4f4; }
+.office-trigger:hover .brand-mark { border-color: #f4f4f4; }
+.office-trigger:focus-visible { outline: 2px solid #f4f4f4; outline-offset: 4px; }
+.office-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 10px);
+  left: -6px;
+  right: -6px;
+  padding: 12px 6px 8px;
+  border: 1px solid #2c2c2c;
+  border-radius: 10px;
+  background: #111;
+  box-shadow: 0 18px 40px rgb(0 0 0 / .55);
+}
+.office-group + .office-group { margin-top: 10px; }
+.office-group p {
+  margin: 0 0 8px;
+  padding: 0 8px;
+  color: #8b8b8b;
+  font: 500 10px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.office-group button {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #c9c9c9;
+  font: 500 12px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: -.015em;
+  text-align: left;
+  cursor: pointer;
+}
+.office-group button b { flex: 0 0 30px; color: #f4f4f4; font-weight: 600; }
+.office-group button span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.office-group button:hover { background: #1c1c1c; color: #f4f4f4; }
+.office-group button:focus-visible { outline: 2px solid #f4f4f4; outline-offset: -2px; }
+.office-group button.is-active { background: #1c1c1c; color: #fff; }
 .brand-mark {
   display: grid;
   place-items: center;
@@ -66,8 +145,6 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
   font: 600 9px var(--font-geist-sans), Arial, sans-serif;
   letter-spacing: -.02em;
 }
-.catalog-brand strong { display: block; }
-.catalog-brand strong { font-size: 13px; line-height: 1.2; letter-spacing: -.025em; font-weight: 560; }
 .catalog-nav { margin-top: 46px; }
 .catalog-nav p,
 .product-index p {
@@ -167,6 +244,12 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
 .catalog-heading {
   margin-bottom: 48px;
 }
+.catalog-heading p {
+  margin: 14px 0 0;
+  color: #6d6d6d;
+  font-size: 13px;
+  letter-spacing: -.015em;
+}
 h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spacing: -.06em; font-weight: 570; }
 
 .forecast-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 44px 24px; align-items: start; }
@@ -225,7 +308,8 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
     border-right: 0;
     border-bottom: 1px solid #2c2c2c;
   }
-  .catalog-brand { min-height: 42px; }
+  .office-trigger { min-height: 42px; }
+  .office-menu { left: 0; right: auto; min-width: 240px; }
   .brand-mark { width: 38px; height: 23px; flex-basis: 38px; }
   .catalog-nav {
     display: flex;

@@ -4,7 +4,8 @@ import { writeFile, readFile } from "node:fs/promises";
 // clipped tighter to the render frame. Anything past the canvas is clipped at
 // draw time, so these boxes only need to be roughly right.
 const REGION = { west: -80.5, east: -71.5, south: 37.0, north: 43.2 };
-const FRAME = { west: -77.5, east: -73.0, south: 37.8, north: 42.2 };
+// Union of the four office render frames, rounded outward.
+const FRAME = { west: -80.0, east: -71.6, south: 37.1, north: 42.2 };
 
 const STATES_URL = "https://raw.githubusercontent.com/martynafford/natural-earth-geojson/master/10m/cultural/ne_10m_admin_1_states_provinces.json";
 const ROADS_URL = "https://raw.githubusercontent.com/martynafford/natural-earth-geojson/master/10m/cultural/ne_10m_roads.json";
