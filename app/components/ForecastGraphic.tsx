@@ -329,8 +329,8 @@ function drawForecastHeader(
     timeZoneName: "short",
   }).format(new Date(forecast.updatedAt)).toUpperCase();
 
-  // Match the site's editorial catalogue: quiet black surface, outlined PHI
-  // mark, compact section label, and muted metadata instead of a broadcast bar.
+  // Match the site's editorial catalogue with a quiet black surface and a
+  // compact, high-contrast information hierarchy.
   context.fillStyle = "#090909";
   context.fillRect(0, 0, PLOT_WIDTH, HEADER_HEIGHT);
   context.strokeStyle = "#2c2c2c";
@@ -342,35 +342,15 @@ function drawForecastHeader(
 
   context.textAlign = "left";
   context.textBaseline = "alphabetic";
-  context.strokeStyle = "#777777";
-  context.lineWidth = 1;
-  context.beginPath();
-  context.roundRect(24.5, 12.5, 42, 23, 12);
-  context.stroke();
-  context.fillStyle = "#f4f4f4";
-  context.font = `600 9px ${PLOT_FONT_FAMILY}`;
-  context.textAlign = "center";
-  context.fillText("PHI", 45.5, 27.5);
-
-  context.textAlign = "left";
-  context.fillStyle = "#8b8b8b";
-  context.font = `500 11px ${PLOT_FONT_FAMILY}`;
-  context.fillText(`FORECAST GRAPHICS  /  DAY ${dayIndex + 1}`, 78, 28);
-  context.textAlign = "right";
-  context.fillStyle = "#8b8b8b";
-  context.fillText("PHI FORECAST AREA", PLOT_WIDTH - 24, 28);
-
-  context.textAlign = "left";
   context.fillStyle = "#f4f4f4";
   context.font = `600 27px ${PLOT_FONT_FAMILY}`;
-  context.fillText(spec.title, 24, 63);
+  context.fillText(spec.title, 24, 39);
 
-  context.fillStyle = "#a7a7a7";
-  context.font = `500 10px ${PLOT_FONT_FAMILY}`;
-  context.fillText(`VALID  ${validLabel} · 12:00 AM–11:59 PM ${validZone}`, 24, 84);
+  context.fillStyle = "#ffffff";
+  context.font = `600 14px ${PLOT_FONT_FAMILY}`;
+  context.fillText(`VALID  ${validLabel} · 12:00 AM–11:59 PM ${validZone}`, 24, 74);
   context.textAlign = "right";
-  context.fillStyle = "#777777";
-  context.fillText(`NWS ISSUED  ${issuedLabel}`, PLOT_WIDTH - 24, 84);
+  context.fillText(`NWS ISSUED  ${issuedLabel}`, PLOT_WIDTH - 24, 74);
   context.textAlign = "left";
 }
 
