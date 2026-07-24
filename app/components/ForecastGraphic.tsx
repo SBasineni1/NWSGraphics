@@ -84,7 +84,9 @@ type ProductSpec = {
 
 const RENDER_SCALE = 2;
 const PLOT_WIDTH = 900;
-const PLOT_HEIGHT = 760;
+const MAP_HEIGHT = 760;
+const HEADER_HEIGHT = 96;
+const PLOT_HEIGHT = HEADER_HEIGHT + MAP_HEIGHT;
 const FORECAST_DAYS = [0, 1, 2];
 const PUBLISHED_ASSET_BASE_URL = (process.env.NEXT_PUBLIC_FORECAST_ASSET_BASE_URL ?? "").replace(/\/+$/, "");
 const PRODUCTS: ProductSpec[] = [
@@ -290,12 +292,95 @@ function outlinedText(context: CanvasRenderingContext2D, value: string, x: numbe
   context.fillText(value, x, y);
 }
 
+function forecastDate(value: string) {
+  return new Date(`${value}T16:00:00Z`);
+}
+
+function timeZoneName(value: Date) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    timeZoneName: "short",
+  }).formatToParts(value).find((part) => part.type === "timeZoneName")?.value ?? "ET";
+}
+
+function drawForecastHeader(
+  context: CanvasRenderingContext2D,
+  forecast: ForecastPayload,
+  spec: ProductSpec,
+  dayIndex: number,
+) {
+  const day = forecast.days[dayIndex];
+  const validDate = forecastDate(day.date);
+  const validLabel = new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "America/New_York",
+  }).format(validDate).toUpperCase();
+  const validZone = timeZoneName(validDate);
+  const issuedLabel = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+    timeZoneName: "short",
+  }).format(new Date(forecast.updatedAt)).toUpperCase();
+
+  // Match the site's editorial catalogue: quiet black surface, outlined PHI
+  // mark, compact section label, and muted metadata instead of a broadcast bar.
+  context.fillStyle = "#090909";
+  context.fillRect(0, 0, PLOT_WIDTH, HEADER_HEIGHT);
+  context.strokeStyle = "#2c2c2c";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(0, HEADER_HEIGHT - 0.5);
+  context.lineTo(PLOT_WIDTH, HEADER_HEIGHT - 0.5);
+  context.stroke();
+
+  context.textAlign = "left";
+  context.textBaseline = "alphabetic";
+  context.strokeStyle = "#777777";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.roundRect(24.5, 12.5, 42, 23, 12);
+  context.stroke();
+  context.fillStyle = "#f4f4f4";
+  context.font = `600 9px ${PLOT_FONT_FAMILY}`;
+  context.textAlign = "center";
+  context.fillText("PHI", 45.5, 27.5);
+
+  context.textAlign = "left";
+  context.fillStyle = "#8b8b8b";
+  context.font = `500 11px ${PLOT_FONT_FAMILY}`;
+  context.fillText(`FORECAST GRAPHICS  /  DAY ${dayIndex + 1}`, 78, 28);
+  context.textAlign = "right";
+  context.fillStyle = "#8b8b8b";
+  context.fillText("PHI FORECAST AREA", PLOT_WIDTH - 24, 28);
+
+  context.textAlign = "left";
+  context.fillStyle = "#f4f4f4";
+  context.font = `600 27px ${PLOT_FONT_FAMILY}`;
+  context.fillText(spec.title, 24, 63);
+
+  context.fillStyle = "#a7a7a7";
+  context.font = `500 10px ${PLOT_FONT_FAMILY}`;
+  context.fillText(`VALID  ${validLabel} · 12:00 AM–11:59 PM ${validZone}`, 24, 84);
+  context.textAlign = "right";
+  context.fillStyle = "#777777";
+  context.fillText(`NWS ISSUED  ${issuedLabel}`, PLOT_WIDTH - 24, 84);
+  context.textAlign = "left";
+}
+
 async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: ProductSpec, dayIndex: number) {
   const width = PLOT_WIDTH;
-  const height = PLOT_HEIGHT;
-  canvas.width = width * RENDER_SCALE;
-  canvas.height = height * RENDER_SCALE;
-  const context = canvas.getContext("2d")!;
+  const height = MAP_HEIGHT;
+  const mapCanvas = document.createElement("canvas");
+  mapCanvas.width = width * RENDER_SCALE;
+  mapCanvas.height = height * RENDER_SCALE;
+  const context = mapCanvas.getContext("2d")!;
   context.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
   context.lineJoin = "round";
   context.imageSmoothingEnabled = true;
@@ -337,7 +422,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   const fillAlpha = spec.fillAlpha ?? 185;
   const raster = document.createElement("canvas");
   raster.width = PLOT_WIDTH;
-  raster.height = PLOT_HEIGHT;
+  raster.height = MAP_HEIGHT;
   const rasterContext = raster.getContext("2d")!;
   const image = rasterContext.createImageData(raster.width, raster.height);
   for (let y = 0; y < raster.height; y += 1) {
@@ -465,6 +550,17 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   context.fill(new Path2D("M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"));
   context.restore();
   context.textAlign = "left";
+
+  // Commit the completed map and header together. Rendering offscreen avoids
+  // concurrent development-mode effects sharing one canvas drawing state.
+  canvas.width = width * RENDER_SCALE;
+  canvas.height = PLOT_HEIGHT * RENDER_SCALE;
+  const output = canvas.getContext("2d")!;
+  output.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
+  output.imageSmoothingEnabled = true;
+  output.imageSmoothingQuality = "high";
+  drawForecastHeader(output, forecast, spec, dayIndex);
+  output.drawImage(mapCanvas, 0, HEADER_HEIGHT, width, height);
 }
 
 function ForecastPlot({ spec, forecast, boundary, counties, states, interstates, dayIndex }: { spec: ProductSpec; forecast: ForecastPayload; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures; dayIndex: number }) {
@@ -521,13 +617,13 @@ function PublishedForecastPlot({ spec, asset, dayIndex, eager }: { spec: Product
         <h3>{spec.title}</h3>
         <a href={publishedAssetUrl(asset.download)} download={`phi-${spec.file}-day-${dayIndex + 1}.png`}>Download PNG ↓</a>
       </div>
-      {/* Direct CDN images avoid an image-proxy function and preserve the exact forecast PNG. */}
+      {/* The same-origin asset route streams the exact immutable PNG from R2. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         className="forecast-canvas"
         src={publishedAssetUrl(asset.preview)}
-        width={PLOT_WIDTH}
-        height={PLOT_HEIGHT}
+        width={asset.width / RENDER_SCALE}
+        height={asset.height / RENDER_SCALE}
         loading={eager ? "eager" : "lazy"}
         fetchPriority={eager ? "high" : "auto"}
         alt={`${spec.title}, Day ${dayIndex + 1}, for the PHI forecast area`}

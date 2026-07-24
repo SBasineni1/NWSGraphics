@@ -59,7 +59,7 @@ async function canvasPngs(locator) {
     });
     const preview = document.createElement("canvas");
     preview.width = 900;
-    preview.height = 760;
+    preview.height = Math.round(source.height / source.width * preview.width);
     const context = preview.getContext("2d");
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
@@ -67,11 +67,15 @@ async function canvasPngs(locator) {
     return {
       download: await dataUrlFor(source),
       preview: await dataUrlFor(preview),
+      width: source.width,
+      height: source.height,
     };
   });
   return {
     download: pngBuffer(dataUrls.download),
     preview: pngBuffer(dataUrls.preview),
+    width: dataUrls.width,
+    height: dataUrls.height,
   };
 }
 
@@ -169,8 +173,8 @@ try {
       day.products[productId] = {
         preview: previewKey,
         download: downloadKey,
-        width: 1800,
-        height: 1520,
+        width: images.width,
+        height: images.height,
       };
     }
     manifest.days.push(day);

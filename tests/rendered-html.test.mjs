@@ -65,9 +65,12 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /Maximum Wind Gust/);
   assert.match(component, /Maximum POP %/);
   assert.match(component, /Total Precipitation Forecast/);
+  assert.match(component, /PHI FORECAST AREA/);
+  assert.match(component, /NWS ISSUED/);
+  assert.match(component, /12:00 AM–11:59 PM/);
   assert.match(component, /Download PNG/);
   assert.match(component, /PRODUCT_GROUPS/);
-  assert.doesNotMatch(component, /FORECAST AREA|forecast-context|forecast-tabs|section-heading/);
+  assert.doesNotMatch(component, /forecast-context|forecast-tabs|section-heading/);
   assert.doesNotMatch(component, /STATIC FORECAST/);
   assert.doesNotMatch(component, /product-meta/);
   assert.match(component, /const RENDER_SCALE = 2/);
@@ -100,7 +103,8 @@ test("publishes changed forecast canvases on the issuance-aware schedule", async
   assert.match(publisher, /previous\?\.sourceRevision === sourceRevision/);
   assert.match(publisher, /dataset\.renderState === "ready"/);
   assert.match(publisher, /preview\.width = 900/);
-  assert.match(publisher, /width: 1800/);
+  assert.match(publisher, /preview\.height = Math\.round/);
+  assert.match(publisher, /width: images\.width/);
   assert.match(publisher, /releases\/\$\{id\}\/day-/);
   assert.match(publisher, /publishObject\("latest\.json"/);
   assert.match(workflow, /cron: "27 \* \* \* \*"/);
