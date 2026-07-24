@@ -47,7 +47,7 @@ function locationsFor(office: OfficeId): Location[] {
   ];
 }
 
-type ProductId = "apparentTemperature" | "temperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
+type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
 type GridValue = { validTime: string; value: number | null };
 type GridSeries = { uom?: string; values?: GridValue[] };
 type GridResponse = {
@@ -57,6 +57,7 @@ type GridResponse = {
     generatedAt?: string;
     apparentTemperature?: GridSeries;
     temperature?: GridSeries;
+    minTemperature?: GridSeries;
     windGust?: GridSeries;
     probabilityOfPrecipitation?: GridSeries;
     quantitativePrecipitation?: GridSeries;
@@ -80,7 +81,7 @@ function dailyValues(
   series: GridSeries | undefined,
   dates: string[],
   convert: (value: number) => number,
-  mode: "max" | "sum",
+  mode: "max" | "min" | "sum",
   precision = 0,
 ) {
   const grouped = new Map<string, number[]>();
@@ -93,7 +94,9 @@ function dailyValues(
   return dates.map((date) => {
     const values = grouped.get(date);
     if (!values?.length) return null;
-    const result = mode === "sum" ? values.reduce((total, value) => total + value, 0) : Math.max(...values);
+    const result = mode === "sum"
+      ? values.reduce((total, value) => total + value, 0)
+      : mode === "min" ? Math.min(...values) : Math.max(...values);
     return Math.round(result * factor) / factor;
   });
 }
@@ -115,6 +118,11 @@ async function fetchLocation(location: Location, dates: string[]) {
   const metrics: Record<ProductId, Array<number | null>> = {
     apparentTemperature: dailyValues(data.properties.apparentTemperature, dates, (value) => value * 9 / 5 + 32, "max"),
     temperature: dailyValues(data.properties.temperature, dates, (value) => value * 9 / 5 + 32, "max"),
+    // NWS's own published low, not a calendar-day minimum of the hourly series. A
+    // midnight-to-midnight minimum lands near dawn and so mixes two different nights;
+    // `minTemperature` is the overnight low the forecast actually advertises, and its
+    // period starts on the evening it belongs to, which matches the date grouping above.
+    minTemperature: dailyValues(data.properties.minTemperature, dates, (value) => value * 9 / 5 + 32, "min"),
     windGust: dailyValues(data.properties.windGust, dates, (value) => value * 0.621371, "max"),
     probabilityOfPrecipitation: dailyValues(data.properties.probabilityOfPrecipitation, dates, (value) => value, "max"),
     quantitativePrecipitation: dailyValues(data.properties.quantitativePrecipitation, dates, (value) => value / 25.4, "sum", 2),

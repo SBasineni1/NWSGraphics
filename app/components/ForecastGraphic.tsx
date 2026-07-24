@@ -5,7 +5,7 @@ import { PLOT_FONT_FAMILY } from "../fonts";
 import { DEFAULT_OFFICE, findOffice, REGIONS, type Office, type OfficeId } from "../offices";
 import { MAP_HEIGHT, PLOT_WIDTH, inverseWorld, plotExtent, project } from "../../lib/map-frame.mjs";
 
-type ProductId = "apparentTemperature" | "temperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
+type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
 type ForecastPoint = {
   id: string;
   name: string;
@@ -121,6 +121,12 @@ const PRODUCTS: ProductSpec[] = [
   },
   {
     id: "temperature", title: "Maximum Temperature", nav: "Temperature", group: "temperature", legend: "TEMPERATURE (°F)", unit: "°", file: "max-temperature", decimals: 0, verticalLegend: true,
+    stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
+  },
+  {
+    // Same ramp as the maximum, deliberately — a shared scale is what lets you read a
+    // high and a low against each other instead of re-learning the colours.
+    id: "minTemperature", title: "Minimum Temperature", nav: "Low Temp", group: "temperature", legend: "MINIMUM TEMPERATURE (°F)", unit: "°", file: "min-temperature", decimals: 0, verticalLegend: true,
     stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
@@ -714,31 +720,69 @@ function writeOfficeParam(id: OfficeId) {
   window.dispatchEvent(new Event(OFFICE_CHANGE_EVENT));
 }
 
+// Exit is deliberately quicker than entry and not staggered — a cascade on the way out
+// reads as lag. Must stay in step with the office-menu-out duration in globals.css.
+const MENU_EXIT_MS = 130;
+
 function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office: Office) => void }) {
   const [open, setOpen] = useState(false);
+  // The menu stays mounted through its exit animation, so "closing" is its own state.
+  const [closing, setClosing] = useState(false);
   const container = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const exitTimer = useRef<number | null>(null);
   const flattened = useMemo(() => REGIONS.flatMap((region) => region.offices), []);
+
+  // One running index across every heading and option, so the open cascade sweeps the
+  // list once rather than restarting at each region heading.
+  const rowIndex = useMemo(() => {
+    const rows = new Map<string, number>();
+    let row = 0;
+    for (const region of REGIONS) {
+      rows.set(`region:${region.id}`, row);
+      row += 1;
+      for (const entry of region.offices) {
+        rows.set(`office:${entry.id}`, row);
+        row += 1;
+      }
+    }
+    return rows;
+  }, []);
+
+  useEffect(() => () => { if (exitTimer.current) window.clearTimeout(exitTimer.current); }, []);
+
+  const close = useCallback((restoreFocus: boolean) => {
+    setClosing(true);
+    if (exitTimer.current) window.clearTimeout(exitTimer.current);
+    exitTimer.current = window.setTimeout(() => {
+      setOpen(false);
+      setClosing(false);
+    }, MENU_EXIT_MS);
+    if (restoreFocus) trigger.current?.focus();
+  }, []);
+
+  const openMenu = useCallback(() => {
+    if (exitTimer.current) window.clearTimeout(exitTimer.current);
+    setClosing(false);
+    setOpen(true);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: MouseEvent) => {
-      if (!container.current?.contains(event.target as Node)) setOpen(false);
+      if (!container.current?.contains(event.target as Node)) close(false);
     };
     document.addEventListener("mousedown", onPointerDown);
     return () => document.removeEventListener("mousedown", onPointerDown);
-  }, [open]);
-
-  const close = useCallback((restoreFocus: boolean) => {
-    setOpen(false);
-    if (restoreFocus) trigger.current?.focus();
-  }, []);
+  }, [open, close]);
 
   const move = useCallback((step: number) => {
     const index = flattened.findIndex((entry) => entry.id === office.id);
     const next = flattened[(index + step + flattened.length) % flattened.length];
     onSelect(next);
   }, [flattened, office, onSelect]);
+
+  const expanded = open && !closing;
 
   // Arrow keys walk the whole list, crossing region headings as if they weren't there.
   const onKeyDown = useCallback((event: React.KeyboardEvent) => {
@@ -749,29 +793,40 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      if (!open) {
-        setOpen(true);
+      if (!expanded) {
+        openMenu();
         return;
       }
       move(event.key === "ArrowDown" ? 1 : -1);
       return;
     }
-    if ((event.key === "Enter" || event.key === " ") && open) {
+    if ((event.key === "Enter" || event.key === " ") && expanded) {
       event.preventDefault();
       close(true);
     }
-  }, [close, move, open]);
+  }, [close, expanded, move, openMenu]);
 
   return (
-    <div className="office-picker" ref={container} onKeyDown={onKeyDown}>
+    <div className={`office-picker${open ? " is-open" : ""}`} ref={container} onKeyDown={onKeyDown}>
+      {/* Dims and blurs the page behind the free-standing pills. It sits inside the
+          picker, so the outside-mousedown handler counts it as "inside" and won't fire —
+          it closes the menu itself. Decorative and not focusable; Escape and a click on
+          anything else still work. */}
+      {open && (
+        <div
+          className={`office-scrim${closing ? " is-closing" : ""}`}
+          aria-hidden="true"
+          onMouseDown={() => close(false)}
+        />
+      )}
       <button
         ref={trigger}
         type="button"
         className="office-trigger"
         aria-haspopup="listbox"
-        aria-expanded={open}
+        aria-expanded={expanded}
         aria-label={`Forecast office: ${office.label}. Change office`}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => (expanded ? close(false) : openMenu())}
       >
         <span className="brand-mark">{office.id}</span>
         <span className="office-trigger-text">
@@ -781,10 +836,15 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
         <span className="office-caret" aria-hidden="true">▾</span>
       </button>
       {open && (
-        <div className="office-menu" role="listbox" aria-label="Forecast office" tabIndex={-1}>
+        <div
+          className={`office-menu${closing ? " is-closing" : ""}`}
+          role="listbox"
+          aria-label="Forecast office"
+          tabIndex={-1}
+        >
           {REGIONS.map((region) => (
             <div className="office-group" key={region.id}>
-              <p>{region.name}</p>
+              <p style={{ "--row": rowIndex.get(`region:${region.id}`) } as React.CSSProperties}>{region.name}</p>
               {region.offices.map((entry) => (
                 <button
                   key={entry.id}
@@ -793,6 +853,7 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
                   aria-selected={entry.id === office.id}
                   data-office={entry.id}
                   className={entry.id === office.id ? "is-active" : ""}
+                  style={{ "--row": rowIndex.get(`office:${entry.id}`) } as React.CSSProperties}
                   onClick={() => {
                     onSelect(entry);
                     close(true);
@@ -925,7 +986,7 @@ export function ForecastGraphic() {
         <OfficePicker office={office} onSelect={selectOffice} />
         <nav className="catalog-nav" aria-label="Forecast product catalogue">
           <p>Menu</p>
-          <a className="is-active" href="#overview"><span>Overview</span><b>[5]</b></a>
+          <a className="is-active" href="#overview"><span>Overview</span><b>[{availableProducts.length}]</b></a>
           {PRODUCT_GROUPS.map((group) => (
             <a key={group.id} href={`#product-${availableProducts.find((product) => product.group === group.id)!.id}`}>
               <span>{group.title}</span>

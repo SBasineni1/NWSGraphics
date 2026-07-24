@@ -29,7 +29,9 @@ test("server-renders the default office's apparent-temperature product", async (
   assert.match(html, /Temperature &amp; heat/);
   assert.match(html, /NWS data source/);
   assert.match(html, />Menu</);
-  assert.match(html, /\[5\]/);
+  // Product count is derived, not hardcoded, so adding a product can't leave it stale.
+  // React splits the interpolation into its own text node, hence the comment markers.
+  assert.match(html, /\[(?:<!-- -->)?6(?:<!-- -->)?\]/);
   assert.match(html, /Data status/);
   assert.doesNotMatch(html, /FORECAST AREA|VALID PERIOD|NWS ISSUED|All charts/);
   assert.doesNotMatch(html, /STATIC FORECAST|900 × 760 PNG|publication-ready/);
@@ -45,6 +47,10 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(route, /api\.weather\.gov\/gridpoints\/\$\{location\.wfo\}/);
   assert.match(route, /apparentTemperature/);
   assert.match(route, /temperature/);
+  // Overnight lows come from NWS's published minTemperature via a "min" aggregation, not
+  // from a calendar-day minimum of the hourly series (which straddles two nights).
+  assert.match(route, /minTemperature: dailyValues\(data\.properties\.minTemperature[\s\S]*?"min"\)/);
+  assert.match(route, /mode: "max" \| "min" \| "sum"/);
   assert.match(route, /windGust/);
   assert.match(route, /probabilityOfPrecipitation/);
   assert.match(route, /quantitativePrecipitation/);
@@ -66,6 +72,8 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /data-render-state=/);
   assert.match(component, /data-product-file=/);
   assert.match(component, /Maximum Temperature/);
+  assert.match(component, /Minimum Temperature/);
+  assert.match(component, /id: "minTemperature"[^\n]*verticalLegend: true/);
   assert.match(component, /Maximum Wind Gust/);
   assert.match(component, /Maximum POP %/);
   assert.match(component, /Total Precipitation Forecast/);
@@ -132,7 +140,10 @@ test("selects the forecast office by region", async () => {
   assert.match(component, /function OfficePicker/);
   assert.match(component, /role="listbox"/);
   assert.match(component, /role="option"/);
-  assert.match(component, /aria-expanded=\{open\}/);
+  // `expanded` excludes the exit animation, so the trigger doesn't advertise an open
+  // listbox while the menu is on its way out.
+  assert.match(component, /const expanded = open && !closing/);
+  assert.match(component, /aria-expanded=\{expanded\}/);
   assert.match(component, /event\.key === "Escape"/);
   assert.match(component, /window\.history\.replaceState/);
   assert.match(component, /\/api\/forecast\?office=\$\{office\.id\}/);
@@ -141,6 +152,43 @@ test("selects the forecast office by region", async () => {
   assert.match(route, /searchParams\.get\("office"\)/);
   assert.match(route, /function locationsFor/);
   assert.match(route, /location\.offices\.includes\(office\)/);
+});
+
+test("animates the office menu open with a staggered cascade", async () => {
+  const [component, css] = await Promise.all([
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  // The menu must survive its own exit animation rather than unmounting instantly.
+  assert.match(component, /const MENU_EXIT_MS = (\d+)/);
+  assert.match(component, /setClosing\(true\)/);
+  assert.match(component, /is-closing/);
+  // A single running index across headings and options keeps the cascade one sweep.
+  assert.match(component, /rowIndex\.get\(`region:\$\{region\.id\}`\)/);
+  assert.match(component, /rowIndex\.get\(`office:\$\{entry\.id\}`\)/);
+
+  assert.match(css, /@keyframes office-row-in/);
+  assert.match(css, /@keyframes office-row-out/);
+  assert.match(css, /animation-delay: calc\(40ms \+ var\(--row, 0\) \* 42ms\)/);
+  // `backwards`, not `both` — `both` would pin transform and kill the :active press.
+  assert.match(css, /animation: office-row-in [^;]*backwards/);
+  assert.doesNotMatch(css, /animation: office-row-in [^;]*\bboth\b/);
+  // Motion must be optional.
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+
+  // The pills are free-standing: the menu is a transparent stack, not a panel. A
+  // background or border here would put the box back.
+  const menuBlock = /\.office-menu\s*\{([^}]*)\}/.exec(css);
+  assert.ok(menuBlock, "could not find the .office-menu rule");
+  assert.doesNotMatch(menuBlock[1], /background|border(?!-)|box-shadow/);
+  assert.match(css, /\.office-group button\s*\{[^}]*border-radius: 999px/);
+
+  // The CSS exit duration and the unmount timer have to agree, or the pills either
+  // disappear mid-animation or linger after it finishes.
+  const exitMs = Number(/const MENU_EXIT_MS = (\d+)/.exec(component)[1]);
+  const cssExit = /animation:\s*office-row-out\s+\.(\d+)s/.exec(css);
+  assert.ok(cssExit, "could not read the office-row-out duration from globals.css");
+  assert.equal(Number(cssExit[1]) * 10, exitMs, "MENU_EXIT_MS must match the office-row-out duration");
 });
 
 test("publishes changed forecast canvases on the issuance-aware schedule", async () => {
@@ -205,6 +253,31 @@ test("publishes every office and prunes aged-out releases", async () => {
   assert.match(component, /schemaVersion !== 1 && manifest\.schemaVersion !== 2/);
   // The asset path guard admits both key shapes and nothing else.
   assert.match(assetRoute, /\(\?:\[A-Z\]\{3\}\\\/\)\?day-\[1-3\]/);
+});
+
+test("publisher discovers products from the page, so adding one needs no job change", async () => {
+  const [publisher, component] = await Promise.all([
+    readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+  ]);
+  // Products are read off the DOM, never enumerated here. Hardcoding a list would mean
+  // every new product silently stopped being published.
+  assert.match(publisher, /querySelectorAll\("canvas\[data-product-id\]"\)/);
+  assert.match(publisher, /getAttribute\("data-product-id"\)/);
+  assert.match(publisher, /getAttribute\("data-product-file"\)/);
+  const productIds = [...component.matchAll(/^\s*id: "(\w+)", title:/gm)].map((match) => match[1]);
+  assert.ok(productIds.length >= 6, `expected the product list to be discovered, got ${productIds.length}`);
+  for (const id of productIds) {
+    assert.ok(!publisher.includes(id), `publisher must not name product "${id}" — it should discover products`);
+  }
+  // Every product's file slug has to satisfy the asset-path guard, or its PNG 404s.
+  const slugs = [...component.matchAll(/file: "([a-z-]+)"/g)].map((match) => match[1]);
+  assert.equal(slugs.length, productIds.length);
+  for (const slug of slugs) {
+    for (const key of [`${slug}.png`, `${slug}-preview.png`]) {
+      assert.match(key, /^[a-z][a-z-]*\.png$/, `asset key ${key} would be rejected by the path guard`);
+    }
+  }
 });
 
 test("resolves both published key shapes and rejects anything else", async () => {

@@ -44,6 +44,31 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
   color: #f4f4f4;
 }
 .office-picker { position: relative; }
+/* Lift the trigger and its pills above the scrim while the menu is open. */
+.office-picker.is-open { z-index: 20; }
+
+/* Without a panel behind them the pills float over the sidebar nav, which reads straight
+   through the gaps. Dimming and blurring everything behind is what makes free-standing
+   options legible — and it puts the focus on the choice, as the Focus picker does. */
+.office-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  background: rgb(6 6 6 / .72);
+  backdrop-filter: blur(10px) saturate(.85);
+  -webkit-backdrop-filter: blur(10px) saturate(.85);
+  animation: office-scrim-in .24s ease both;
+}
+@keyframes office-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+/* Keep in step with MENU_EXIT_MS in ForecastGraphic.tsx. */
+.office-scrim.is-closing { animation: office-scrim-out .13s ease both; }
+@keyframes office-scrim-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
 .office-trigger {
   display: flex;
   align-items: center;
@@ -85,52 +110,118 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
   color: #8b8b8b;
   font-size: 10px;
   line-height: 1;
-  transition: color .12s ease;
+  transition: color .12s ease, transform .26s cubic-bezier(.32, .72, 0, 1);
 }
 .office-trigger:hover .office-caret { color: #f4f4f4; }
+.office-trigger[aria-expanded="true"] .office-caret { transform: rotate(180deg); color: #f4f4f4; }
 .office-trigger:hover .brand-mark { border-color: #f4f4f4; }
 .office-trigger:focus-visible { outline: 2px solid #f4f4f4; outline-offset: 4px; }
+/* Above the scrim, so the pill you clicked stays lit while everything else dims. */
+.office-picker.is-open .office-trigger { position: relative; z-index: 16; }
+/* No panel. Each office is a free-standing pill that drops out from behind the trigger,
+   the way the iOS Focus picker releases its options — the list *is* the pills, so there
+   is no surface to fade and nothing bleeds through. The menu element is only a
+   positioned, transparent stack. */
 .office-menu {
   position: absolute;
   z-index: 20;
-  top: calc(100% + 10px);
-  left: -6px;
-  right: -6px;
-  padding: 12px 6px 8px;
-  border: 1px solid #2c2c2c;
-  border-radius: 10px;
-  background: #111;
-  box-shadow: 0 18px 40px rgb(0 0 0 / .55);
+  top: calc(100% + 12px);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
-.office-group + .office-group { margin-top: 10px; }
+.office-menu.is-closing { pointer-events: none; }
+.office-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.office-group + .office-group { margin-top: 6px; }
 .office-group p {
-  margin: 0 0 8px;
-  padding: 0 8px;
-  color: #8b8b8b;
-  font: 500 10px var(--font-geist-sans), Arial, sans-serif;
-  letter-spacing: .06em;
+  margin: 0;
+  padding: 0 4px 2px;
+  color: #f4f4f4;
+  font: 600 11px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: .07em;
   text-transform: uppercase;
 }
+
+/* --row is a single running index across every heading and pill, so the cascade sweeps
+   the list once instead of restarting at each region.
+   `backwards`, not `both`: the row is held at its start state through the delay, but
+   once the cascade finishes normal CSS owns transform again so :active can press it. */
+.office-group p,
+.office-group button {
+  animation: office-row-in .42s cubic-bezier(.22, 1.12, .4, 1) backwards;
+  animation-delay: calc(40ms + var(--row, 0) * 42ms);
+}
+/* Each pill falls from behind the one above it, with a little overshoot at the end from
+   the easing curve — the drop is what carries the motion, not a fade. */
+@keyframes office-row-in {
+  from { opacity: 0; transform: translateY(-22px) scale(.92); }
+  40% { opacity: 1; }
+  to { opacity: 1; transform: none; }
+}
+/* On the way out they leave together — a reverse cascade reads as lag. */
+.office-menu.is-closing .office-group p,
+.office-menu.is-closing .office-group button {
+  animation: office-row-out .13s cubic-bezier(.4, 0, 1, 1) both;
+}
+@keyframes office-row-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(-10px) scale(.96); }
+}
+/* Free-standing pills, like the Focus options — fully rounded, no shared container. */
 .office-group button {
   display: flex;
-  align-items: baseline;
-  gap: 9px;
+  align-items: center;
+  gap: 12px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 13px 18px;
   border: 0;
-  border-radius: 6px;
-  background: transparent;
+  border-radius: 999px;
+  background: #191919;
   color: #c9c9c9;
-  font: 500 12px var(--font-geist-sans), Arial, sans-serif;
+  font: 500 13px var(--font-geist-sans), Arial, sans-serif;
   letter-spacing: -.015em;
   text-align: left;
   cursor: pointer;
+  transition: background .16s ease, color .16s ease, transform .12s ease;
 }
-.office-group button b { flex: 0 0 30px; color: #f4f4f4; font-weight: 600; }
-.office-group button span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.office-group button:hover { background: #1c1c1c; color: #f4f4f4; }
-.office-group button:focus-visible { outline: 2px solid #f4f4f4; outline-offset: -2px; }
-.office-group button.is-active { background: #1c1c1c; color: #fff; }
+.office-group button b {
+  flex: 0 0 34px;
+  color: #f4f4f4;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+.office-group button span {
+  overflow: hidden;
+  color: #8b8b8b;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.office-group button:hover { background: #242424; color: #f4f4f4; }
+.office-group button:hover span { color: #b4b4b4; }
+.office-group button:focus-visible { outline: 2px solid #f4f4f4; outline-offset: 2px; }
+/* The selected office inverts to a light pill, the way the active Focus reads. */
+.office-group button.is-active { background: #f4f4f4; color: #090909; }
+.office-group button.is-active b { color: #090909; }
+.office-group button.is-active span { color: #4a4a4a; }
+.office-group button.is-active:hover { background: #fff; }
+.office-group button:active { transform: scale(.975); }
+
+@media (prefers-reduced-motion: reduce) {
+  .office-group p,
+  .office-group button,
+  .office-menu.is-closing .office-group p,
+  .office-menu.is-closing .office-group button {
+    animation: none;
+  }
+  .office-caret { transition: color .12s ease; }
+  .office-group button:active { transform: none; }
+}
 .brand-mark {
   display: grid;
   place-items: center;

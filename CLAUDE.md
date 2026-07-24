@@ -120,6 +120,20 @@ the full R2 / GitHub secrets setup.
   array in `ForecastGraphic.tsx`; the `ProductId` union is duplicated in
   `route.ts`. Change both together. (`OfficeId` is *not* duplicated — it lives
   only in `app/offices.ts`.)
+- **Adding a product needs no publisher or workflow change.** The publisher
+  discovers products by querying `canvas[data-product-id]` and reading the id and
+  `data-product-file` off each one — it never enumerates them. A test asserts the
+  publisher names no product id, so don't hardcode a list there. A new product's
+  `file` slug must match `^[a-z][a-z-]*$` or the asset-path guard in
+  `forecast-assets/[...path]/route.ts` will reject its PNG.
+  What a new product *does* need: an entry in `PRODUCTS`, the `ProductId` union in
+  both files, and a `metrics` line in `fetchLocation`. Aggregation modes are
+  `max | min | sum` (`dailyValues`).
+- A product the client knows but the current manifest lacks renders as nothing on
+  the published path (`asset ? <Plot/> : null`) until the next publish run. Not an
+  error, but expect a newly added product to be missing from published offices
+  until the job runs again — which it will, since a changed `GITHUB_SHA` defeats
+  the unchanged-check.
 - `lib/map-frame.mjs` holds the Web Mercator math shared by the renderer and
   the build scripts. Both must agree exactly: `build-grid-points.mjs` lattices
   the frames `ForecastGraphic.tsx` draws, so drift here shows up as missing
