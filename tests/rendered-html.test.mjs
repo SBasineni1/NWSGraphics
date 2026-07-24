@@ -67,6 +67,8 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /Total Precipitation Forecast/);
   assert.match(component, /NWS ISSUED/);
   assert.match(component, /12:00 AM–11:59 PM/);
+  assert.match(component, /weather-mark-white\.png/);
+  assert.match(component, /drawImage\(headerMark/);
   assert.doesNotMatch(component, /FORECAST GRAPHICS  \/  DAY|PHI FORECAST AREA/);
   assert.match(component, /Download PNG/);
   assert.match(component, /PRODUCT_GROUPS/);

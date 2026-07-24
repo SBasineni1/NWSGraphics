@@ -119,6 +119,16 @@ const PRODUCT_GROUPS: Array<{ id: ProductGroupId; title: string }> = [
 ];
 
 const tileCache = new Map<string, Promise<ImageBitmap>>();
+let headerMarkPromise: Promise<ImageBitmap | null> | null = null;
+
+function loadHeaderMark() {
+  if (!headerMarkPromise) {
+    headerMarkPromise = fetch("/weather-mark-white.png")
+      .then(async (response) => response.ok ? createImageBitmap(await response.blob()) : null)
+      .catch(() => null);
+  }
+  return headerMarkPromise;
+}
 
 function boundaryBounds(boundary: Boundary): Bounds {
   const positions = boundary.features[0].geometry.coordinates.flat(2);
@@ -308,6 +318,7 @@ function drawForecastHeader(
   forecast: ForecastPayload,
   spec: ProductSpec,
   dayIndex: number,
+  headerMark: ImageBitmap | null,
 ) {
   const day = forecast.days[dayIndex];
   const validDate = forecastDate(day.date);
@@ -345,6 +356,10 @@ function drawForecastHeader(
   context.fillStyle = "#f4f4f4";
   context.font = `600 27px ${PLOT_FONT_FAMILY}`;
   context.fillText(spec.title, 24, 39);
+
+  if (headerMark) {
+    context.drawImage(headerMark, PLOT_WIDTH - 105, 0, 96, 96);
+  }
 
   context.fillStyle = "#ffffff";
   context.font = `600 14px ${PLOT_FONT_FAMILY}`;
@@ -539,7 +554,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   output.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
   output.imageSmoothingEnabled = true;
   output.imageSmoothingQuality = "high";
-  drawForecastHeader(output, forecast, spec, dayIndex);
+  drawForecastHeader(output, forecast, spec, dayIndex, await loadHeaderMark());
   output.drawImage(mapCanvas, 0, HEADER_HEIGHT, width, height);
 }
 
