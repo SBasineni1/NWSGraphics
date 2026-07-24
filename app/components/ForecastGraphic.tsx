@@ -358,7 +358,8 @@ function drawForecastHeader(
   context.fillText(spec.title, 24, 39);
 
   if (headerMark) {
-    context.drawImage(headerMark, PLOT_WIDTH - 105, 0, 96, 96);
+    // Keep the mark in the unused top-right corner, clear of the issued line.
+    context.drawImage(headerMark, PLOT_WIDTH - 84, -2, 72, 72);
   }
 
   context.fillStyle = "#ffffff";
