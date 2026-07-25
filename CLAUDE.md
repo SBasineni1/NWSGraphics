@@ -58,7 +58,7 @@ component) chooses at runtime:
    (path is validated against a strict regex — keep that guard).
 2. **Live canvas fallback.** Otherwise it renders maps in the browser: fetches
    `/api/forecast?office=…`, samples the forecast field with inverse-distance
-   weighting (`sampleField`), and paints geojson overlays (`public/*.geojson`)
+   weighting (`fieldSolveFor`), and paints geojson overlays (`public/*.geojson`)
    plus city labels onto a `<canvas>` at 900×760 (`RENDER_SCALE = 2`).
 
 `app/api/forecast/route.ts` (`runtime = "edge"`) is the data source: it fans out
@@ -73,7 +73,14 @@ slice covers its full render frame using real gridpoint data from neighbouring
 offices, and the CWA is marked by its outline alone. Two things make that
 affordable and must not be undone casually:
 
-- `FIELD_STRIDE = 4` — `sampleField` is solved on a coarse lattice and
+- `solveFieldWeights` / `fieldSolveFor` — which eight gridpoints are nearest a lattice
+  cell, and their weights, depend only on geometry, so an office solves that once and
+  all forty of its plots reuse it. This was the largest single cost in a render
+  (17% of CPU) before caching; days 2 and 3 dropped from ~3.2s to ~1.3s. The cache key
+  is the **contributing point set**, not the office: a product where some gridpoints
+  report null is a different set with different neighbours. Weights are `Float64Array`
+  so the reused sum stays bit-identical to a per-pixel solve.
+- `FIELD_STRIDE = 4` — the field is solved on a coarse lattice and
   bilinearly upsampled. The `Math.ceil((size - 1) / FIELD_STRIDE) + 1` sample
   counts are deliberate; drop the `+ 1` and the last stride of pixels has no
   upper neighbour and the raster ends in a visible seam.
@@ -122,6 +129,22 @@ covers a publish landing mid-session.
 Local dry run: `PLOT_OUTPUT_ONLY=true npm run plots:publish` writes to
 `outputs/forecast-publish/` without uploading or pruning. See `README.md` for
 the full R2 / GitHub secrets setup.
+
+**Measured cost of a release** (local, 2026-07-25 — re-measure before trusting):
+
+| Phase | Cost | Notes |
+|---|---|---|
+| Forecast fetch, 4 offices | ~34s | Concurrent. Serial was 42s — the ceiling is shared upstream, not per-office, so this is ~20%, not 4×. |
+| Render, per office | 11.6s prod / 25.1s dev | 40 canvases. Day 1 is dominated by basemap tile fetches; days 2–3 are ~1.3s each. |
+| Canvas capture, 14 canvases | 0.6s | Encode *and* CDP transfer. Not a bottleneck — don't optimize it without re-measuring. |
+| Upload | ~571 MB, 320 objects | Pooled 8-wide; latency-bound, not bandwidth-bound. |
+
+The whole pipeline is minutes. **If a run takes tens of minutes it has stalled, it
+is not "a lot of plots"** — check the forecast-fetch phase first, since it is the
+one that waits on api.weather.gov. Profile with the CDP sampling profiler
+(`Profiler.start` over a page that renders all three days) rather than guessing;
+the two things that looked expensive by eye (reference-layer tracing, PNG
+encoding) measured at under 1% each.
 
 ## Conventions & gotchas
 

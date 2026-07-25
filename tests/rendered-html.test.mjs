@@ -111,7 +111,7 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /traceBoundary/);
   // The field now fills the whole frame; the CWA is marked by its outline alone.
   assert.doesNotMatch(component, /context\.clip\("evenodd"\)/);
-  assert.match(component, /const neighborCount = 8/);
+  assert.match(component, /const NEIGHBOR_COUNT = 8/);
   assert.match(component, /points\.filter\(\(point\) => !point\.label\)/);
   assert.doesNotMatch(component, /coverageFalloff|maskFar/);
   assert.match(component, /rastertiles\/voyager/);
@@ -127,6 +127,18 @@ test("fills the whole frame without re-solving the field per pixel", async () =>
   // of pixels has no upper neighbour and the raster ends in a seam.
   assert.match(component, /Math\.ceil\(\(raster\.width - 1\) \/ FIELD_STRIDE\) \+ 1/);
   assert.match(component, /Math\.ceil\(\(raster\.height - 1\) \/ FIELD_STRIDE\) \+ 1/);
+  // Which points are nearest a lattice cell depends only on geometry, not on the product
+  // or the day, so an office solves it once and all forty of its plots reuse the result.
+  // This was the largest single cost in a render before it was cached.
+  assert.match(component, /function solveFieldWeights/);
+  assert.match(component, /function fieldSolveFor/);
+  // Keyed by the contributing points: a product where some gridpoints report null is a
+  // different set with different neighbours, and sharing a solve would move values.
+  assert.match(component, /points\.map\(\(point\) => point\.id\)\.join\("\|"\)/);
+  // …and dropped when the frame changes, so a solve can't outlive its lattice.
+  assert.match(component, /if \(fieldSolveFrame !== frame\)/);
+  // float64, or the reused sum can land a pixel in the neighbouring colour band.
+  assert.match(component, /new Float64Array\(cells \* NEIGHBOR_COUNT\)/);
   assert.match(component, /function colorRamp/);
   assert.match(component, /new Uint8ClampedArray\(COLOR_LUT_SIZE \* 3\)/);
   // Entries must come from colorFor itself — the stops are not evenly spaced.
@@ -272,14 +284,29 @@ test("publishes changed forecast canvases on the issuance-aware schedule", async
   assert.match(publisher, /width: images\.width/);
   assert.match(publisher, /releases\/\$\{id\}\/\$\{office\}\/day-/);
   assert.match(publisher, /publishObject\("latest\.json"/);
+  // A release is ~320 objects. One at a time, the phase is round-trip latency rather
+  // than bandwidth, so uploads run through a pool — per day, so it holds one day's PNGs
+  // rather than a whole release's.
+  assert.match(publisher, /const UPLOAD_CONCURRENCY = 8/);
+  assert.match(publisher, /async function pooled/);
+  assert.match(publisher, /await pooled\(uploads, UPLOAD_CONCURRENCY/);
+  // Each office's forecast fans out to hundreds of gridpoints; fetched together the
+  // phase costs the slowest office rather than the sum of all four.
+  assert.match(publisher, /await Promise\.all\(OFFICES\.map\(async \(office\)/);
   assert.match(workflow, /cron: "27 \* \* \* \*"/);
   assert.match(workflow, /cron: "5,15,25,35,45,55 3,15 \* \* \*"/);
   assert.match(workflow, /timezone: "America\/New_York"/);
   assert.match(workflow, /workflow_dispatch/);
   assert.match(workflow, /R2_PUBLIC_BASE_URL/);
   assert.match(workflow, /cancel-in-progress: false/);
-  // Four offices is roughly 4× the single-office runtime the old timeout allowed.
-  assert.match(workflow, /timeout-minutes: 90/);
+  // The measured pipeline is minutes, so the ceiling is there to kill a stalled run
+  // rather than to accommodate a slow one.
+  assert.match(workflow, /timeout-minutes: 45/);
+  // The publisher drives the production build, not the Vite dev server: dev renders
+  // through unminified modules and a development React, at less than half the speed.
+  assert.match(workflow, /npm run build/);
+  assert.match(workflow, /npm run start -- --port 3000/);
+  assert.doesNotMatch(workflow, /npm run dev/);
 });
 
 test("publishes every office and prunes aged-out releases", async () => {

@@ -458,32 +458,88 @@ function colorRamp(stops: ColorStop[]) {
   return ramp;
 }
 
-function sampleField(points: ForecastPoint[], product: ProductId, dayIndex: number, lon: number, lat: number) {
-  const neighborCount = 8;
-  const neighbors: Array<{ distanceSquared: number; value: number }> = [];
-  for (const point of points) {
-    const value = point.metrics[product][dayIndex];
-    if (value === null) continue;
-    const dx = (lon - point.lon) * Math.cos(lat * Math.PI / 180);
-    const dy = lat - point.lat;
-    const distanceSquared = dx * dx + dy * dy;
-    if (distanceSquared < 0.000001) return value;
-    const insertAt = neighbors.findIndex((neighbor) => distanceSquared < neighbor.distanceSquared);
-    if (insertAt === -1) {
-      if (neighbors.length < neighborCount) neighbors.push({ distanceSquared, value });
-    } else {
-      neighbors.splice(insertAt, 0, { distanceSquared, value });
-      if (neighbors.length > neighborCount) neighbors.pop();
+/**
+ * The inverse-distance solve, precomputed.
+ *
+ * Which eight points are nearest a lattice cell, and how much each is weighted, depends
+ * only on where the points and the cell *are* — not on which product or day is being
+ * drawn. The office renders forty plots over one lattice and one set of gridpoints, so
+ * solving it per plot repeats the same 8-nearest search forty times: it was the single
+ * largest cost in a render, ahead of everything else the profile showed.
+ *
+ * So the search runs once and the result is reused. Each plot is then a weighted sum
+ * over eight already-chosen neighbours, which is arithmetic rather than a scan of every
+ * point in the region.
+ *
+ * The key has to include the point set, not just the office: a product where some
+ * gridpoints report null is a genuinely different set, with different nearest
+ * neighbours, and reusing another product's solve for it would silently move values
+ * around the map.
+ */
+// Weights are float64, not float32: the per-plot sum has to stay bit-for-bit what the
+// per-pixel solve produced, or the ramp lookup can land a pixel in the neighbouring
+// colour band and the optimisation would show up as a changed map.
+type FieldSolve = { indices: Int32Array; weights: Float64Array; exact: Int32Array };
+const NEIGHBOR_COUNT = 8;
+
+function solveFieldWeights(points: ForecastPoint[], columns: number, rows: number, positionOf: (column: number, row: number) => { lon: number; lat: number }): FieldSolve {
+  const cells = columns * rows;
+  const indices = new Int32Array(cells * NEIGHBOR_COUNT).fill(-1);
+  const weights = new Float64Array(cells * NEIGHBOR_COUNT);
+  // A cell sitting exactly on a gridpoint takes that point's value outright, the same
+  // short-circuit the per-pixel solve had.
+  const exact = new Int32Array(cells).fill(-1);
+  const near: Array<{ distanceSquared: number; index: number }> = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const cell = row * columns + column;
+      const { lon, lat } = positionOf(column, row);
+      const scale = Math.cos(lat * Math.PI / 180);
+      near.length = 0;
+      for (let index = 0; index < points.length; index += 1) {
+        const point = points[index];
+        const dx = (lon - point.lon) * scale;
+        const dy = lat - point.lat;
+        const distanceSquared = dx * dx + dy * dy;
+        if (distanceSquared < 0.000001) {
+          exact[cell] = index;
+          break;
+        }
+        const insertAt = near.findIndex((neighbor) => distanceSquared < neighbor.distanceSquared);
+        if (insertAt === -1) {
+          if (near.length < NEIGHBOR_COUNT) near.push({ distanceSquared, index });
+        } else {
+          near.splice(insertAt, 0, { distanceSquared, index });
+          if (near.length > NEIGHBOR_COUNT) near.pop();
+        }
+      }
+      if (exact[cell] !== -1) continue;
+      for (let slot = 0; slot < near.length; slot += 1) {
+        indices[cell * NEIGHBOR_COUNT + slot] = near[slot].index;
+        weights[cell * NEIGHBOR_COUNT + slot] = 1 / Math.pow(near[slot].distanceSquared + 0.0005, 1.35);
+      }
     }
   }
-  let weighted = 0;
-  let weights = 0;
-  for (const neighbor of neighbors) {
-    const weight = 1 / Math.pow(neighbor.distanceSquared + 0.0005, 1.35);
-    weighted += neighbor.value * weight;
-    weights += weight;
+  return { indices, weights, exact };
+}
+
+// Cleared whenever the lattice geometry changes, so a solve can never outlive the frame
+// it was computed for.
+let fieldSolveCache = new Map<string, FieldSolve>();
+let fieldSolveFrame = "";
+
+function fieldSolveFor(points: ForecastPoint[], frame: string, columns: number, rows: number, positionOf: (column: number, row: number) => { lon: number; lat: number }) {
+  if (fieldSolveFrame !== frame) {
+    fieldSolveCache = new Map();
+    fieldSolveFrame = frame;
   }
-  return weights ? weighted / weights : 0;
+  // Identifies the exact set of contributing points, in order.
+  const key = points.map((point) => point.id).join("|");
+  const cached = fieldSolveCache.get(key);
+  if (cached) return cached;
+  const solve = solveFieldWeights(points, columns, rows, positionOf);
+  fieldSolveCache.set(key, solve);
+  return solve;
 }
 
 // Every canvas at a given extent shares these promises, so a basemap request that hangs
@@ -763,16 +819,33 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   // interpolate against and the raster ends in a visible seam.
   const columns = Math.ceil((raster.width - 1) / FIELD_STRIDE) + 1;
   const rows = Math.ceil((raster.height - 1) / FIELD_STRIDE) + 1;
-  const field = new Float32Array(columns * rows);
-  for (let row = 0; row < rows; row += 1) {
+  const positionOf = (column: number, row: number) => {
+    const x = Math.min(column * FIELD_STRIDE, raster.width - 1);
     const y = Math.min(row * FIELD_STRIDE, raster.height - 1);
+    const worldX = extent.left + x / (raster.width - 1) * (extent.right - extent.left);
     const worldY = extent.top + y / (raster.height - 1) * (extent.bottom - extent.top);
-    for (let column = 0; column < columns; column += 1) {
-      const x = Math.min(column * FIELD_STRIDE, raster.width - 1);
-      const worldX = extent.left + x / (raster.width - 1) * (extent.right - extent.left);
-      const coordinate = inverseWorld(worldX, worldY, extent.zoom);
-      field[row * columns + column] = sampleField(fieldPoints, spec.id, dayIndex, coordinate.lon, coordinate.lat);
+    return inverseWorld(worldX, worldY, extent.zoom);
+  };
+  // Which points are nearest each cell doesn't change between products or days, so the
+  // search behind it is solved once per point set and every plot reuses it.
+  const frame = `${office}:${extent.zoom}:${extent.left}:${extent.top}:${columns}x${rows}`;
+  const { indices, weights, exact } = fieldSolveFor(fieldPoints, frame, columns, rows, positionOf);
+  const field = new Float32Array(columns * rows);
+  for (let cell = 0; cell < field.length; cell += 1) {
+    if (exact[cell] !== -1) {
+      field[cell] = fieldPoints[exact[cell]].metrics[spec.id][dayIndex] ?? 0;
+      continue;
     }
+    let weighted = 0;
+    let total = 0;
+    for (let slot = 0; slot < NEIGHBOR_COUNT; slot += 1) {
+      const index = indices[cell * NEIGHBOR_COUNT + slot];
+      if (index === -1) break;
+      const weight = weights[cell * NEIGHBOR_COUNT + slot];
+      weighted += (fieldPoints[index].metrics[spec.id][dayIndex] ?? 0) * weight;
+      total += weight;
+    }
+    field[cell] = total ? weighted / total : 0;
   }
 
   // Bilinearly expand the lattice back to full resolution, colouring each pixel from the

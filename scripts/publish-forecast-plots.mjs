@@ -105,15 +105,20 @@ async function canvasPngs(locator) {
   };
 }
 
+// Each office's forecast fans out to a couple of hundred api.weather.gov gridpoints, so
+// a single request runs into the tens of seconds. Fetched together the phase costs the
+// slowest office rather than the sum of all four — the requests are almost entirely
+// spent waiting on upstream, so overlapping them costs nothing locally.
 const forecasts = {};
-for (const office of OFFICES) {
+await Promise.all(OFFICES.map(async (office) => {
+  const startedFetch = Date.now();
   const payload = await fetchJson(`${siteUrl}/api/forecast?office=${office}`, { cache: "no-store" });
   if (!payload.updatedAt || !Array.isArray(payload.days) || payload.days.length < 3) {
     throw new Error(`Forecast endpoint did not return a complete three-day payload for ${office}`);
   }
   forecasts[office] = payload;
-  console.error(`fetched ${office}: ${payload.points.length} points, ${payload.failures} failures`);
-}
+  console.error(`fetched ${office}: ${payload.points.length} points, ${payload.failures} failures, ${((Date.now() - startedFetch) / 1000).toFixed(1)}s`);
+}));
 // All offices publish together, so one office's issuance time gates the whole release.
 const forecast = forecasts[OFFICES[0]];
 
@@ -122,14 +127,14 @@ const forecast = forecasts[OFFICES[0]];
 // stall the render. The two are independent: one centre being down costs its own
 // products, not the other's.
 const outlookSnapshots = {};
-for (const [name, path] of [["spc", "/api/spc-outlook"], ["wpc", "/api/wpc-outlook"]]) {
+await Promise.all([["spc", "/api/spc-outlook"], ["wpc", "/api/wpc-outlook"]].map(async ([name, path]) => {
   try {
     outlookSnapshots[name] = await fetchJson(`${siteUrl}${path}`, { cache: "no-store" });
   } catch (error) {
     outlookSnapshots[name] = null;
     console.error(`${name.toUpperCase()} outlook unavailable, publishing without it: ${error.message}`);
   }
-}
+}));
 
 const previous = await currentManifest();
 if (!forcePublish && previous?.updatedAt === forecast.updatedAt && previous?.sourceRevision === sourceRevision) {
@@ -196,6 +201,25 @@ const s3 = outputOnly ? null : new S3Client({
 });
 const bucket = outputOnly ? "" : required("R2_BUCKET");
 
+// A release is ~320 objects. Uploaded one at a time each pays a full round trip to R2,
+// so the phase is dominated by latency rather than bandwidth — a pool turns that into
+// roughly one round trip per batch. Kept modest so a slow runner doesn't open so many
+// sockets that they start timing each other out.
+const UPLOAD_CONCURRENCY = 8;
+
+/** Runs `task` over `items`, at most `limit` in flight, failing on the first rejection. */
+async function pooled(items, limit, task) {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      await task(items[index]);
+    }
+  });
+  await Promise.all(workers);
+}
+
 async function publishObject(key, body, contentType, cacheControl) {
   if (outputOnly) {
     const destination = resolve(outputDirectory, key);
@@ -255,8 +279,12 @@ async function captureOffice(office) {
         shortLabel: officeForecast.days[dayIndex].shortLabel,
         products: {},
       };
+      // Encode first, upload after. Capturing every canvas for the day costs about a
+      // second, so this holds one day's PNGs — not a whole release's — while the pool
+      // works through them.
       const canvases = page.locator("canvas[data-product-id]");
       const canvasCount = await canvases.count();
+      const uploads = [];
       for (let index = 0; index < canvasCount; index += 1) {
         const canvas = canvases.nth(index);
         const productId = await canvas.getAttribute("data-product-id");
@@ -266,8 +294,7 @@ async function captureOffice(office) {
         const prefix = `releases/${id}/${office}/day-${dayIndex + 1}/${productFile}`;
         const previewKey = `${prefix}-preview.png`;
         const downloadKey = `${prefix}.png`;
-        await publishObject(previewKey, images.preview, "image/png", "public, max-age=31536000, immutable");
-        await publishObject(downloadKey, images.download, "image/png", "public, max-age=31536000, immutable");
+        uploads.push({ key: previewKey, body: images.preview }, { key: downloadKey, body: images.download });
         day.products[productId] = {
           preview: previewKey,
           download: downloadKey,
@@ -275,6 +302,8 @@ async function captureOffice(office) {
           height: images.height,
         };
       }
+      await pooled(uploads, UPLOAD_CONCURRENCY, (upload) =>
+        publishObject(upload.key, upload.body, "image/png", "public, max-age=31536000, immutable"));
       progress(`${office}: day ${dayIndex + 1} captured (${Object.keys(day.products).length} products)`);
       days.push(day);
     }

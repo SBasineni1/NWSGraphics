@@ -27,8 +27,11 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Four offices × 3 days × 5 products is roughly 4× the original single-office run.
-    timeout-minutes: 90
+    # A release is 4 offices × 40 canvases. Measured end to end the pipeline is minutes,
+    # not tens of minutes, so this ceiling exists to kill a run that has *stalled* —
+    # usually waiting on api.weather.gov — rather than to accommodate a slow one. If a
+    # run ever approaches it, the cause is a hang, not the plot count.
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
@@ -72,10 +75,18 @@ jobs:
         if: steps.publication.outputs.enabled == 'true'
         run: npx playwright install --with-deps chromium
 
+      - name: Build forecast site
+        if: steps.publication.outputs.enabled == 'true'
+        run: npm run build
+
+      # The publisher used to drive the Vite dev server, which renders through
+      # unminified modules and a development build of React. Serving the production
+      # build instead renders an office in 11.6s where dev took 25.1s — better than
+      # twice over, for one build step.
       - name: Start forecast site
         if: steps.publication.outputs.enabled == 'true'
         run: |
-          npm run dev -- --host 127.0.0.1 --port 3000 > /tmp/phi-forecast-site.log 2>&1 &
+          npm run start -- --port 3000 > /tmp/phi-forecast-site.log 2>&1 &
           for attempt in {1..90}; do
             if curl --fail --silent http://localhost:3000/ > /dev/null; then
               exit 0
