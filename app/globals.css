@@ -50,11 +50,15 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
 /* Without a panel behind them the pills float over the sidebar nav, which reads straight
    through the gaps. Dimming and blurring everything behind is what makes free-standing
    options legible — and it puts the focus on the choice, as the Focus picker does. */
+/* The dim alone has to hide the nav — `backdrop-filter` is treated as enhancement, not
+   as the thing that makes the scrim work. It composites inconsistently (engine prefixing
+   differs, and it silently no-ops inside an isolated backdrop root), so at a lower opacity
+   the sidebar text stayed readable wherever the blur didn't apply. */
 .office-scrim {
   position: fixed;
   inset: 0;
   z-index: 15;
-  background: rgb(6 6 6 / .72);
+  background: rgb(6 6 6 / .96);
   backdrop-filter: blur(10px) saturate(.85);
   -webkit-backdrop-filter: blur(10px) saturate(.85);
   animation: office-scrim-in .24s ease both;
@@ -114,7 +118,7 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
 }
 .office-trigger:hover .office-caret { color: #f4f4f4; }
 .office-trigger[aria-expanded="true"] .office-caret { transform: rotate(180deg); color: #f4f4f4; }
-.office-trigger:hover .brand-mark { border-color: #f4f4f4; }
+.office-trigger:hover .brand-mark { background: #fff; }
 .office-trigger:focus-visible { outline: 2px solid #f4f4f4; outline-offset: 4px; }
 /* Above the scrim, so the pill you clicked stays lit while everything else dims. */
 .office-picker.is-open .office-trigger { position: relative; z-index: 16; }
@@ -222,19 +226,24 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
   .office-caret { transition: color .12s ease; }
   .office-group button:active { transform: none; }
 }
+/* The trigger shows the selected office, and the selected office is the light pill in
+   the menu — so this is the same object, styled the same way. A thin outlined oval read
+   as unrelated chrome; matching the active pill makes the open/close feel continuous. */
 .brand-mark {
   display: grid;
   place-items: center;
   order: 2;
-  width: 39px;
-  height: 24px;
-  flex: 0 0 39px;
-  border: 1px solid #777;
+  min-width: 48px;
+  height: 27px;
+  padding: 0 11px;
+  flex: 0 0 auto;
+  border: 0;
   border-radius: 999px;
-  background: transparent;
-  color: #fff;
-  font: 600 9px var(--font-geist-sans), Arial, sans-serif;
-  letter-spacing: -.02em;
+  background: #f4f4f4;
+  color: #090909;
+  font: 650 11px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: -.01em;
+  transition: background .16s ease;
 }
 .catalog-nav { margin-top: 46px; }
 .catalog-nav p,
@@ -395,7 +404,7 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
   }
   .office-trigger { min-height: 42px; }
   .office-menu { left: 0; right: auto; min-width: 240px; }
-  .brand-mark { width: 38px; height: 23px; flex-basis: 38px; }
+  .brand-mark { min-width: 46px; height: 26px; }
   .catalog-nav {
     display: flex;
     gap: 18px;
