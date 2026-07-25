@@ -8,9 +8,11 @@ Guidance for working in this repository.
 National Weather Service forecast offices in Eastern Region: Philadelphia /
 Mount Holly (**PHI**), New York City (**OKX**), State College (**CTP**), and
 Baltimore / Washington (**LWX**). It pulls official `api.weather.gov` gridpoint
-data and renders Day 1–3 maps for five products: apparent temperature,
-temperature, wind gust, probability of precipitation, and quantitative
-precipitation.
+data and renders Day 1–3 maps for nine gridpoint fields (apparent temperature,
+temperature, minimum temperature, wind gust, sustained wind, sky cover, dewpoint,
+probability of precipitation, quantitative precipitation) plus five outlook
+products off SPC and WPC (categorical convective risk, tornado / hail / damaging
+wind probability, any-severe probability, and excessive rainfall).
 
 The covered offices are declared in `app/offices.ts` (`REGIONS` → offices) —
 that table is the single source of truth. The selected office lives in the
@@ -83,7 +85,10 @@ affordable and must not be undone casually:
 
 `scripts/publish-forecast-plots.mjs` drives a headless Playwright Chromium over
 the running site, navigating to `?office=…` per office, and captures each
-office/day/product canvas as a PNG — 4 × 3 × 5 = 60 per release. It uploads
+office/day/product canvas as a PNG. The catalogue is day-aware, so it is not a
+flat multiplication: 14 products on Days 1 and 2 and 12 on Day 3 is 40 canvases
+per office, **160 per release** across the four, each written twice (full-size +
+preview) for 320 objects. It uploads
 immutable `releases/{releaseId}/{OFFICE}/day-{n}/…` objects + a fresh
 `latest.json` (**manifest `schemaVersion: 2`**, keyed by office) to Cloudflare
 R2 via the S3 client. It skips work when the NWS `updateTime` and source
@@ -93,13 +98,19 @@ revision are unchanged unless `FORCE_PUBLISH=true`. Driven hourly (and every
 
 After `latest.json` is written, `pruneOldReleases()` keeps only the newest
 `RELEASE_RETENTION_COUNT` releases (**default 1**, `0` disables) and always keeps
-the one just published. Without it the bucket grows ~174 MB per publish forever.
-A failed prune is logged and ignored — the release is already live.
+the one just published. Without it the bucket grows by a full release per publish
+forever. A failed prune is logged and ignored — the release is already live.
 
 **Retention is a count, not an age.** Publishes per day is driven by NWS
 issuance frequency, so an age window doesn't bound storage; N releases is a hard
-ceiling of N × ~174 MB. R2's free tier is 10 GB-month. Don't convert this back
-to a day-based window without recalculating against that quota.
+ceiling of N × one release. R2's free tier is 10 GB-month. Don't convert this
+back to a day-based window without recalculating against that quota.
+
+**Release size is an estimate, not a measurement.** The last measured figure was
+~174 MB back when a release was 60 canvases (~2.9 MB per full-size + preview
+pair); at 160 canvases that scales to **~460 MB**, but it has not been
+re-measured. Measure it with `PLOT_OUTPUT_ONLY=true npm run plots:publish` and
+`du -sh` before relying on it for a quota decision.
 
 **The default of 1 leaves no grace window**, so a client holding a manifest from
 before the last publish references deleted objects. `PublishedForecastPlot`'s
@@ -127,13 +138,38 @@ the full R2 / GitHub secrets setup.
   `drawSignature`, and `commitPlot`, so basemap/overlay/header changes only need
   making once.
 - **SPC outlooks** come from `app/api/spc-outlook/route.ts`, which proxies
-  `spc.noaa.gov` (no CORS there) for all three days at once. It is deliberately
-  **categorical-only**: `torn`/`wind`/`hail` stop after Day 2 and `prob` has no
-  Day 1, so nothing else is available across all three days. SPC's convective day
-  runs **12Z–12Z** and does not match the site's Eastern calendar day, so the
-  graphic labels itself from the outlook's own `VALID`/`EXPIRE` rather than the day
-  tab. A national outlook usually misses any one CWA — that renders as an explicit
-  "NO SEVERE WEATHER RISK AREA" notice, not a blank map.
+  `spc.noaa.gov` (no CORS there). The `SOURCES` table there is the source of truth
+  for coverage: categorical runs all three days, split `torn`/`hail`/`wind`
+  probabilities stop after Day 2, and Day 3 carries only the combined `prob`
+  ("any severe"). **WPC's Excessive Rainfall Outlook** comes from
+  `app/api/wpc-outlook/route.ts`, which queries layers 0–2 of the
+  `wpc_precip_hazards` MapServer. Neither centre's outlook day is the site's Eastern
+  calendar day — SPC's convective day runs **12Z–12Z** and WPC's periods end at 12Z —
+  so the graphic labels itself from the outlook's own valid window rather than the day
+  tab. A national outlook usually misses any one CWA; that renders as an explicit
+  per-hazard notice ("NO DAMAGING WIND RISK AREA"), not a blank map.
+- **The catalogue is day-aware.** `ProductCommon.days` lists the day tabs a product
+  is issued for (absent = all three), and the sidebar, the gallery and the publisher
+  all follow it. Day 1 and 2 carry 14 products, Day 3 carries 12. A group that a
+  day empties out is dropped from the nav — don't index into `availableProducts`
+  for a group without checking.
+- **Conditional Intensity Groups are not a probability tier.** They ride *inside*
+  the probability files on the same `DN` scale but mean something else — day-1 wind
+  `DN: 2` is `CIG1`, day-2 tornado `DN: 2` is 2% probability — so the route splits
+  them into `hatches` before anything sorts or legends on `DN`, and the renderer
+  paints them as hatching *over* the fills. CIG replaced the old significant-severe
+  hatch: `day{1,2}otlk_sig*` and `day3otlk_sigprob` have not been reissued since
+  2026-03-03, so fetching them would paint a months-old area onto today's map.
+  `SIGN` is still recognised in case a file carries it again.
+- **Tornado is on its own scale.** It starts at 2% where hail/wind start at 5%, and
+  its tiers are coloured differently at the same number (15% tornado is red, 15%
+  wind is yellow). `SPC_TORNADO_PROBABILITIES` and `SPC_WIND_PROBABILITIES` cannot
+  be merged. Every palette here is the issuing centre's own, read from the
+  `drawingInfo` renderer on `mapservices.weather.noaa.gov` — don't eyeball hexes.
+- `outlookTouchesFrame` decides whether the "no risk area" notice fires. It tests a
+  vertex *and* whether the frame centre is enclosed, because a continental-scale
+  area can cover a CWA without putting a single vertex in the frame — the vertex
+  test alone painted the map and stamped "no risk area" over it.
 - **Adding a product needs no publisher or workflow change.** The publisher
   discovers products by querying `canvas[data-product-id]` and reading the id and
   `data-product-file` off each one — it never enumerates them. A test asserts the

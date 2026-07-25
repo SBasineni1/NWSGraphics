@@ -117,13 +117,18 @@ for (const office of OFFICES) {
 // All offices publish together, so one office's issuance time gates the whole release.
 const forecast = forecasts[OFFICES[0]];
 
-// Snapshot the SPC outlook once and serve it to every office, so all twelve outlook
-// canvases come from the same issuance — and so a slow SPC can't stall the render.
-let outlookSnapshot = null;
-try {
-  outlookSnapshot = await fetchJson(`${siteUrl}/api/spc-outlook`, { cache: "no-store" });
-} catch (error) {
-  console.error(`SPC outlook unavailable, publishing without it: ${error.message}`);
+// Snapshot each outlook centre once and serve it to every office, so every outlook
+// canvas in the release comes from the same issuance — and so a slow upstream can't
+// stall the render. The two are independent: one centre being down costs its own
+// products, not the other's.
+const outlookSnapshots = {};
+for (const [name, path] of [["spc", "/api/spc-outlook"], ["wpc", "/api/wpc-outlook"]]) {
+  try {
+    outlookSnapshots[name] = await fetchJson(`${siteUrl}${path}`, { cache: "no-store" });
+  } catch (error) {
+    outlookSnapshots[name] = null;
+    console.error(`${name.toUpperCase()} outlook unavailable, publishing without it: ${error.message}`);
+  }
 }
 
 const previous = await currentManifest();
@@ -166,15 +171,18 @@ async function openPage() {
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
   });
-  await page.route("**/api/spc-outlook", async (route) => {
-    if (!outlookSnapshot) {
-      // Fail fast rather than letting the page hang on SPC — the canvas renders an
-      // "unavailable" card and the run still produces every other product.
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "SPC unavailable" }) });
-      return;
-    }
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(outlookSnapshot) });
-  });
+  for (const [name, pattern] of [["spc", "**/api/spc-outlook"], ["wpc", "**/api/wpc-outlook"]]) {
+    await page.route(pattern, async (route) => {
+      const snapshot = outlookSnapshots[name];
+      if (!snapshot) {
+        // Fail fast rather than letting the page hang on the upstream — the canvas
+        // renders an "unavailable" card and the run still produces every other product.
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: `${name} unavailable` }) });
+        return;
+      }
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(snapshot) });
+    });
+  }
   return page;
 }
 

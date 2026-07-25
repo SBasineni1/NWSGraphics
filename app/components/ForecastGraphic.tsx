@@ -30,7 +30,7 @@ type PublishedForecastAsset = {
   height: number;
 };
 // Published assets are keyed by whatever product ids exist, including non-field ones.
-type PublishedProductId = ProductId | "convectiveOutlook";
+type PublishedProductId = ProductId | OutlookProductId;
 type PublishedForecastDay = {
   date: string;
   label: string;
@@ -95,13 +95,20 @@ type ProductGroupId = "temperature" | "wind" | "sky" | "precipitation" | "severe
 
 // Two kinds of product share the catalogue, the day switcher and the publisher, but not
 // the renderer: a field is an interpolated raster off the NWS gridpoints, an outlook is a
-// set of categorical polygons straight from SPC.
+// set of categorical polygons straight from SPC or WPC.
 type ProductCommon = {
   title: string;
   nav: string;
   group: ProductGroupId;
   legend: string;
   file: string;
+  /**
+   * Which day tabs this product appears on, 1-based. Absent means all three. Coverage is
+   * genuinely uneven upstream — SPC stops issuing split tornado/hail/wind probabilities
+   * after Day 2 and only has a combined severe probability on Day 3 — so the nav follows
+   * the day rather than offering a product that would render an empty map.
+   */
+  days?: number[];
 };
 type FieldProductSpec = ProductCommon & {
   kind: "field";
@@ -112,9 +119,26 @@ type FieldProductSpec = ProductCommon & {
   verticalLegend?: boolean;
   fillAlpha?: number;
 };
+type OutlookProductId =
+  | "convectiveOutlook"
+  | "tornadoOutlook"
+  | "hailOutlook"
+  | "windOutlook"
+  | "severeProbabilityOutlook"
+  | "excessiveRainfallOutlook";
+type OutlookLegendEntry = { label: string; name: string; fill: string; stroke: string };
 type OutlookProductSpec = ProductCommon & {
   kind: "outlook";
-  id: "convectiveOutlook";
+  id: OutlookProductId;
+  /** Which proxy route supplies it, and the key it is filed under in that payload. */
+  source: "spc" | "wpc";
+  outlookKey?: string;
+  /** Names the centre on the header and in the "unavailable" fallback. */
+  issuer: string;
+  emptyNotice: string;
+  categories: OutlookLegendEntry[];
+  /** Probability products carry conditional-intensity hatching; categorical ones don't. */
+  hatched?: boolean;
 };
 type ProductSpec = FieldProductSpec | OutlookProductSpec;
 
@@ -122,32 +146,79 @@ type OutlookGeometry =
   | { type: "Polygon"; coordinates: number[][][] }
   | { type: "MultiPolygon"; coordinates: number[][][][] };
 type OutlookArea = {
-  dn: number;
+  rank: number;
   label: string;
   description: string;
   fill: string;
   stroke: string;
   geometry: OutlookGeometry;
 };
-type OutlookDay = {
+/**
+ * SPC's Conditional Intensity Groups: where the severe weather, *if it happens*, is
+ * likely to be significant (EF2+, 2"+ hail, 74+ mph). They overlay the probability areas
+ * as hatching rather than sitting on the probability scale, and they replaced the old
+ * significant-severe `SIGN` hatch, which SPC stopped reissuing in March 2026.
+ */
+type OutlookHatch = { group: number; label: string; description: string; geometry: OutlookGeometry };
+type OutlookRecord = {
+  product?: string;
   day: number;
   valid: string | null;
   expires: string | null;
   issued: string | null;
   forecaster: string | null;
-  features: OutlookArea[];
+  areas: OutlookArea[];
+  hatches: OutlookHatch[];
 };
-type OutlookPayload = { generatedAt: string; days: OutlookDay[]; failures: number };
+type OutlookPayload = { generatedAt: string; outlooks: OutlookRecord[]; failures: number };
+type OutlookPayloads = { spc: OutlookPayload | null; wpc: OutlookPayload | null };
 
-// The legend lists every SPC category, not just the ones on today's map, so the scale
-// doesn't silently change meaning from one day to the next. Colours are SPC's own.
-const OUTLOOK_CATEGORIES: Array<{ dn: number; label: string; name: string; fill: string; stroke: string }> = [
-  { dn: 2, label: "TSTM", name: "Thunderstorms", fill: "#c1e9c1", stroke: "#55bb55" },
-  { dn: 3, label: "MRGL", name: "Marginal", fill: "#66a366", stroke: "#005500" },
-  { dn: 4, label: "SLGT", name: "Slight", fill: "#ffe066", stroke: "#ddaa00" },
-  { dn: 5, label: "ENH", name: "Enhanced", fill: "#ffa366", stroke: "#ff6600" },
-  { dn: 6, label: "MDT", name: "Moderate", fill: "#e06666", stroke: "#cc0000" },
-  { dn: 8, label: "HIGH", name: "High", fill: "#ee99ee", stroke: "#cc00cc" },
+// Every legend lists its product's whole scale, not just the tiers on today's map, so a
+// graphic can't look comparable to yesterday's while meaning something different. All
+// colours are the issuing centre's own, read from its published renderer.
+const SPC_CATEGORIES: OutlookLegendEntry[] = [
+  { label: "TSTM", name: "Thunderstorms", fill: "#c1e9c1", stroke: "#55bb55" },
+  { label: "MRGL", name: "Marginal", fill: "#66a366", stroke: "#005500" },
+  { label: "SLGT", name: "Slight", fill: "#ffe066", stroke: "#ddaa00" },
+  { label: "ENH", name: "Enhanced", fill: "#ffa366", stroke: "#ff6600" },
+  { label: "MDT", name: "Moderate", fill: "#e06666", stroke: "#cc0000" },
+  { label: "HIGH", name: "High", fill: "#ee99ee", stroke: "#cc00cc" },
+];
+// Tornado runs on its own scale — it starts at 2% and its tiers are coloured
+// differently from the others at the same number, so this cannot be one shared list.
+const SPC_TORNADO_PROBABILITIES: OutlookLegendEntry[] = [
+  { label: "2%", name: "2% Tornado", fill: "#79ba7a", stroke: "#1a731d" },
+  { label: "5%", name: "5% Tornado", fill: "#bd998a", stroke: "#7f3f27" },
+  { label: "10%", name: "10% Tornado", fill: "#ffe481", stroke: "#fd8a2b" },
+  { label: "15%", name: "15% Tornado", fill: "#ff8080", stroke: "#ff0000" },
+  { label: "30%", name: "30% Tornado", fill: "#ff80ff", stroke: "#ff00ff" },
+  { label: "45%", name: "45% Tornado", fill: "#c896f7", stroke: "#912cee" },
+  { label: "60%", name: "60% Tornado", fill: "#104e8b", stroke: "#104e8b" },
+];
+const SPC_WIND_PROBABILITIES: OutlookLegendEntry[] = [
+  { label: "5%", name: "5%", fill: "#c5a392", stroke: "#8b4726" },
+  { label: "15%", name: "15%", fill: "#ffeb7f", stroke: "#ff9600" },
+  { label: "30%", name: "30%", fill: "#ff7f7f", stroke: "#ff0000" },
+  { label: "45%", name: "45%", fill: "#ff7fff", stroke: "#ff00ff" },
+  { label: "60%", name: "60%", fill: "#c895f6", stroke: "#912cee" },
+  { label: "75%", name: "75%", fill: "#5c85d6", stroke: "#2952a3" },
+  { label: "90%", name: "90%", fill: "#1affff", stroke: "#00cccc" },
+];
+// Hail and the Day 3 combined probability share the wind colours but top out at 60%.
+const SPC_HAIL_PROBABILITIES: OutlookLegendEntry[] = SPC_WIND_PROBABILITIES.slice(0, 5);
+const WPC_ERO_CATEGORIES: OutlookLegendEntry[] = [
+  { label: "MRGL", name: "Marginal 5%", fill: "#38a800", stroke: "#00734c" },
+  { label: "SLGT", name: "Slight 15%", fill: "#fffe00", stroke: "#e69800" },
+  { label: "MDT", name: "Moderate 40%", fill: "#f50000", stroke: "#8a0000" },
+  { label: "HIGH", name: "High 70%", fill: "#ff69c5", stroke: "#ff00ff" },
+];
+
+// SPC draws each group with its own hatch, so the three read apart in greyscale and in
+// print. Group 2 is the lighter stroke, matching SPC's renderer.
+const HATCH_GROUPS: Array<{ group: number; label: string; name: string; style: "backward" | "forward" | "cross"; color: string }> = [
+  { group: 1, label: "CIG1", name: "Intensity 1", style: "backward", color: "#000000" },
+  { group: 2, label: "CIG2", name: "Intensity 2", style: "forward", color: "#333333" },
+  { group: 3, label: "CIG3", name: "Intensity 3", style: "cross", color: "#000000" },
 ];
 
 const RENDER_SCALE = 2;
@@ -205,9 +276,49 @@ const PRODUCTS: ProductSpec[] = [
     stops: [{ value: 0, color: "#ffffff" }, { value: 0.01, color: "#e5f5e0" }, { value: 0.1, color: "#a1d99b" }, { value: 0.25, color: "#41ab5d" }, { value: 0.5, color: "#ffffb2" }, { value: 1, color: "#fe9929" }, { value: 2, color: "#de2d26" }, { value: 3, color: "#756bb1" }],
   },
   {
-    kind: "outlook", id: "convectiveOutlook", title: "SPC Convective Outlook", nav: "Severe Risk", group: "severe", legend: "CATEGORICAL RISK", file: "spc-convective-outlook",
+    kind: "outlook", id: "excessiveRainfallOutlook", title: "WPC Excessive Rainfall Outlook", nav: "Flash Flood Risk", group: "precipitation", legend: "EXCESSIVE RAINFALL RISK",
+    file: "wpc-excessive-rainfall", source: "wpc", issuer: "WPC", emptyNotice: "NO EXCESSIVE RAINFALL RISK AREA", categories: WPC_ERO_CATEGORIES,
+  },
+  {
+    kind: "outlook", id: "convectiveOutlook", title: "SPC Convective Outlook", nav: "Severe Risk", group: "severe", legend: "CATEGORICAL RISK",
+    file: "spc-convective-outlook", source: "spc", outlookKey: "categorical", issuer: "SPC", emptyNotice: "NO SEVERE WEATHER RISK AREA", categories: SPC_CATEGORIES,
+  },
+  {
+    kind: "outlook", id: "tornadoOutlook", title: "SPC Tornado Probability", nav: "Tornado", group: "severe", legend: "TORNADO PROBABILITY", days: [1, 2],
+    file: "spc-tornado-probability", source: "spc", outlookKey: "tornado", issuer: "SPC", emptyNotice: "NO TORNADO RISK AREA", categories: SPC_TORNADO_PROBABILITIES, hatched: true,
+  },
+  {
+    kind: "outlook", id: "hailOutlook", title: "SPC Hail Probability", nav: "Hail", group: "severe", legend: "HAIL PROBABILITY", days: [1, 2],
+    file: "spc-hail-probability", source: "spc", outlookKey: "hail", issuer: "SPC", emptyNotice: "NO HAIL RISK AREA", categories: SPC_HAIL_PROBABILITIES, hatched: true,
+  },
+  {
+    kind: "outlook", id: "windOutlook", title: "SPC Damaging Wind Probability", nav: "Damaging Wind", group: "severe", legend: "WIND PROBABILITY", days: [1, 2],
+    file: "spc-wind-probability", source: "spc", outlookKey: "wind", issuer: "SPC", emptyNotice: "NO DAMAGING WIND RISK AREA", categories: SPC_WIND_PROBABILITIES, hatched: true,
+  },
+  {
+    // Day 3 is the one day SPC doesn't split by hazard, so this is the same scale over
+    // "any severe" rather than a fourth hazard-specific product.
+    kind: "outlook", id: "severeProbabilityOutlook", title: "SPC Any Severe Probability", nav: "Severe Chance", group: "severe", legend: "ANY SEVERE PROBABILITY", days: [3],
+    file: "spc-severe-probability", source: "spc", outlookKey: "severeProbability", issuer: "SPC", emptyNotice: "NO SEVERE WEATHER RISK AREA", categories: SPC_HAIL_PROBABILITIES, hatched: true,
   },
 ];
+
+const ALL_FORECAST_DAYS = [1, 2, 3];
+
+/** Day tabs a product is issued for — the whole run unless it says otherwise. */
+function productDays(spec: ProductSpec) {
+  return spec.days ?? ALL_FORECAST_DAYS;
+}
+
+/**
+ * The record for one product on one day. A product SPC or WPC didn't issue is absent
+ * from the payload, which is why the spec's own `days` list — not the payload — decides
+ * whether the product is offered at all.
+ */
+function findOutlook(payloads: OutlookPayloads, spec: OutlookProductSpec, day: number): OutlookRecord | null {
+  const payload = payloads[spec.source];
+  return payload?.outlooks.find((record) => record.day === day && (!spec.outlookKey || record.product === spec.outlookKey)) ?? null;
+}
 
 const PRODUCT_GROUPS: Array<{ id: ProductGroupId; title: string }> = [
   { id: "temperature", title: "Temperature & heat" },
@@ -470,16 +581,17 @@ function forecastHeaderLines(forecast: ForecastPayload, dayIndex: number, office
 }
 
 /**
- * SPC's convective day runs 12Z–12Z and does not match the site's Eastern calendar day,
- * so an outlook is labelled from its own validity window rather than the day tab.
+ * Neither centre's outlook day matches the site's Eastern calendar day — SPC's
+ * convective day runs 12Z–12Z and WPC's rainfall periods end at 12Z — so an outlook is
+ * labelled from its own validity window rather than from the day tab it sits under.
  */
-function outlookHeaderLines(outlook: OutlookDay) {
+function outlookHeaderLines(outlook: OutlookRecord, spec: OutlookProductSpec) {
   const valid = outlook.valid && outlook.expires
     ? `VALID  ${stampLabel(outlook.valid)} – ${stampLabel(outlook.expires)}`
-    : `SPC DAY ${outlook.day} CONVECTIVE OUTLOOK`;
+    : `${spec.issuer} DAY ${outlook.day} OUTLOOK`;
   const issued = outlook.issued
-    ? `SPC ISSUED  ${stampLabel(outlook.issued)}${outlook.forecaster ? ` · ${outlook.forecaster.toUpperCase()}` : ""}`
-    : "SPC OUTLOOK";
+    ? `${spec.issuer} ISSUED  ${stampLabel(outlook.issued)}${outlook.forecaster ? ` · ${outlook.forecaster.toUpperCase()}` : ""}`
+    : `${spec.issuer} OUTLOOK`;
   return { valid, issued };
 }
 
@@ -787,23 +899,79 @@ function traceOutlookArea(context: CanvasRenderingContext2D, geometry: OutlookGe
   }
 }
 
-/** Cheap bbox test — enough to decide whether any risk area reaches this office's map. */
-function outlookTouchesFrame(area: OutlookArea, frame: Bounds) {
+/**
+ * Whether a risk area reaches this office's map. Two tests, because either one alone is
+ * wrong: an area smaller than the frame may not cover its centre, and a continental-scale
+ * area — which the excessive rainfall and TSTM outlooks routinely are — can swallow the
+ * whole frame without putting a single vertex inside it. Missing that second case paints
+ * the map *and* stamps "no risk area" over it.
+ */
+function outlookTouchesFrame(area: { geometry: OutlookGeometry }, frame: Bounds) {
   const polygons = area.geometry.type === "Polygon" ? [area.geometry.coordinates] : area.geometry.coordinates;
+  const centerLon = (frame.west + frame.east) / 2;
+  const centerLat = (frame.south + frame.north) / 2;
+  // Crossings are counted across every ring of the geometry at once, which is the same
+  // even-odd rule the fill is painted with — so this answers "is the middle of the map
+  // coloured in", holes included, rather than approximating it.
+  let crossings = 0;
   for (const polygon of polygons) {
     for (const ring of polygon) {
-      for (const [lon, lat] of ring) {
+      for (let index = 0; index < ring.length; index += 1) {
+        const [lon, lat] = ring[index];
         if (lon >= frame.west && lon <= frame.east && lat >= frame.south && lat <= frame.north) return true;
+        const [nextLon, nextLat] = ring[(index + 1) % ring.length];
+        if ((lat > centerLat) !== (nextLat > centerLat)
+          && centerLon < lon + (nextLon - lon) * (centerLat - lat) / (nextLat - lat)) {
+          crossings += 1;
+        }
       }
     }
   }
-  return false;
+  return crossings % 2 === 1;
 }
 
-async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookDay | null, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: OutlookProductSpec, dayIndex: number, office: OfficeId) {
+// A pattern belongs to the context that created it, and every render builds its own map
+// canvas, so these are made per render rather than cached across them. The tile is 18
+// device pixels, so building three of them costs nothing.
+const HATCH_TILE = 9;
+
+function hatchPattern(context: CanvasRenderingContext2D, group: number) {
+  const spec = HATCH_GROUPS.find((entry) => entry.group === group) ?? HATCH_GROUPS.at(-1)!;
+  const tile = document.createElement("canvas");
+  tile.width = HATCH_TILE * RENDER_SCALE;
+  tile.height = HATCH_TILE * RENDER_SCALE;
+  const tileContext = tile.getContext("2d")!;
+  // Drawn at 2× and scaled back down below, so the hatching is as crisp as the map.
+  tileContext.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
+  tileContext.strokeStyle = spec.color;
+  tileContext.lineWidth = 1.2;
+  tileContext.beginPath();
+  // Each line is drawn a tile past both edges so the diagonals meet across repeats
+  // instead of breaking at every tile seam.
+  if (spec.style !== "forward") {
+    for (const offset of [-HATCH_TILE, 0, HATCH_TILE]) {
+      tileContext.moveTo(offset, 0);
+      tileContext.lineTo(offset + HATCH_TILE, HATCH_TILE);
+    }
+  }
+  if (spec.style !== "backward") {
+    for (const offset of [0, HATCH_TILE, HATCH_TILE * 2]) {
+      tileContext.moveTo(offset, 0);
+      tileContext.lineTo(offset - HATCH_TILE, HATCH_TILE);
+    }
+  }
+  tileContext.stroke();
+  const pattern = context.createPattern(tile, "repeat");
+  // Patterns are laid out in the current transform's space, and that transform is
+  // already 2×; without this the tile would come out at double size.
+  pattern?.setTransform(new DOMMatrix([1 / RENDER_SCALE, 0, 0, 1 / RENDER_SCALE, 0, 0]));
+  return pattern;
+}
+
+async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookRecord | null, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: OutlookProductSpec, dayIndex: number, office: OfficeId) {
   const { mapCanvas, context, bounds, projectPoint, width, height } = await beginMapCanvas(boundary, office);
 
-  // An unreachable SPC still has to produce a finished canvas. Leaving this one
+  // An unreachable centre still has to produce a finished canvas. Leaving this one
   // unresolved would hold `data-render-state="rendering"` forever and stall the
   // publisher's readiness wait for every product on the page.
   if (!outlook) {
@@ -811,19 +979,19 @@ async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookDay 
     context.restore();
     context.textAlign = "center";
     context.font = `600 19px ${PLOT_FONT_FAMILY}`;
-    outlinedText(context, "SPC OUTLOOK UNAVAILABLE", width / 2, height / 2 - 6, 4);
+    outlinedText(context, `${spec.issuer} OUTLOOK UNAVAILABLE`, width / 2, height / 2 - 6, 4);
     context.textAlign = "left";
     drawSignature(context, width, height);
     commitPlot(canvas, mapCanvas, spec.title, {
-      valid: `SPC DAY ${dayIndex + 1} CONVECTIVE OUTLOOK`,
+      valid: `${spec.issuer} DAY ${dayIndex + 1} OUTLOOK`,
       issued: "SOURCE UNAVAILABLE",
     }, await loadHeaderMark());
     return;
   }
 
-  // Painted in DN order (the route sorts them), so a higher risk lands on top of the
-  // lower-risk area that always encloses it.
-  for (const area of outlook.features) {
+  // Painted in severity order (the route sorts them), so a higher risk lands on top of
+  // the lower-risk area that always encloses it.
+  for (const area of outlook.areas) {
     traceOutlookArea(context, area.geometry, projectPoint);
     context.fillStyle = area.fill;
     context.globalAlpha = 0.55;
@@ -834,16 +1002,32 @@ async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookDay 
     context.stroke();
   }
 
+  // Conditional intensity sits *over* the probabilities as hatching — it qualifies them
+  // rather than ranking against them, so it is never blended into the fill below.
+  const hatchGroups = [...new Set(outlook.hatches.map((hatch) => hatch.group))];
+  const patterns = new Map(hatchGroups.map((group) => [group, hatchPattern(context, group)]));
+  for (const hatch of outlook.hatches) {
+    const pattern = patterns.get(hatch.group);
+    if (!pattern) continue;
+    traceOutlookArea(context, hatch.geometry, projectPoint);
+    context.fillStyle = pattern;
+    context.fill("evenodd");
+    context.strokeStyle = "rgba(0, 0, 0, 0.85)";
+    context.lineWidth = 1.8;
+    context.stroke();
+  }
+
   drawReferenceLayers(context, counties, states, interstates, boundary, office, projectPoint);
   context.restore();
 
   // A national outlook usually has nothing over any one CWA. Say so, rather than
   // shipping what looks like a map that failed to load.
   const frame = frameBounds(bounds) as Bounds;
-  if (!outlook.features.some((area) => outlookTouchesFrame(area, frame))) {
+  const drawn = [...outlook.areas, ...outlook.hatches];
+  if (!drawn.some((area) => outlookTouchesFrame(area, frame))) {
     context.textAlign = "center";
     context.font = `600 19px ${PLOT_FONT_FAMILY}`;
-    outlinedText(context, "NO SEVERE WEATHER RISK AREA", width / 2, height / 2 - 6, 4);
+    outlinedText(context, spec.emptyNotice, width / 2, height / 2 - 6, 4);
     context.font = `600 13px ${PLOT_FONT_FAMILY}`;
     outlinedText(context, `for the ${office} forecast area`, width / 2, height / 2 + 15, 3);
     context.textAlign = "left";
@@ -859,7 +1043,7 @@ async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookDay 
   context.textAlign = "left";
   context.font = `600 12px ${PLOT_FONT_FAMILY}`;
   outlinedText(context, spec.legend, swatchX, swatchTop - 10, 3);
-  OUTLOOK_CATEGORIES.forEach((category, index) => {
+  spec.categories.forEach((category, index) => {
     const y = swatchTop + index * rowHeight;
     context.fillStyle = category.fill;
     context.globalAlpha = 0.9;
@@ -872,11 +1056,34 @@ async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookDay 
     outlinedText(context, category.label, swatchX + swatchWidth + 8, y + 14, 3);
   });
 
+  // The hatch key is drawn for every product that can carry it, present on the day or
+  // not, for the same reason as the probability scale: the reader has to be able to see
+  // that today has no significant-intensity area, not just fail to find one.
+  if (spec.hatched) {
+    const keyTop = swatchTop + spec.categories.length * rowHeight + 16;
+    context.font = `600 12px ${PLOT_FONT_FAMILY}`;
+    outlinedText(context, "CONDITIONAL INTENSITY", swatchX, keyTop, 3);
+    HATCH_GROUPS.forEach((entry, index) => {
+      const y = keyTop + 10 + index * rowHeight;
+      const pattern = patterns.get(entry.group) ?? hatchPattern(context, entry.group);
+      context.fillStyle = "rgba(255, 255, 255, 0.85)";
+      context.fillRect(swatchX, y, swatchWidth, swatchHeight);
+      if (pattern) {
+        context.fillStyle = pattern;
+        context.fillRect(swatchX, y, swatchWidth, swatchHeight);
+      }
+      context.strokeStyle = "rgba(0, 0, 0, 0.85)";
+      context.lineWidth = 1.6;
+      context.strokeRect(swatchX, y, swatchWidth, swatchHeight);
+      outlinedText(context, entry.name, swatchX + swatchWidth + 8, y + 14, 3);
+    });
+  }
+
   drawSignature(context, width, height);
-  commitPlot(canvas, mapCanvas, spec.title, outlookHeaderLines(outlook), await loadHeaderMark());
+  commitPlot(canvas, mapCanvas, spec.title, outlookHeaderLines(outlook, spec), await loadHeaderMark());
 }
 
-function ForecastPlot({ spec, forecast, outlook, outlookPending, boundary, counties, states, interstates, dayIndex, office }: { spec: ProductSpec; forecast: ForecastPayload; outlook: OutlookDay | null; outlookPending: boolean; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures; dayIndex: number; office: Office }) {
+function ForecastPlot({ spec, forecast, outlook, outlookPending, boundary, counties, states, interstates, dayIndex, office }: { spec: ProductSpec; forecast: ForecastPayload; outlook: OutlookRecord | null; outlookPending: boolean; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures; dayIndex: number; office: Office }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [ready, setReady] = useState(false);
   useEffect(() => {
@@ -886,9 +1093,9 @@ function ForecastPlot({ spec, forecast, outlook, outlookPending, boundary, count
     const done = () => { if (active) setReady(true); };
     const target = canvas.current;
     if (spec.kind === "outlook") {
-      // Only hold the slot while SPC is genuinely still in flight. Once the fetch has
-      // settled — success or failure — render something, or this canvas never reports
-      // ready and the publisher waits on it until it times out.
+      // Only hold the slot while the outlook fetches are genuinely still in flight. Once
+      // they have settled — success or failure — render something, or this canvas never
+      // reports ready and the publisher waits on it until it times out.
       if (outlookPending) return;
       void enqueueRender(() => renderOutlookPlot(target, outlook, boundary, counties, states, interstates, spec, dayIndex, office.id)).then(done);
     } else {
@@ -1143,8 +1350,8 @@ export function ForecastGraphic() {
   const [counties, setCounties] = useState<CountyBoundaries | null>(null);
   const [states, setStates] = useState<CountyBoundaries | null>(null);
   const [interstates, setInterstates] = useState<LineFeatures | null>(null);
-  const [outlook, setOutlook] = useState<OutlookPayload | null>(null);
-  // Distinct from "no outlook": tracks whether the SPC fetch has settled at all.
+  const [outlooks, setOutlooks] = useState<OutlookPayloads>({ spc: null, wpc: null });
+  // Distinct from "no outlook": tracks whether the outlook fetches have settled at all.
   const [outlookPending, setOutlookPending] = useState(true);
   const [dayIndex, setDayIndex] = useState(0);
   const [error, setError] = useState(false);
@@ -1219,21 +1426,30 @@ export function ForecastGraphic() {
     return () => { active = false; window.clearInterval(refresh); };
   }, [manifestNonce]);
 
-  // SPC outlooks are national, so they load once and are shared by every office. Only
-  // the live-canvas path needs them; published offices ship a baked PNG.
+  // SPC and WPC outlooks are national, so they load once and are shared by every office.
+  // Only the live-canvas path needs them; published offices ship a baked PNG. The two
+  // are independent: one centre being down leaves the other's products intact.
   useEffect(() => {
     let active = true;
+    const fetchOutlook = async (path: string) => {
+      const response = await fetch(path, { cache: "no-store", signal: AbortSignal.timeout(30_000) });
+      if (!response.ok) throw new Error(`${path} ${response.status}`);
+      return await response.json() as OutlookPayload;
+    };
     const load = async () => {
-      try {
-        const response = await fetch("/api/spc-outlook", { cache: "no-store", signal: AbortSignal.timeout(30_000) });
-        if (!response.ok) throw new Error(`SPC ${response.status}`);
-        const payload = await response.json() as OutlookPayload;
-        if (active) setOutlook(payload);
-      } catch {
-        // The severe product renders an "unavailable" card rather than never resolving.
-      } finally {
-        if (active) setOutlookPending(false);
-      }
+      const [spc, wpc] = await Promise.allSettled([
+        fetchOutlook("/api/spc-outlook"),
+        fetchOutlook("/api/wpc-outlook"),
+      ]);
+      if (!active) return;
+      // A failed centre keeps its previous payload rather than blanking products that
+      // are still perfectly good; only the first load leaves it null, and that renders
+      // an "unavailable" card rather than never resolving.
+      setOutlooks((current) => ({
+        spc: spc.status === "fulfilled" ? spc.value : current.spc,
+        wpc: wpc.status === "fulfilled" ? wpc.value : current.wpc,
+      }));
+      setOutlookPending(false);
     };
     void load();
     const refresh = window.setInterval(load, 15 * 60 * 1000);
@@ -1264,7 +1480,14 @@ export function ForecastGraphic() {
     return () => { active = false; window.clearInterval(refresh); };
   }, [office, hasPublishedOffice]);
 
-  const availableProducts = useMemo(() => PRODUCTS, []);
+  // The catalogue is day-aware: SPC issues split tornado/hail/wind probabilities only
+  // through Day 2 and a combined severe probability only on Day 3, so those products
+  // appear and disappear with the day tab rather than showing an empty map.
+  const availableProducts = useMemo(() => PRODUCTS.filter((spec) => productDays(spec).includes(dayIndex + 1)), [dayIndex]);
+  const availableGroups = useMemo(
+    () => PRODUCT_GROUPS.filter((group) => availableProducts.some((product) => product.group === group.id)),
+    [availableProducts],
+  );
   const publishedDay = publishedDays?.[dayIndex];
   // Derived rather than cleared on switch, so a previous office's payload can never be
   // drawn against the newly selected office's boundary.
@@ -1276,7 +1499,7 @@ export function ForecastGraphic() {
         <nav className="catalog-nav" aria-label="Forecast product catalogue">
           <p>Menu</p>
           <a className="is-active" href="#overview"><span>Overview</span><b>[{availableProducts.length}]</b></a>
-          {PRODUCT_GROUPS.map((group) => (
+          {availableGroups.map((group) => (
             <a key={group.id} href={`#product-${availableProducts.find((product) => product.group === group.id)!.id}`}>
               <span>{group.title}</span>
               <b>[{availableProducts.filter((product) => product.group === group.id).length}]</b>
@@ -1335,7 +1558,7 @@ export function ForecastGraphic() {
           {!hasPublishedOffice && officeForecast && boundary && counties && states && interstates && (
             <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} forecast plots`} data-office={office.id}>
               {availableProducts.map((spec) => (
-                <ForecastPlot key={spec.id} spec={spec} forecast={officeForecast} outlook={outlook?.days.find((day) => day.day === dayIndex + 1) ?? null} outlookPending={outlookPending} boundary={boundary} counties={counties} states={states} interstates={interstates} dayIndex={dayIndex} office={office} />
+                <ForecastPlot key={spec.id} spec={spec} forecast={officeForecast} outlook={spec.kind === "outlook" ? findOutlook(outlooks, spec, dayIndex + 1) : null} outlookPending={outlookPending} boundary={boundary} counties={counties} states={states} interstates={interstates} dayIndex={dayIndex} office={office} />
               ))}
             </section>
           )}

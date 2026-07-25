@@ -31,7 +31,9 @@ test("server-renders the default office's apparent-temperature product", async (
   assert.match(html, />Menu</);
   // Product count is derived, not hardcoded, so adding a product can't leave it stale.
   // React splits the interpolation into its own text node, hence the comment markers.
-  assert.match(html, /\[(?:<!-- -->)?10(?:<!-- -->)?\]/);
+  // Day 1 carries all fourteen: nine fields, the WPC rainfall outlook, and SPC's
+  // categorical plus tornado/hail/wind probabilities.
+  assert.match(html, /\[(?:<!-- -->)?14(?:<!-- -->)?\]/);
   assert.match(html, /Data status/);
   assert.doesNotMatch(html, /FORECAST AREA|VALID PERIOD|NWS ISSUED|All charts/);
   assert.doesNotMatch(html, /STATIC FORECAST|900 × 760 PNG|publication-ready/);
@@ -290,19 +292,24 @@ test("publisher discovers products from the page, so adding one needs no job cha
   }
 });
 
-test("renders SPC categorical outlooks alongside the gridpoint fields", async () => {
+test("renders SPC outlooks alongside the gridpoint fields", async () => {
   const [route, component] = await Promise.all([
     readFile(new URL("../app/api/spc-outlook/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
   ]);
-  // Categorical is the only product SPC publishes all three days — torn/wind/hail stop
-  // after Day 2 and `prob` has no Day 1 — so this route must stay categorical-only.
-  assert.match(route, /day\$\{day\}otlk_cat\.nolyr\.geojson/);
-  assert.doesNotMatch(route, /otlk_(?:torn|wind|hail|prob)/);
-  assert.match(route, /OUTLOOK_DAYS = \[1, 2, 3\]/);
-  // DN encodes severity; painting in that order keeps higher risk on top.
-  assert.match(route, /\(a\.properties\.DN \?\? 0\) - \(b\.properties\.DN \?\? 0\)/);
-  // One failed day must not fail the whole request.
+  // Coverage is uneven upstream and the SOURCES table is the single source of truth for
+  // it: categorical runs all three days, split tornado/hail/wind stop after Day 2, and
+  // Day 3 carries only the combined severe probability.
+  assert.match(route, /\{ product: "categorical", file: "cat", days: \[1, 2, 3\] \}/);
+  assert.match(route, /\{ product: "tornado", file: "torn", days: \[1, 2\] \}/);
+  assert.match(route, /\{ product: "hail", file: "hail", days: \[1, 2\] \}/);
+  assert.match(route, /\{ product: "wind", file: "wind", days: \[1, 2\] \}/);
+  assert.match(route, /\{ product: "severeProbability", file: "prob", days: \[3\] \}/);
+  assert.match(route, /day\$\{day\}otlk_\$\{source\.file\}\.nolyr\.geojson/);
+  // DN encodes severity within one product; painting in that order keeps higher risk on
+  // top. It is *not* comparable across products, which is why CIG is split out first.
+  assert.match(route, /areas\.sort\(\(a, b\) => a\.rank - b\.rank\)/);
+  // One failed product or day must not fail the whole request.
   assert.match(route, /Promise\.allSettled/);
 
   // Two product kinds share the catalogue but not the renderer.
@@ -310,18 +317,117 @@ test("renders SPC categorical outlooks alongside the gridpoint fields", async ()
   assert.match(component, /kind: "outlook"/);
   assert.match(component, /function renderOutlookPlot/);
   assert.match(component, /spec\.kind === "outlook"/);
-  // SPC's convective day is 12Z–12Z, so the graphic labels itself from SPC's own window
-  // rather than the site's Eastern calendar day.
+  // Neither centre's outlook day is the site's Eastern calendar day, so the graphic
+  // labels itself from the outlook's own validity window.
   assert.match(component, /function outlookHeaderLines/);
-  assert.match(component, /SPC ISSUED/);
-  // A national outlook usually misses any single CWA; that must read as a real state.
+  assert.match(component, /\$\{spec\.issuer\} ISSUED/);
+  // A national outlook usually misses any single CWA; that must read as a real state,
+  // and it has to name the hazard rather than always saying "severe weather".
   assert.match(component, /NO SEVERE WEATHER RISK AREA/);
+  assert.match(component, /NO EXCESSIVE RAINFALL RISK AREA/);
+  assert.match(component, /emptyNotice/);
   assert.match(component, /function outlookTouchesFrame/);
-  // The legend shows every category, not just today's, so the scale can't shift meaning.
-  assert.match(component, /OUTLOOK_CATEGORIES/);
+  // A vertex test alone is not enough: the excessive rainfall and TSTM areas are
+  // routinely large enough to swallow a whole CWA frame without putting a vertex in it,
+  // and that painted the map *and* stamped "no risk area" over it. The crossing count
+  // is the even-odd rule the fill itself uses, so the two can't disagree.
+  assert.match(component, /let crossings = 0/);
+  assert.match(component, /return crossings % 2 === 1/);
+  // Each legend shows its product's whole scale, not just today's tiers.
+  assert.match(component, /spec\.categories\.forEach/);
   for (const label of ["TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH"]) {
-    assert.match(component, new RegExp(`label: "${label}"`), `expected ${label} in the legend`);
+    assert.match(component, new RegExp(`label: "${label}"`), `expected ${label} in the categorical legend`);
   }
+  // Tornado runs on its own scale and its own colours — 15% tornado is red where 15%
+  // wind is yellow — so the two lists must stay separate.
+  assert.match(component, /SPC_TORNADO_PROBABILITIES/);
+  assert.match(component, /SPC_WIND_PROBABILITIES/);
+  assert.match(component, /label: "2%", name: "2% Tornado", fill: "#79ba7a"/);
+  assert.match(component, /label: "15%", name: "15% Tornado", fill: "#ff8080"/);
+  assert.match(component, /label: "15%", name: "15%", fill: "#ffeb7f"/);
+});
+
+test("splits conditional intensity out of the probability areas", async () => {
+  const [route, component] = await Promise.all([
+    readFile(new URL("../app/api/spc-outlook/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+  ]);
+  // CIG rides inside the probability file on the same DN scale but means something
+  // else — day-1 wind DN 2 is CIG1, day-2 tornado DN 2 is 2% probability — so it must
+  // come out before anything sorts or legends on DN.
+  assert.match(route, /const CIG_LABEL = \/\^CIG\(\\d\)\$\//);
+  assert.match(route, /hatches\.push/);
+  // SPC stopped reissuing the standalone significant-severe files in March 2026, so
+  // fetching them would paint a months-old area onto today's map. The only thing that
+  // turns into a request is the SOURCES table, so that is what must stay clean.
+  const sources = /const SOURCES = \[([\s\S]*?)\] as const;/.exec(route);
+  assert.ok(sources, "could not find the SOURCES table");
+  assert.doesNotMatch(sources[1], /sig/);
+  // …but a SIGN feature appearing in a file still has to be drawn, not dropped.
+  assert.match(route, /label === "SIGN"/);
+  // A no-risk day ships one empty GeometryCollection, which has no rings to trace.
+  assert.match(route, /geometry\?\.type === "Polygon" \|\| geometry\?\.type === "MultiPolygon"/);
+
+  assert.match(component, /function hatchPattern/);
+  assert.match(component, /HATCH_GROUPS/);
+  for (const style of ["backward", "forward", "cross"]) {
+    assert.match(component, new RegExp(`style: "${style}"`), `expected the ${style} hatch`);
+  }
+  // Hatching qualifies the probability underneath it rather than ranking against it, so
+  // it is painted over the fills, never blended into them.
+  assert.match(component, /for \(const hatch of outlook\.hatches\)/);
+  assert.match(component, /CONDITIONAL INTENSITY/);
+  // Patterns are laid out in the context's transform, which is already 2×.
+  assert.match(component, /setTransform\(new DOMMatrix\(\[1 \/ RENDER_SCALE/);
+});
+
+test("renders the WPC excessive rainfall outlook", async () => {
+  const [route, component, publisher] = await Promise.all([
+    readFile(new URL("../app/api/wpc-outlook/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(route, /wpc_precip_hazards\/MapServer/);
+  assert.match(route, /OUTLOOK_DAYS = \[1, 2, 3\]/);
+  // Days 1-3 are layers 0-2 of the one service.
+  assert.match(route, /\$\{SERVICE\}\/\$\{day - 1\}\/query/);
+  // The ERO GeoJSON carries no fill/stroke of its own, unlike SPC's, so the palette has
+  // to live in the route — these are WPC's own renderer colours.
+  assert.match(route, /ERO_CATEGORIES/);
+  assert.match(route, /fill: "#38a800", stroke: "#00734c"/);
+  assert.match(route, /fill: "#ff69c5", stroke: "#ff00ff"/);
+  // The service reports UTC without a zone marker; reading it as local would slide the
+  // valid window by hours.
+  assert.match(route, /replace\(" ", "T"\)\}Z/);
+  assert.match(route, /Promise\.allSettled/);
+
+  assert.match(component, /id: "excessiveRainfallOutlook"/);
+  assert.match(component, /source: "wpc"/);
+  assert.match(component, /WPC_ERO_CATEGORIES/);
+  assert.match(component, /\/api\/wpc-outlook/);
+  // The publisher must snapshot WPC the same way it snapshots SPC, or every office
+  // would re-query the upstream mid-run.
+  assert.match(publisher, /api\/wpc-outlook/);
+});
+
+test("offers each outlook only on the days its centre issues it", async () => {
+  const component = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
+  // SPC genuinely stops issuing split tornado/hail/wind after Day 2 and only has the
+  // combined probability on Day 3. The nav follows that rather than offering a product
+  // that would render an empty map.
+  assert.match(component, /days: \[1, 2\],\n\s*file: "spc-tornado-probability"/);
+  assert.match(component, /days: \[1, 2\],\n\s*file: "spc-hail-probability"/);
+  assert.match(component, /days: \[1, 2\],\n\s*file: "spc-wind-probability"/);
+  assert.match(component, /days: \[3\],\n\s*file: "spc-severe-probability"/);
+  assert.match(component, /function productDays/);
+  assert.match(component, /PRODUCTS\.filter\(\(spec\) => productDays\(spec\)\.includes\(dayIndex \+ 1\)\)/);
+  // A day-filtered catalogue can empty a whole group, and the group nav used to index
+  // into it unguarded.
+  assert.match(component, /const availableGroups/);
+  assert.match(component, /availableGroups\.map/);
+  // The spec's own day list, not the payload, decides whether a product is offered —
+  // an absent record means "unavailable", which is a different graphic.
+  assert.match(component, /function findOutlook/);
 });
 
 test("no render path can hang on an external request", async () => {
@@ -338,7 +444,9 @@ test("no render path can hang on an external request", async () => {
   // so caching a rejected or hung one would poison the whole page.
   assert.match(component, /request\.catch\(\(\) => tileCache\.delete\(url\)\)/);
   assert.match(component, /fetch\("\/weather-mark-white\.png", \{ signal: AbortSignal\.timeout/);
-  assert.match(component, /fetch\("\/api\/spc-outlook", \{ cache: "no-store", signal: AbortSignal\.timeout/);
+  assert.match(component, /fetch\(path, \{ cache: "no-store", signal: AbortSignal\.timeout\(30_000\) \}\)/);
+  assert.match(component, /fetchOutlook\("\/api\/spc-outlook"\)/);
+  assert.match(component, /fetchOutlook\("\/api\/wpc-outlook"\)/);
 
   // Products mount together, so without a queue all ten render at once and each holds
   // three canvases — ~286 MB, past what a renderer allocates on a CI runner. Serialized
@@ -351,14 +459,16 @@ test("no render path can hang on an external request", async () => {
   assert.match(component, /releaseCanvas\(mapCanvas\)/);
   assert.match(component, /releaseCanvas\(raster\)/);
 
-  // An unreachable SPC must still produce a finished canvas.
-  assert.match(component, /SPC OUTLOOK UNAVAILABLE/);
+  // An unreachable centre must still produce a finished canvas.
+  assert.match(component, /\$\{spec\.issuer\} OUTLOOK UNAVAILABLE/);
   assert.match(component, /if \(outlookPending\) return;/);
   assert.match(component, /setOutlookPending\(false\)/);
 
-  // The publisher renders from a fixed SPC snapshot, as it already does for the forecast.
-  assert.match(publisher, /page\.route\("\*\*\/api\/spc-outlook"/);
-  assert.match(publisher, /outlookSnapshot/);
+  // The publisher renders from fixed outlook snapshots, as it already does for the
+  // forecast, and one centre being down must not cost the other's products.
+  assert.match(publisher, /\["spc", "\*\*\/api\/spc-outlook"\], \["wpc", "\*\*\/api\/wpc-outlook"\]/);
+  assert.match(publisher, /outlookSnapshots/);
+  assert.match(publisher, /status: 503/);
 });
 
 test("a crashed or slow office does not cost the whole release", async () => {
