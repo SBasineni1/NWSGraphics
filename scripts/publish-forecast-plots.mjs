@@ -112,6 +112,7 @@ for (const office of OFFICES) {
     throw new Error(`Forecast endpoint did not return a complete three-day payload for ${office}`);
   }
   forecasts[office] = payload;
+  console.error(`fetched ${office}: ${payload.points.length} points, ${payload.failures} failures`);
 }
 // All offices publish together, so one office's issuance time gates the whole release.
 const forecast = forecasts[OFFICES[0]];
@@ -140,29 +141,42 @@ if (!outputOnly) {
 }
 
 const id = releaseId(forecast.updatedAt);
-const browser = await chromium.launch({ headless: true });
-const page = await browser.newPage({ viewport: { width: 1600, height: 1100 }, deviceScaleFactor: 1 });
-page.on("pageerror", (error) => console.error(`Page error: ${error.message}`));
-// Serve each office the payload already fetched above, so the page never re-queries
-// api.weather.gov and every office renders from the same snapshot.
-await page.route("**/api/forecast*", async (route) => {
-  const office = new URL(route.request().url()).searchParams.get("office") ?? OFFICES[0];
-  const payload = forecasts[office];
-  if (!payload) {
-    await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "Unknown office" }) });
-    return;
-  }
-  await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+const browser = await chromium.launch({
+  headless: true,
+  // Every product holds a 1800×1712 canvas and they all render at once, so a page runs
+  // well over 100 MB of backing store. Chromium's default shared-memory segment is far
+  // too small for that on a CI runner and the tab dies with "Target page, context or
+  // browser has been closed"; this moves that allocation to /tmp instead.
+  args: ["--disable-dev-shm-usage", "--disable-gpu"],
 });
-await page.route("**/api/spc-outlook", async (route) => {
-  if (!outlookSnapshot) {
-    // Fail fast rather than letting the page hang on SPC — the canvas renders an
-    // "unavailable" card and the run still produces every other product.
-    await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "SPC unavailable" }) });
-    return;
-  }
-  await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(outlookSnapshot) });
-});
+
+/** A page per attempt, so a crashed or leaky one can't poison the next office. */
+async function openPage() {
+  const page = await browser.newPage({ viewport: { width: 1600, height: 1100 }, deviceScaleFactor: 1 });
+  page.on("pageerror", (error) => console.error(`Page error: ${error.message}`));
+  page.on("crash", () => console.error("Page crashed"));
+  // Serve the payloads already fetched above, so the page never re-queries
+  // api.weather.gov or SPC and every office renders from the same snapshot.
+  await page.route("**/api/forecast*", async (route) => {
+    const office = new URL(route.request().url()).searchParams.get("office") ?? OFFICES[0];
+    const payload = forecasts[office];
+    if (!payload) {
+      await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "Unknown office" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+  });
+  await page.route("**/api/spc-outlook", async (route) => {
+    if (!outlookSnapshot) {
+      // Fail fast rather than letting the page hang on SPC — the canvas renders an
+      // "unavailable" card and the run still produces every other product.
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "SPC unavailable" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(outlookSnapshot) });
+  });
+  return page;
+}
 
 const s3 = outputOnly ? null : new S3Client({
   region: "auto",
@@ -199,10 +213,20 @@ const manifest = {
   offices: {},
 };
 
-try {
-  for (const office of OFFICES) {
-    // A full navigation per office resets the canvases, so the readiness wait below
-    // can never latch onto the previous office's already-rendered plots.
+const startedAt = Date.now();
+/** Progress goes to stderr as it happens, so a killed run still shows how far it got. */
+function progress(message) {
+  const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0).padStart(4);
+  const rss = (process.memoryUsage().rss / 1024 / 1024).toFixed(0);
+  console.error(`[${elapsed}s rss=${rss}MB] ${message}`);
+}
+
+async function captureOffice(office) {
+  // A page per office, closed afterwards, so canvas memory can't accumulate across
+  // offices and a crashed page can't affect the next one.
+  const page = await openPage();
+  try {
+    progress(`${office}: loading`);
     await page.goto(`${siteUrl}/?office=${office}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
     const officeForecast = forecasts[office];
     const days = [];
@@ -243,12 +267,41 @@ try {
           height: images.height,
         };
       }
+      progress(`${office}: day ${dayIndex + 1} captured (${Object.keys(day.products).length} products)`);
       days.push(day);
     }
-    manifest.offices[office] = { days };
+    return days;
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+const failedOffices = [];
+try {
+  for (const office of OFFICES) {
+    // One retry on a fresh page. A crashed tab or a single slow render shouldn't cost
+    // the whole release, and it shouldn't cost the other three offices either.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        manifest.offices[office] = { days: await captureOffice(office) };
+        break;
+      } catch (error) {
+        console.error(`${office} attempt ${attempt}/2 failed: ${error.message}`);
+        if (attempt === 2) failedOffices.push(office);
+      }
+    }
   }
 } finally {
   await browser.close();
+}
+
+// Publishing three offices beats publishing none, but an empty manifest would strand
+// every viewer on the live-canvas path, so that still fails the run.
+if (!Object.keys(manifest.offices).length) {
+  throw new Error(`No office rendered successfully (${failedOffices.join(", ")})`);
+}
+if (failedOffices.length) {
+  console.error(`Publishing without: ${failedOffices.join(", ")}`);
 }
 
 const manifestBody = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
@@ -311,8 +364,9 @@ console.log(JSON.stringify({
   releaseId: id,
   updatedAt: forecast.updatedAt,
   offices: Object.keys(manifest.offices),
-  products: Object.keys(manifest.offices[OFFICES[0]]?.days[0]?.products ?? {}).length,
-  days: manifest.offices[OFFICES[0]]?.days.length ?? 0,
+  failedOffices,
+  products: Object.keys(Object.values(manifest.offices)[0]?.days[0]?.products ?? {}).length,
+  days: Object.values(manifest.offices)[0]?.days.length ?? 0,
   prunedObjects: retention.pruned,
   prunedReleases: retention.releases,
   retainedReleases: retention.kept,

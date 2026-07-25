@@ -229,7 +229,7 @@ test("publishes every office and prunes aged-out releases", async () => {
   ]);
   assert.match(publisher, /const OFFICES = \["PHI", "OKX", "CTP", "LWX"\]/);
   assert.match(publisher, /schemaVersion: 2/);
-  assert.match(publisher, /manifest\.offices\[office\] = \{ days \}/);
+  assert.match(publisher, /manifest\.offices\[office\] = \{ days: await captureOffice\(office\) \}/);
   assert.match(publisher, /\?office=\$\{office\}/);
   // Each office navigates afresh so the readiness wait can't latch onto stale canvases.
   assert.match(publisher, /canvas\.dataset\.office === selectedOffice/);
@@ -348,6 +348,23 @@ test("no render path can hang on an external request", async () => {
   // The publisher renders from a fixed SPC snapshot, as it already does for the forecast.
   assert.match(publisher, /page\.route\("\*\*\/api\/spc-outlook"/);
   assert.match(publisher, /outlookSnapshot/);
+});
+
+test("a crashed or slow office does not cost the whole release", async () => {
+  const publisher = await readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8");
+  // Ten canvases at 1800×1712 is >100 MB of backing store per page; Chromium's default
+  // shared-memory segment is too small for that on a CI runner and the tab dies with
+  // "Target page, context or browser has been closed".
+  assert.match(publisher, /--disable-dev-shm-usage/);
+  // A page per office, closed after, so memory can't accumulate across offices.
+  assert.match(publisher, /async function openPage/);
+  assert.match(publisher, /async function captureOffice/);
+  assert.match(publisher, /page\.close\(\)\.catch/);
+  // One retry, then carry on without that office rather than losing the other three.
+  assert.match(publisher, /attempt <= 2/);
+  assert.match(publisher, /failedOffices/);
+  // But an empty manifest would strand every viewer on the live-canvas path.
+  assert.match(publisher, /No office rendered successfully/);
 });
 
 test("resolves both published key shapes and rejects anything else", async () => {
