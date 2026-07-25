@@ -135,7 +135,18 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* A full region runs to 30+ offices, so the list has to be able to scroll. The top
+     padding and matching negative margin keep the menu visually where it was while
+     giving the drop-in animation room to start above its resting place — without it the
+     first pill is clipped as it falls. */
+  max-height: min(72vh, 640px);
+  margin-top: -26px;
+  padding: 26px 4px 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
 }
+.office-menu::-webkit-scrollbar { width: 0; height: 0; }
 .office-menu.is-closing { pointer-events: none; }
 .office-group {
   display: flex;
@@ -216,6 +227,47 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
 .office-group button.is-active:hover { background: #fff; }
 .office-group button:active { transform: scale(.975); }
 
+/* A region row carries a third column — the office count, or "Soon" for a region that
+   isn't built out yet. `em` is pushed to the far edge so the counts line up in a column
+   of their own rather than trailing each name at a different x. */
+.office-group button em {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 10px;
+  color: #6f6f6f;
+  font: 500 11px var(--font-geist-sans), Arial, sans-serif;
+  font-style: normal;
+  letter-spacing: -.005em;
+}
+.office-group button span { flex: 0 1 auto; }
+/* An unbuilt region still reads as part of the map, just not as somewhere you can go. */
+.office-group button:disabled {
+  background: #121212;
+  color: #5a5a5a;
+  cursor: not-allowed;
+}
+.office-group button:disabled b { color: #6a6a6a; }
+.office-group button:disabled span { color: #5a5a5a; }
+.office-group button:disabled:hover { background: #121212; }
+.office-group button:disabled:active { transform: none; }
+/* The region you're already in gets a rim rather than the solid active fill — it marks
+   where you are without claiming to be the current *selection*, which is an office. */
+.office-group button.is-current { box-shadow: inset 0 0 0 1px #4a4a4a; }
+/* The national map is a peer of the regions, not one of them, so it sits apart. */
+.office-national { margin-top: 6px; }
+/* Back is chrome, not a destination: quieter than a pill, and clearly not an option. */
+.office-back {
+  align-self: flex-start;
+  width: auto !important;
+  padding: 7px 14px 7px 11px !important;
+  background: transparent !important;
+  color: #8b8b8b !important;
+  gap: 8px !important;
+}
+.office-back b { flex: 0 0 auto !important; color: #8b8b8b !important; font-weight: 500 !important; }
+.office-back:hover { background: #191919 !important; color: #f4f4f4 !important; }
+.office-back:hover b { color: #f4f4f4 !important; }
+
 @media (prefers-reduced-motion: reduce) {
   .office-group p,
   .office-group button,
@@ -245,6 +297,25 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
   letter-spacing: -.01em;
   transition: background .16s ease;
 }
+/* The catalogue is the only part of the sidebar that scrolls, so the picker above and
+   the data-status footer below stay on screen at any product count. The scrollbar is
+   deliberately visible rather than hidden-until-hover: it is the only cue that there is
+   more catalogue below, and the footer it is scrolling past is the thing you want to
+   keep an eye on. It sits in a gutter carved out of the sidebar's own padding so the
+   nav text stays aligned with the picker above it. */
+/* The catalogue is the only part of the sidebar that scrolls, so the picker above it and
+   the data-status footer below it stay on screen at any product count. The bar itself is
+   hidden — wheel, trackpad, keyboard and touch all still work, and the list running past
+   the edge is cue enough. Both dialects are needed: Chromium ignores ::-webkit-scrollbar
+   once scrollbar-width is set, and Firefox has no pseudo-element to hide. */
+.catalog-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.catalog-scroll::-webkit-scrollbar { width: 0; height: 0; }
 .catalog-nav { margin-top: 46px; }
 .catalog-nav p,
 .product-index p {

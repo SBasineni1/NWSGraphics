@@ -172,9 +172,12 @@ test("animates the office menu open with a staggered cascade", async () => {
   assert.match(component, /const MENU_EXIT_MS = (\d+)/);
   assert.match(component, /setClosing\(true\)/);
   assert.match(component, /is-closing/);
-  // A single running index across headings and options keeps the cascade one sweep.
-  assert.match(component, /rowIndex\.get\(`region:\$\{region\.id\}`\)/);
-  assert.match(component, /rowIndex\.get\(`office:\$\{entry\.id\}`\)/);
+  // One running index per level, heading included, keeps each cascade a single sweep.
+  assert.match(component, /"--row": index \+ 1/);
+  assert.match(component, /"--row": index \+ 2/);
+  // Changing level replaces the list, so it has to re-mount or the incoming rows appear
+  // already settled instead of cascading in.
+  assert.match(component, /key=\{openRegion \?\? "regions"\}/);
 
   assert.match(css, /@keyframes office-row-in/);
   assert.match(css, /@keyframes office-row-out/);
@@ -198,6 +201,62 @@ test("animates the office menu open with a staggered cascade", async () => {
   const cssExit = /animation:\s*office-row-out\s+\.(\d+)s/.exec(css);
   assert.ok(cssExit, "could not read the office-row-out duration from globals.css");
   assert.equal(Number(cssExit[1]) * 10, exitMs, "MENU_EXIT_MS must match the office-row-out duration");
+});
+
+test("browses offices by NWS region, with the national map staked out", async () => {
+  const [offices, component] = await Promise.all([
+    readFile(new URL("../app/offices.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+  ]);
+  // All six NWS regions are listed from the start so the picker is the real map; the
+  // five without offices are visible but not selectable.
+  for (const region of ["eastern", "central", "southern", "western", "alaska", "pacific"]) {
+    assert.match(offices, new RegExp(`id: "${region}"`), `expected the ${region} region`);
+  }
+  assert.match(offices, /short: "ER"/);
+  assert.match(offices, /export function findRegion/);
+  assert.match(offices, /export function regionOf/);
+  // Region first, offices second — a flat list of every CWA would not survive 122.
+  assert.match(component, /const \[openRegion, setOpenRegion\] = useState<string \| null>\(null\)/);
+  assert.match(component, /data-region=\{entry\.id\}/);
+  assert.match(component, /disabled=\{!entry\.offices\.length\}/);
+  assert.match(component, /office-national/);
+  assert.match(component, /data-region="national"/);
+  assert.match(component, /National map/);
+  assert.match(component, /office-back/);
+  // Escape unwinds a level before it closes the whole menu.
+  assert.match(component, /if \(expanded && openRegion\) \{\s*\n\s*setOpenRegion\(null\);/);
+  // Both level changes have to place focus. Changing level unmounts the focused row, so
+  // focus falls to <body> — and the key handler is on the picker, which means Escape and
+  // the arrows silently stop working from there on.
+  assert.match(component, /\? "button\[data-office\]"/);
+  assert.match(component, /`button\[data-region="\$\{lastRegion\.current \?\? REGIONS\[0\]\.id\}"\]`/);
+  // The ref is written from handlers, never from the effect — the React Compiler rejects
+  // mutating a value it has already seen passed to a hook.
+  assert.match(component, /const enterRegion = useCallback/);
+  // Disabled regions are skipped rather than trapping the keyboard on a dead row.
+  assert.match(component, /querySelectorAll<HTMLButtonElement>\("button:not\(\[disabled\]\)"\)/);
+});
+
+test("scrolls the catalogue without scrolling the sidebar's data status away", async () => {
+  const [component, css] = await Promise.all([
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  // Only the catalogue scrolls: the office picker and the data-status footer sit outside
+  // it, so "auto-updating" vs "published" is readable at any product count. Fourteen
+  // products already overflow a laptop viewport, which pushed the footer off the bottom.
+  assert.match(component, /<div className="catalog-scroll">/);
+  assert.match(component, /<\/div>\s*\n\s*<footer className="catalog-footer">/);
+  assert.match(css, /\.catalog-scroll \{[^}]*overflow-y: auto/);
+  assert.match(css, /\.catalog-scroll \{[^}]*min-height: 0/);
+  // The bar is hidden in both dialects. Chromium ignores ::-webkit-scrollbar once
+  // scrollbar-width is set, and Firefox has no pseudo-element — so neither alone hides
+  // it everywhere.
+  assert.match(css, /\.catalog-scroll \{[^}]*scrollbar-width: none/);
+  assert.match(css, /\.catalog-scroll::-webkit-scrollbar \{ width: 0/);
+  assert.match(css, /\.office-menu \{[^}]*scrollbar-width: none/);
+  assert.match(css, /\.office-menu::-webkit-scrollbar \{ width: 0/);
 });
 
 test("publishes changed forecast canvases on the issuance-aware schedule", async () => {

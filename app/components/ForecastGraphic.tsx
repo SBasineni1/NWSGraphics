@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { PLOT_FONT_FAMILY } from "../fonts";
-import { DEFAULT_OFFICE, findOffice, REGIONS, type Office, type OfficeId } from "../offices";
+import { DEFAULT_OFFICE, findOffice, findRegion, REGIONS, regionOf, type Office, type OfficeId } from "../offices";
 import { MAP_HEIGHT, PLOT_WIDTH, frameBounds, inverseWorld, plotExtent, project } from "../../lib/map-frame.mjs";
 
 type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "dewpoint" | "windGust" | "windSpeed" | "skyCover" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
@@ -1200,26 +1200,19 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
   const [open, setOpen] = useState(false);
   // The menu stays mounted through its exit animation, so "closing" is its own state.
   const [closing, setClosing] = useState(false);
+  // The menu has two levels: the region list, and one region's offices. `openRegion` is
+  // the region being browsed, or null for the region list. Region-first is what makes
+  // this hold up at 122 offices — a flat list of every CWA in the country would not.
+  const [openRegion, setOpenRegion] = useState<string | null>(null);
   const container = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
   const exitTimer = useRef<number | null>(null);
-  const flattened = useMemo(() => REGIONS.flatMap((region) => region.offices), []);
-
-  // One running index across every heading and option, so the open cascade sweeps the
-  // list once rather than restarting at each region heading.
-  const rowIndex = useMemo(() => {
-    const rows = new Map<string, number>();
-    let row = 0;
-    for (const region of REGIONS) {
-      rows.set(`region:${region.id}`, row);
-      row += 1;
-      for (const entry of region.offices) {
-        rows.set(`office:${entry.id}`, row);
-        row += 1;
-      }
-    }
-    return rows;
-  }, []);
+  // The region last browsed, so backing out lands on the row you came from. Written only
+  // from event handlers — the React Compiler forbids mutating it inside an effect.
+  const lastRegion = useRef<string | null>(null);
+  const region = findRegion(openRegion);
+  const homeRegion = useMemo(() => regionOf(office.id), [office]);
 
   useEffect(() => () => { if (exitTimer.current) window.clearTimeout(exitTimer.current); }, []);
 
@@ -1229,6 +1222,8 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
     exitTimer.current = window.setTimeout(() => {
       setOpen(false);
       setClosing(false);
+      // Reset to the region list so the menu always opens the same way.
+      setOpenRegion(null);
     }, MENU_EXIT_MS);
     if (restoreFocus) trigger.current?.focus();
   }, []);
@@ -1236,6 +1231,8 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
   const openMenu = useCallback(() => {
     if (exitTimer.current) window.clearTimeout(exitTimer.current);
     setClosing(false);
+    setOpenRegion(null);
+    lastRegion.current = null;
     setOpen(true);
   }, []);
 
@@ -1248,18 +1245,42 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, [open, close]);
 
-  const move = useCallback((step: number) => {
-    const index = flattened.findIndex((entry) => entry.id === office.id);
-    const next = flattened[(index + step + flattened.length) % flattened.length];
-    onSelect(next);
-  }, [flattened, office, onSelect]);
+  // Every level change has to place focus, because changing level unmounts the row that
+  // had it — focus would fall to <body>, and the key handler lives on the picker, so
+  // Escape and the arrow keys would both stop working from there on.
+  useEffect(() => {
+    if (!open) return;
+    // Entering a region lands on its first office, where the eye already is; coming back
+    // out lands on the region you were just in, rather than at the top of the list.
+    const row = openRegion
+      ? "button[data-office]"
+      : `button[data-region="${lastRegion.current ?? REGIONS[0].id}"]`;
+    menu.current?.querySelector<HTMLButtonElement>(row)?.focus();
+  }, [open, openRegion]);
+
+  const enterRegion = useCallback((id: string) => {
+    lastRegion.current = id;
+    setOpenRegion(id);
+  }, []);
 
   const expanded = open && !closing;
 
-  // Arrow keys walk the whole list, crossing region headings as if they weren't there.
+  /** Walks focus through whatever rows the current level is showing. */
+  const moveFocus = useCallback((step: number) => {
+    const rows = [...(menu.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])") ?? [])];
+    if (!rows.length) return;
+    const index = rows.indexOf(document.activeElement as HTMLButtonElement);
+    rows[(index + step + rows.length) % rows.length].focus();
+  }, []);
+
   const onKeyDown = useCallback((event: React.KeyboardEvent) => {
     if (event.key === "Escape") {
       event.preventDefault();
+      // Escape unwinds one level at a time rather than throwing the whole menu away.
+      if (expanded && openRegion) {
+        setOpenRegion(null);
+        return;
+      }
       close(true);
       return;
     }
@@ -1269,14 +1290,14 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
         openMenu();
         return;
       }
-      move(event.key === "ArrowDown" ? 1 : -1);
+      moveFocus(event.key === "ArrowDown" ? 1 : -1);
       return;
     }
-    if ((event.key === "Enter" || event.key === " ") && expanded) {
+    if (event.key === "ArrowLeft" && expanded && openRegion) {
       event.preventDefault();
-      close(true);
+      setOpenRegion(null);
     }
-  }, [close, expanded, move, openMenu]);
+  }, [close, expanded, moveFocus, openMenu, openRegion]);
 
   return (
     <div className={`office-picker${open ? " is-open" : ""}`} ref={container} onKeyDown={onKeyDown}>
@@ -1310,14 +1331,27 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
       {open && (
         <div
           className={`office-menu${closing ? " is-closing" : ""}`}
+          ref={menu}
+          // The level being shown changes what the list *is*, so it re-mounts and the
+          // cascade replays instead of the new rows appearing already settled.
+          key={openRegion ?? "regions"}
           role="listbox"
-          aria-label="Forecast office"
+          aria-label={region ? `${region.name} forecast offices` : "Forecast region"}
           tabIndex={-1}
         >
-          {REGIONS.map((region) => (
-            <div className="office-group" key={region.id}>
-              <p style={{ "--row": rowIndex.get(`region:${region.id}`) } as React.CSSProperties}>{region.name}</p>
-              {region.offices.map((entry) => (
+          {region ? (
+            <div className="office-group">
+              <button
+                type="button"
+                className="office-back"
+                style={{ "--row": 0 } as React.CSSProperties}
+                onClick={() => setOpenRegion(null)}
+              >
+                <b aria-hidden="true">←</b>
+                <span>All NWS regions</span>
+              </button>
+              <p style={{ "--row": 1 } as React.CSSProperties}>{region.name}</p>
+              {region.offices.map((entry, index) => (
                 <button
                   key={entry.id}
                   type="button"
@@ -1325,7 +1359,7 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
                   aria-selected={entry.id === office.id}
                   data-office={entry.id}
                   className={entry.id === office.id ? "is-active" : ""}
-                  style={{ "--row": rowIndex.get(`office:${entry.id}`) } as React.CSSProperties}
+                  style={{ "--row": index + 2 } as React.CSSProperties}
                   onClick={() => {
                     onSelect(entry);
                     close(true);
@@ -1336,7 +1370,40 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
                 </button>
               ))}
             </div>
-          ))}
+          ) : (
+            <div className="office-group">
+              <p style={{ "--row": 0 } as React.CSSProperties}>NWS Regions</p>
+              {REGIONS.map((entry, index) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  data-region={entry.id}
+                  // A region with no offices yet is listed but not selectable: the map is
+                  // the real one from the start, and what is missing is visibly missing.
+                  disabled={!entry.offices.length}
+                  aria-current={entry.id === homeRegion.id ? "true" : undefined}
+                  className={entry.id === homeRegion.id ? "is-current" : ""}
+                  style={{ "--row": index + 1 } as React.CSSProperties}
+                  onClick={() => enterRegion(entry.id)}
+                >
+                  <b>{entry.short}</b>
+                  <span>{entry.name}</span>
+                  <em>{entry.offices.length ? `${entry.offices.length} offices` : "Soon"}</em>
+                </button>
+              ))}
+              <button
+                type="button"
+                className="office-national"
+                data-region="national"
+                disabled
+                style={{ "--row": REGIONS.length + 1 } as React.CSSProperties}
+              >
+                <b aria-hidden="true">US</b>
+                <span>National map</span>
+                <em>Soon</em>
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1496,21 +1563,27 @@ export function ForecastGraphic() {
     <main className="app-shell">
       <aside className="catalog-sidebar">
         <OfficePicker office={office} onSelect={selectOffice} />
-        <nav className="catalog-nav" aria-label="Forecast product catalogue">
-          <p>Menu</p>
-          <a className="is-active" href="#overview"><span>Overview</span><b>[{availableProducts.length}]</b></a>
-          {availableGroups.map((group) => (
-            <a key={group.id} href={`#product-${availableProducts.find((product) => product.group === group.id)!.id}`}>
-              <span>{group.title}</span>
-              <b>[{availableProducts.filter((product) => product.group === group.id).length}]</b>
-            </a>
-          ))}
-        </nav>
-        <div className="catalog-divider" />
-        <nav className="product-index" aria-label="Individual forecast products">
-          <p>Products</p>
-          {availableProducts.map((spec) => <a key={spec.id} href={`#product-${spec.id}`}>{spec.nav}</a>)}
-        </nav>
+        {/* The catalogue grew past one screen, which pushed the data-status footer off
+            the bottom of the sidebar. Only the catalogue scrolls; the office picker and
+            the status footer stay put, so "auto-updating" vs "published" is always
+            visible no matter how far down the product list you are. */}
+        <div className="catalog-scroll">
+          <nav className="catalog-nav" aria-label="Forecast product catalogue">
+            <p>Menu</p>
+            <a className="is-active" href="#overview"><span>Overview</span><b>[{availableProducts.length}]</b></a>
+            {availableGroups.map((group) => (
+              <a key={group.id} href={`#product-${availableProducts.find((product) => product.group === group.id)!.id}`}>
+                <span>{group.title}</span>
+                <b>[{availableProducts.filter((product) => product.group === group.id).length}]</b>
+              </a>
+            ))}
+          </nav>
+          <div className="catalog-divider" />
+          <nav className="product-index" aria-label="Individual forecast products">
+            <p>Products</p>
+            {availableProducts.map((spec) => <a key={spec.id} href={`#product-${spec.id}`}>{spec.nav}</a>)}
+          </nav>
+        </div>
         <footer className="catalog-footer">
           <span className="status-label">Data status</span>
           <span className="live-status"><i /> {hasPublishedOffice ? "PUBLISHED IMAGES" : "AUTO-UPDATING"}</span>
