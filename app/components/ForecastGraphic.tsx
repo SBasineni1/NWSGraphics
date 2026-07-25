@@ -217,6 +217,26 @@ const PRODUCT_GROUPS: Array<{ id: ProductGroupId; title: string }> = [
   { id: "severe", title: "Severe weather" },
 ];
 
+// Renders are serialized. Every product mounts at once and each in-flight render holds
+// three canvases (output, offscreen map, raster) — ten at a time is ~286 MB of canvas,
+// past what a renderer will allocate on a CI runner. Over that ceiling Chromium starts
+// refusing backing stores, renders never resolve, and the tab can die outright. Running
+// them one at a time costs nothing: this is CPU-bound, so concurrency only multiplied
+// peak memory without shortening the total.
+let renderQueue: Promise<unknown> = Promise.resolve();
+function enqueueRender<T>(task: () => Promise<T>): Promise<T> {
+  const next = renderQueue.then(task, task);
+  // Keep the chain alive regardless of individual failures.
+  renderQueue = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+/** Drop a scratch canvas's backing store immediately instead of waiting for GC. */
+function releaseCanvas(canvas: HTMLCanvasElement) {
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
 const tileCache = new Map<string, Promise<ImageBitmap>>();
 let headerMarkPromise: Promise<ImageBitmap | null> | null = null;
 
@@ -608,6 +628,9 @@ function commitPlot(canvas: HTMLCanvasElement, mapCanvas: HTMLCanvasElement, tit
   output.imageSmoothingQuality = "high";
   drawForecastHeader(output, title, lines, headerMark);
   output.drawImage(mapCanvas, 0, HEADER_HEIGHT, PLOT_WIDTH, MAP_HEIGHT);
+  // The offscreen map has been copied out; hand its memory back now rather than leaving
+  // ten of them for the collector to find under pressure.
+  releaseCanvas(mapCanvas);
 }
 
 async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: FieldProductSpec, dayIndex: number, office: OfficeId) {
@@ -671,6 +694,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   // Deliberately unclipped: the field covers the whole frame using real data from the
   // neighbouring offices, and the CWA outline below is what marks the forecast area.
   context.drawImage(raster, plot.x, plot.y, plot.width, plot.height);
+  releaseCanvas(raster);
 
   drawReferenceLayers(context, counties, states, interstates, boundary, office, projectPoint);
   context.restore();
@@ -860,14 +884,15 @@ function ForecastPlot({ spec, forecast, outlook, outlookPending, boundary, count
     let active = true;
     setReady(false);
     const done = () => { if (active) setReady(true); };
+    const target = canvas.current;
     if (spec.kind === "outlook") {
       // Only hold the slot while SPC is genuinely still in flight. Once the fetch has
       // settled — success or failure — render something, or this canvas never reports
       // ready and the publisher waits on it until it times out.
       if (outlookPending) return;
-      void renderOutlookPlot(canvas.current, outlook, boundary, counties, states, interstates, spec, dayIndex, office.id).then(done);
+      void enqueueRender(() => renderOutlookPlot(target, outlook, boundary, counties, states, interstates, spec, dayIndex, office.id)).then(done);
     } else {
-      void renderPlot(canvas.current, forecast, boundary, counties, states, interstates, spec, dayIndex, office.id).then(done);
+      void enqueueRender(() => renderPlot(target, forecast, boundary, counties, states, interstates, spec, dayIndex, office.id)).then(done);
     }
     return () => { active = false; };
   }, [forecast, outlook, outlookPending, boundary, counties, states, interstates, spec, dayIndex, office]);

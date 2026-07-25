@@ -340,6 +340,17 @@ test("no render path can hang on an external request", async () => {
   assert.match(component, /fetch\("\/weather-mark-white\.png", \{ signal: AbortSignal\.timeout/);
   assert.match(component, /fetch\("\/api\/spc-outlook", \{ cache: "no-store", signal: AbortSignal\.timeout/);
 
+  // Products mount together, so without a queue all ten render at once and each holds
+  // three canvases — ~286 MB, past what a renderer allocates on a CI runner. Serialized
+  // it is ~118 MB, and costs nothing: the work is CPU-bound either way.
+  assert.match(component, /function enqueueRender/);
+  assert.match(component, /enqueueRender\(\(\) => renderPlot\(/);
+  assert.match(component, /enqueueRender\(\(\) => renderOutlookPlot\(/);
+  // Scratch canvases hand memory back rather than waiting for GC under pressure.
+  assert.match(component, /function releaseCanvas/);
+  assert.match(component, /releaseCanvas\(mapCanvas\)/);
+  assert.match(component, /releaseCanvas\(raster\)/);
+
   // An unreachable SPC must still produce a finished canvas.
   assert.match(component, /SPC OUTLOOK UNAVAILABLE/);
   assert.match(component, /if \(outlookPending\) return;/);
