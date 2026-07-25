@@ -47,7 +47,7 @@ function locationsFor(office: OfficeId): Location[] {
   ];
 }
 
-type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
+type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "dewpoint" | "windGust" | "windSpeed" | "skyCover" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
 type GridValue = { validTime: string; value: number | null };
 type GridSeries = { uom?: string; values?: GridValue[] };
 type GridResponse = {
@@ -58,7 +58,10 @@ type GridResponse = {
     apparentTemperature?: GridSeries;
     temperature?: GridSeries;
     minTemperature?: GridSeries;
+    dewpoint?: GridSeries;
     windGust?: GridSeries;
+    windSpeed?: GridSeries;
+    skyCover?: GridSeries;
     probabilityOfPrecipitation?: GridSeries;
     quantitativePrecipitation?: GridSeries;
   };
@@ -81,7 +84,7 @@ function dailyValues(
   series: GridSeries | undefined,
   dates: string[],
   convert: (value: number) => number,
-  mode: "max" | "min" | "sum",
+  mode: "max" | "min" | "sum" | "mean",
   precision = 0,
 ) {
   const grouped = new Map<string, number[]>();
@@ -94,9 +97,11 @@ function dailyValues(
   return dates.map((date) => {
     const values = grouped.get(date);
     if (!values?.length) return null;
-    const result = mode === "sum"
-      ? values.reduce((total, value) => total + value, 0)
-      : mode === "min" ? Math.min(...values) : Math.max(...values);
+    const total = () => values.reduce((sum, value) => sum + value, 0);
+    const result = mode === "sum" ? total()
+      : mode === "mean" ? total() / values.length
+      : mode === "min" ? Math.min(...values)
+      : Math.max(...values);
     return Math.round(result * factor) / factor;
   });
 }
@@ -123,7 +128,12 @@ async function fetchLocation(location: Location, dates: string[]) {
     // `minTemperature` is the overnight low the forecast actually advertises, and its
     // period starts on the evening it belongs to, which matches the date grouping above.
     minTemperature: dailyValues(data.properties.minTemperature, dates, (value) => value * 9 / 5 + 32, "min"),
+    dewpoint: dailyValues(data.properties.dewpoint, dates, (value) => value * 9 / 5 + 32, "max"),
     windGust: dailyValues(data.properties.windGust, dates, (value) => value * 0.621371, "max"),
+    windSpeed: dailyValues(data.properties.windSpeed, dates, (value) => value * 0.621371, "max"),
+    // Averaged, not peaked: a single cloudy hour would otherwise brand an
+    // otherwise-sunny day as overcast (Jul 24 at PHI peaks at 71% but averages 32%).
+    skyCover: dailyValues(data.properties.skyCover, dates, (value) => value, "mean"),
     probabilityOfPrecipitation: dailyValues(data.properties.probabilityOfPrecipitation, dates, (value) => value, "max"),
     quantitativePrecipitation: dailyValues(data.properties.quantitativePrecipitation, dates, (value) => value / 25.4, "sum", 2),
   };

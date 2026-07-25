@@ -31,7 +31,7 @@ test("server-renders the default office's apparent-temperature product", async (
   assert.match(html, />Menu</);
   // Product count is derived, not hardcoded, so adding a product can't leave it stale.
   // React splits the interpolation into its own text node, hence the comment markers.
-  assert.match(html, /\[(?:<!-- -->)?6(?:<!-- -->)?\]/);
+  assert.match(html, /\[(?:<!-- -->)?10(?:<!-- -->)?\]/);
   assert.match(html, /Data status/);
   assert.doesNotMatch(html, /FORECAST AREA|VALID PERIOD|NWS ISSUED|All charts/);
   assert.doesNotMatch(html, /STATIC FORECAST|900 × 760 PNG|publication-ready/);
@@ -50,7 +50,11 @@ test("uses official NWS apparent-temperature grid data", async () => {
   // Overnight lows come from NWS's published minTemperature via a "min" aggregation, not
   // from a calendar-day minimum of the hourly series (which straddles two nights).
   assert.match(route, /minTemperature: dailyValues\(data\.properties\.minTemperature[\s\S]*?"min"\)/);
-  assert.match(route, /mode: "max" \| "min" \| "sum"/);
+  assert.match(route, /mode: "max" \| "min" \| "sum" \| "mean"/);
+  // Sky cover is averaged, not peaked — one cloudy hour must not brand a sunny day.
+  assert.match(route, /skyCover: dailyValues\(data\.properties\.skyCover[\s\S]*?"mean"\)/);
+  assert.match(route, /dewpoint: dailyValues\(data\.properties\.dewpoint[\s\S]*?"max"\)/);
+  assert.match(route, /windSpeed: dailyValues\(data\.properties\.windSpeed[\s\S]*?"max"\)/);
   assert.match(route, /windGust/);
   assert.match(route, /probabilityOfPrecipitation/);
   assert.match(route, /quantitativePrecipitation/);
@@ -75,6 +79,9 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /Minimum Temperature/);
   assert.match(component, /id: "minTemperature"[^\n]*verticalLegend: true/);
   assert.match(component, /Maximum Wind Gust/);
+  assert.match(component, /Maximum Sustained Wind/);
+  assert.match(component, /Average Sky Cover/);
+  assert.match(component, /Maximum Dewpoint/);
   assert.match(component, /Maximum POP %/);
   assert.match(component, /Total Precipitation Forecast/);
   // The graphic must name the issuing office, not just "NWS".
@@ -89,7 +96,7 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.doesNotMatch(component, /STATIC FORECAST/);
   assert.doesNotMatch(component, /product-meta/);
   assert.match(component, /const RENDER_SCALE = 2/);
-  assert.match(component, /canvas\.width = width \* RENDER_SCALE/);
+  assert.match(component, /canvas\.width = PLOT_WIDTH \* RENDER_SCALE/);
   assert.match(component, /raster\.width = PLOT_WIDTH/);
   assert.match(component, /value: -50/);
   assert.match(component, /value: 120/);
@@ -265,10 +272,13 @@ test("publisher discovers products from the page, so adding one needs no job cha
   assert.match(publisher, /querySelectorAll\("canvas\[data-product-id\]"\)/);
   assert.match(publisher, /getAttribute\("data-product-id"\)/);
   assert.match(publisher, /getAttribute\("data-product-file"\)/);
-  const productIds = [...component.matchAll(/^\s*id: "(\w+)", title:/gm)].map((match) => match[1]);
-  assert.ok(productIds.length >= 6, `expected the product list to be discovered, got ${productIds.length}`);
+  // Anchored on `kind:` so this scrapes PRODUCTS entries and not PRODUCT_GROUPS, whose
+  // entries are also `{ id, title }`.
+  const productIds = [...component.matchAll(/kind: "\w+", id: "(\w+)", title:/g)].map((match) => match[1]);
+  assert.ok(productIds.length >= 10, `expected the product list to be discovered, got ${productIds.length}`);
   for (const id of productIds) {
-    assert.ok(!publisher.includes(id), `publisher must not name product "${id}" — it should discover products`);
+    // Whole-word, or a short id like "wind" would match "window" in a comment.
+    assert.doesNotMatch(publisher, new RegExp(`\\b${id}\\b`), `publisher must not name product "${id}" — it should discover products`);
   }
   // Every product's file slug has to satisfy the asset-path guard, or its PNG 404s.
   const slugs = [...component.matchAll(/file: "([a-z-]+)"/g)].map((match) => match[1]);
@@ -277,6 +287,40 @@ test("publisher discovers products from the page, so adding one needs no job cha
     for (const key of [`${slug}.png`, `${slug}-preview.png`]) {
       assert.match(key, /^[a-z][a-z-]*\.png$/, `asset key ${key} would be rejected by the path guard`);
     }
+  }
+});
+
+test("renders SPC categorical outlooks alongside the gridpoint fields", async () => {
+  const [route, component] = await Promise.all([
+    readFile(new URL("../app/api/spc-outlook/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+  ]);
+  // Categorical is the only product SPC publishes all three days — torn/wind/hail stop
+  // after Day 2 and `prob` has no Day 1 — so this route must stay categorical-only.
+  assert.match(route, /day\$\{day\}otlk_cat\.nolyr\.geojson/);
+  assert.doesNotMatch(route, /otlk_(?:torn|wind|hail|prob)/);
+  assert.match(route, /OUTLOOK_DAYS = \[1, 2, 3\]/);
+  // DN encodes severity; painting in that order keeps higher risk on top.
+  assert.match(route, /\(a\.properties\.DN \?\? 0\) - \(b\.properties\.DN \?\? 0\)/);
+  // One failed day must not fail the whole request.
+  assert.match(route, /Promise\.allSettled/);
+
+  // Two product kinds share the catalogue but not the renderer.
+  assert.match(component, /kind: "field"/);
+  assert.match(component, /kind: "outlook"/);
+  assert.match(component, /function renderOutlookPlot/);
+  assert.match(component, /spec\.kind === "outlook"/);
+  // SPC's convective day is 12Z–12Z, so the graphic labels itself from SPC's own window
+  // rather than the site's Eastern calendar day.
+  assert.match(component, /function outlookHeaderLines/);
+  assert.match(component, /SPC ISSUED/);
+  // A national outlook usually misses any single CWA; that must read as a real state.
+  assert.match(component, /NO SEVERE WEATHER RISK AREA/);
+  assert.match(component, /function outlookTouchesFrame/);
+  // The legend shows every category, not just today's, so the scale can't shift meaning.
+  assert.match(component, /OUTLOOK_CATEGORIES/);
+  for (const label of ["TSTM", "MRGL", "SLGT", "ENH", "MDT", "HIGH"]) {
+    assert.match(component, new RegExp(`label: "${label}"`), `expected ${label} in the legend`);
   }
 });
 

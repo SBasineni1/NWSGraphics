@@ -120,6 +120,20 @@ the full R2 / GitHub secrets setup.
   array in `ForecastGraphic.tsx`; the `ProductId` union is duplicated in
   `route.ts`. Change both together. (`OfficeId` is *not* duplicated — it lives
   only in `app/offices.ts`.)
+- **Products come in two kinds** (`ProductSpec` is a discriminated union on `kind`).
+  `field` products are interpolated rasters off the NWS gridpoints and go through
+  `renderPlot`; `outlook` products are categorical polygons from SPC and go
+  through `renderOutlookPlot`. Both share `beginMapCanvas`, `drawReferenceLayers`,
+  `drawSignature`, and `commitPlot`, so basemap/overlay/header changes only need
+  making once.
+- **SPC outlooks** come from `app/api/spc-outlook/route.ts`, which proxies
+  `spc.noaa.gov` (no CORS there) for all three days at once. It is deliberately
+  **categorical-only**: `torn`/`wind`/`hail` stop after Day 2 and `prob` has no
+  Day 1, so nothing else is available across all three days. SPC's convective day
+  runs **12Z–12Z** and does not match the site's Eastern calendar day, so the
+  graphic labels itself from the outlook's own `VALID`/`EXPIRE` rather than the day
+  tab. A national outlook usually misses any one CWA — that renders as an explicit
+  "NO SEVERE WEATHER RISK AREA" notice, not a blank map.
 - **Adding a product needs no publisher or workflow change.** The publisher
   discovers products by querying `canvas[data-product-id]` and reading the id and
   `data-product-file` off each one — it never enumerates them. A test asserts the

@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { PLOT_FONT_FAMILY } from "../fonts";
 import { DEFAULT_OFFICE, findOffice, REGIONS, type Office, type OfficeId } from "../offices";
-import { MAP_HEIGHT, PLOT_WIDTH, inverseWorld, plotExtent, project } from "../../lib/map-frame.mjs";
+import { MAP_HEIGHT, PLOT_WIDTH, frameBounds, inverseWorld, plotExtent, project } from "../../lib/map-frame.mjs";
 
-type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "windGust" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
+type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "dewpoint" | "windGust" | "windSpeed" | "skyCover" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
 type ForecastPoint = {
   id: string;
   name: string;
@@ -29,11 +29,13 @@ type PublishedForecastAsset = {
   width: number;
   height: number;
 };
+// Published assets are keyed by whatever product ids exist, including non-field ones.
+type PublishedProductId = ProductId | "convectiveOutlook";
 type PublishedForecastDay = {
   date: string;
   label: string;
   shortLabel: string;
-  products: Partial<Record<ProductId, PublishedForecastAsset>>;
+  products: Partial<Record<PublishedProductId, PublishedForecastAsset>>;
 };
 type PublishedForecastManifestBase = {
   releaseId: string;
@@ -89,20 +91,64 @@ type LineFeatures = {
 type Bounds = { west: number; south: number; east: number; north: number };
 type MapExtent = { left: number; top: number; right: number; bottom: number; zoom: number };
 type ColorStop = { value: number; color: string };
-type ProductGroupId = "temperature" | "wind" | "precipitation";
-type ProductSpec = {
-  id: ProductId;
+type ProductGroupId = "temperature" | "wind" | "sky" | "precipitation" | "severe";
+
+// Two kinds of product share the catalogue, the day switcher and the publisher, but not
+// the renderer: a field is an interpolated raster off the NWS gridpoints, an outlook is a
+// set of categorical polygons straight from SPC.
+type ProductCommon = {
   title: string;
   nav: string;
   group: ProductGroupId;
   legend: string;
-  unit: string;
   file: string;
+};
+type FieldProductSpec = ProductCommon & {
+  kind: "field";
+  id: ProductId;
+  unit: string;
   decimals: number;
   stops: ColorStop[];
   verticalLegend?: boolean;
   fillAlpha?: number;
 };
+type OutlookProductSpec = ProductCommon & {
+  kind: "outlook";
+  id: "convectiveOutlook";
+};
+type ProductSpec = FieldProductSpec | OutlookProductSpec;
+
+type OutlookGeometry =
+  | { type: "Polygon"; coordinates: number[][][] }
+  | { type: "MultiPolygon"; coordinates: number[][][][] };
+type OutlookArea = {
+  dn: number;
+  label: string;
+  description: string;
+  fill: string;
+  stroke: string;
+  geometry: OutlookGeometry;
+};
+type OutlookDay = {
+  day: number;
+  valid: string | null;
+  expires: string | null;
+  issued: string | null;
+  forecaster: string | null;
+  features: OutlookArea[];
+};
+type OutlookPayload = { generatedAt: string; days: OutlookDay[]; failures: number };
+
+// The legend lists every SPC category, not just the ones on today's map, so the scale
+// doesn't silently change meaning from one day to the next. Colours are SPC's own.
+const OUTLOOK_CATEGORIES: Array<{ dn: number; label: string; name: string; fill: string; stroke: string }> = [
+  { dn: 2, label: "TSTM", name: "Thunderstorms", fill: "#c1e9c1", stroke: "#55bb55" },
+  { dn: 3, label: "MRGL", name: "Marginal", fill: "#66a366", stroke: "#005500" },
+  { dn: 4, label: "SLGT", name: "Slight", fill: "#ffe066", stroke: "#ddaa00" },
+  { dn: 5, label: "ENH", name: "Enhanced", fill: "#ffa366", stroke: "#ff6600" },
+  { dn: 6, label: "MDT", name: "Moderate", fill: "#e06666", stroke: "#cc0000" },
+  { dn: 8, label: "HIGH", name: "High", fill: "#ee99ee", stroke: "#cc00cc" },
+];
 
 const RENDER_SCALE = 2;
 const HEADER_HEIGHT = 96;
@@ -116,37 +162,59 @@ const COLOR_LUT_SIZE = 1024;
 const PUBLISHED_ASSET_BASE_URL = (process.env.NEXT_PUBLIC_FORECAST_ASSET_BASE_URL ?? "").replace(/\/+$/, "");
 const PRODUCTS: ProductSpec[] = [
   {
-    id: "apparentTemperature", title: "Maximum Apparent Temperature", nav: "Feels Like", group: "temperature", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0, verticalLegend: true,
+    kind: "field", id: "apparentTemperature", title: "Maximum Apparent Temperature", nav: "Feels Like", group: "temperature", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0, verticalLegend: true,
     stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
-    id: "temperature", title: "Maximum Temperature", nav: "Temperature", group: "temperature", legend: "TEMPERATURE (°F)", unit: "°", file: "max-temperature", decimals: 0, verticalLegend: true,
+    kind: "field", id: "temperature", title: "Maximum Temperature", nav: "Temperature", group: "temperature", legend: "TEMPERATURE (°F)", unit: "°", file: "max-temperature", decimals: 0, verticalLegend: true,
     stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
     // Same ramp as the maximum, deliberately — a shared scale is what lets you read a
     // high and a low against each other instead of re-learning the colours.
-    id: "minTemperature", title: "Minimum Temperature", nav: "Low Temp", group: "temperature", legend: "MINIMUM TEMPERATURE (°F)", unit: "°", file: "min-temperature", decimals: 0, verticalLegend: true,
+    kind: "field", id: "minTemperature", title: "Minimum Temperature", nav: "Low Temp", group: "temperature", legend: "MINIMUM TEMPERATURE (°F)", unit: "°", file: "min-temperature", decimals: 0, verticalLegend: true,
     stops: [{ value: -50, color: "#d31258" }, { value: -40, color: "#e12b8a" }, { value: -30, color: "#febee4" }, { value: -20, color: "#d4d5eb" }, { value: -10, color: "#9d9bc9" }, { value: 0, color: "#472c91" }, { value: 10, color: "#036eca" }, { value: 20, color: "#4fc7fd" }, { value: 30, color: "#9efefd" }, { value: 40, color: "#0a918b" }, { value: 50, color: "#0d7f34" }, { value: 60, color: "#84cb82" }, { value: 70, color: "#e4feb7" }, { value: 80, color: "#ffe49a" }, { value: 90, color: "#ffa435" }, { value: 100, color: "#fa442c" }, { value: 110, color: "#990428" }, { value: 120, color: "#641251" }],
   },
   {
-    id: "windGust", title: "Maximum Wind Gust", nav: "Wind Gust", group: "wind", legend: "WIND GUST (MPH)", unit: " mph", file: "max-wind-gust", decimals: 0, verticalLegend: true,
+    kind: "field", id: "windGust", title: "Maximum Wind Gust", nav: "Wind Gust", group: "wind", legend: "WIND GUST (MPH)", unit: " mph", file: "max-wind-gust", decimals: 0, verticalLegend: true,
     stops: [{ value: 0, color: "#f7fbff" }, { value: 10, color: "#c6dbef" }, { value: 20, color: "#6baed6" }, { value: 30, color: "#31a354" }, { value: 40, color: "#fed976" }, { value: 50, color: "#fd8d3c" }, { value: 60, color: "#e31a1c" }, { value: 70, color: "#800026" }],
   },
   {
-    id: "probabilityOfPrecipitation", title: "Maximum POP %", nav: "Rain Chance", group: "precipitation", legend: "PROBABILITY OF PRECIPITATION (%)", unit: "%", file: "max-pop", decimals: 0, fillAlpha: 235, verticalLegend: true,
+    // Shares the gust ramp on purpose — same scale is what lets you see where gusts run
+    // well above the sustained wind rather than re-reading two different legends.
+    kind: "field", id: "windSpeed", title: "Maximum Sustained Wind", nav: "Wind Speed", group: "wind", legend: "SUSTAINED WIND (MPH)", unit: " mph", file: "max-wind-speed", decimals: 0, verticalLegend: true,
+    stops: [{ value: 0, color: "#f7fbff" }, { value: 10, color: "#c6dbef" }, { value: 20, color: "#6baed6" }, { value: 30, color: "#31a354" }, { value: 40, color: "#fed976" }, { value: 50, color: "#fd8d3c" }, { value: 60, color: "#e31a1c" }, { value: 70, color: "#800026" }],
+  },
+  {
+    // Blue reads as clear sky, grey as overcast — the ramp matches what you'd see up.
+    kind: "field", id: "skyCover", title: "Average Sky Cover", nav: "Sky Cover", group: "sky", legend: "SKY COVER (%)", unit: "%", file: "sky-cover", decimals: 0, fillAlpha: 205, verticalLegend: true,
+    stops: [{ value: 0, color: "#2f7fbf" }, { value: 20, color: "#7cb8dd" }, { value: 40, color: "#bcd7e6" }, { value: 60, color: "#dcdcdc" }, { value: 80, color: "#a8a8a8" }, { value: 100, color: "#6e6e6e" }],
+  },
+  {
+    // Dewpoint has well-known comfort bands: below ~55 dry, 60s sticky, 70+ oppressive.
+    // Tan through green to deep teal tracks those rather than reusing the air-temp ramp.
+    kind: "field", id: "dewpoint", title: "Maximum Dewpoint", nav: "Dewpoint", group: "sky", legend: "DEWPOINT (°F)", unit: "°", file: "max-dewpoint", decimals: 0, verticalLegend: true,
+    stops: [{ value: 20, color: "#6b4a2f" }, { value: 30, color: "#a5793f" }, { value: 40, color: "#d4b483" }, { value: 50, color: "#e8e6c8" }, { value: 55, color: "#b5dd8f" }, { value: 60, color: "#66bb5c" }, { value: 65, color: "#2e9e48" }, { value: 70, color: "#15803d" }, { value: 75, color: "#0e6b6b" }, { value: 80, color: "#0b4f7a" }],
+  },
+  {
+    kind: "field", id: "probabilityOfPrecipitation", title: "Maximum POP %", nav: "Rain Chance", group: "precipitation", legend: "PROBABILITY OF PRECIPITATION (%)", unit: "%", file: "max-pop", decimals: 0, fillAlpha: 235, verticalLegend: true,
     stops: [{ value: 0, color: "#ffffff" }, { value: 10, color: "#e5f5e0" }, { value: 20, color: "#a1d99b" }, { value: 40, color: "#41ab5d" }, { value: 60, color: "#2b8cbe" }, { value: 80, color: "#756bb1" }, { value: 100, color: "#54278f" }],
   },
   {
-    id: "quantitativePrecipitation", title: "Total Precipitation Forecast", nav: "Rainfall", group: "precipitation", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2, fillAlpha: 235, verticalLegend: true,
+    kind: "field", id: "quantitativePrecipitation", title: "Total Precipitation Forecast", nav: "Rainfall", group: "precipitation", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2, fillAlpha: 235, verticalLegend: true,
     stops: [{ value: 0, color: "#ffffff" }, { value: 0.01, color: "#e5f5e0" }, { value: 0.1, color: "#a1d99b" }, { value: 0.25, color: "#41ab5d" }, { value: 0.5, color: "#ffffb2" }, { value: 1, color: "#fe9929" }, { value: 2, color: "#de2d26" }, { value: 3, color: "#756bb1" }],
+  },
+  {
+    kind: "outlook", id: "convectiveOutlook", title: "SPC Convective Outlook", nav: "Severe Risk", group: "severe", legend: "CATEGORICAL RISK", file: "spc-convective-outlook",
   },
 ];
 
 const PRODUCT_GROUPS: Array<{ id: ProductGroupId; title: string }> = [
   { id: "temperature", title: "Temperature & heat" },
   { id: "wind", title: "Wind" },
+  { id: "sky", title: "Sky & moisture" },
   { id: "precipitation", title: "Precipitation" },
+  { id: "severe", title: "Severe weather" },
 ];
 
 const tileCache = new Map<string, Promise<ImageBitmap>>();
@@ -315,11 +383,11 @@ async function drawTiles(context: CanvasRenderingContext2D, extent: MapExtent, x
   ));
 }
 
-function displayValue(value: number, spec: ProductSpec) {
+function displayValue(value: number, spec: FieldProductSpec) {
   return `${value.toFixed(spec.decimals)}${spec.unit}`;
 }
 
-function legendValue(value: number, spec: ProductSpec) {
+function legendValue(value: number, spec: FieldProductSpec) {
   if (spec.id === "apparentTemperature" || spec.id === "temperature") return `${value}°`;
   if (spec.id === "quantitativePrecipitation") return value < 0.1 && value > 0 ? value.toFixed(2) : String(value);
   return String(value);
@@ -344,25 +412,8 @@ function timeZoneName(value: Date) {
   }).formatToParts(value).find((part) => part.type === "timeZoneName")?.value ?? "ET";
 }
 
-function drawForecastHeader(
-  context: CanvasRenderingContext2D,
-  forecast: ForecastPayload,
-  spec: ProductSpec,
-  dayIndex: number,
-  headerMark: ImageBitmap | null,
-  office: OfficeId,
-) {
-  const day = forecast.days[dayIndex];
-  const validDate = forecastDate(day.date);
-  const validLabel = new Intl.DateTimeFormat("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "America/New_York",
-  }).format(validDate).toUpperCase();
-  const validZone = timeZoneName(validDate);
-  const issuedLabel = new Intl.DateTimeFormat("en-US", {
+function stampLabel(value: string | number | Date) {
+  return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -370,8 +421,44 @@ function drawForecastHeader(
     minute: "2-digit",
     timeZone: "America/New_York",
     timeZoneName: "short",
-  }).format(new Date(forecast.updatedAt)).toUpperCase();
+  }).format(new Date(value)).toUpperCase();
+}
 
+function forecastHeaderLines(forecast: ForecastPayload, dayIndex: number, office: OfficeId) {
+  const validDate = forecastDate(forecast.days[dayIndex].date);
+  const validLabel = new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "America/New_York",
+  }).format(validDate).toUpperCase();
+  return {
+    valid: `VALID  ${validLabel} · 12:00 AM–11:59 PM ${timeZoneName(validDate)}`,
+    issued: `NWS ${office} ISSUED  ${stampLabel(forecast.updatedAt)}`,
+  };
+}
+
+/**
+ * SPC's convective day runs 12Z–12Z and does not match the site's Eastern calendar day,
+ * so an outlook is labelled from its own validity window rather than the day tab.
+ */
+function outlookHeaderLines(outlook: OutlookDay) {
+  const valid = outlook.valid && outlook.expires
+    ? `VALID  ${stampLabel(outlook.valid)} – ${stampLabel(outlook.expires)}`
+    : `SPC DAY ${outlook.day} CONVECTIVE OUTLOOK`;
+  const issued = outlook.issued
+    ? `SPC ISSUED  ${stampLabel(outlook.issued)}${outlook.forecaster ? ` · ${outlook.forecaster.toUpperCase()}` : ""}`
+    : "SPC OUTLOOK";
+  return { valid, issued };
+}
+
+function drawForecastHeader(
+  context: CanvasRenderingContext2D,
+  title: string,
+  lines: { valid: string; issued: string },
+  headerMark: ImageBitmap | null,
+) {
   // Match the site's editorial catalogue with a quiet black surface and a
   // compact, high-contrast information hierarchy.
   context.fillStyle = "#090909";
@@ -387,7 +474,7 @@ function drawForecastHeader(
   context.textBaseline = "alphabetic";
   context.fillStyle = "#f4f4f4";
   context.font = `600 27px ${PLOT_FONT_FAMILY}`;
-  context.fillText(spec.title, 24, 39);
+  context.fillText(title, 24, 39);
 
   if (headerMark) {
     // Keep the mark in the unused top-right corner, clear of the issued line.
@@ -396,14 +483,17 @@ function drawForecastHeader(
 
   context.fillStyle = "#ffffff";
   context.font = `600 14px ${PLOT_FONT_FAMILY}`;
-  context.fillText(`VALID  ${validLabel} · 12:00 AM–11:59 PM ${validZone}`, 24, 74);
+  context.fillText(lines.valid, 24, 74);
   context.textAlign = "right";
-  // Name the issuing office — with four of them, the graphic has to say whose it is.
-  context.fillText(`NWS ${office} ISSUED  ${issuedLabel}`, PLOT_WIDTH - 24, 74);
+  context.fillText(lines.issued, PLOT_WIDTH - 24, 74);
   context.textAlign = "left";
 }
 
-async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: ProductSpec, dayIndex: number, office: OfficeId) {
+/**
+ * Everything both product kinds share: an offscreen 2× canvas, basemap tiles, and the
+ * graticule, clipped to the plot. Returns the pieces each renderer needs to draw on top.
+ */
+async function beginMapCanvas(boundary: Boundary, office: OfficeId) {
   const width = PLOT_WIDTH;
   const height = MAP_HEIGHT;
   const mapCanvas = document.createElement("canvas");
@@ -444,6 +534,74 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     context.beginPath(); context.moveTo(...a); context.lineTo(...b); context.stroke();
   }
   context.setLineDash([]);
+
+  return { mapCanvas, context, plot, bounds, extent, projectPoint, width, height };
+}
+
+/** Reference layers drawn over whatever the product painted. */
+function drawReferenceLayers(
+  context: CanvasRenderingContext2D,
+  counties: CountyBoundaries,
+  states: CountyBoundaries,
+  interstates: LineFeatures,
+  boundary: Boundary,
+  office: OfficeId,
+  projectPoint: (lon: number, lat: number) => [number, number],
+) {
+  traceCounties(context, counties, projectPoint);
+  context.strokeStyle = "rgba(0, 0, 0, 0.42)";
+  context.lineWidth = 0.9;
+  context.stroke();
+
+  traceCounties(context, states, projectPoint);
+  context.strokeStyle = "rgba(8, 13, 24, 0.9)";
+  context.lineWidth = 1.7;
+  context.stroke();
+
+  traceLines(context, interstates, projectPoint);
+  context.strokeStyle = "#c02b1f";
+  context.lineWidth = 1.4;
+  context.stroke();
+
+  traceBoundary(context, boundary, office, projectPoint);
+  context.strokeStyle = "rgba(8, 13, 24, 0.98)";
+  context.lineWidth = 2.4;
+  context.stroke();
+}
+
+/** The X handle in the bottom-right corner, identical on every product. */
+function drawSignature(context: CanvasRenderingContext2D, width: number, height: number) {
+  context.textAlign = "right";
+  context.textBaseline = "alphabetic";
+  context.font = `600 13px ${PLOT_FONT_FAMILY}`;
+  context.fillStyle = "rgba(15, 23, 42, 0.9)";
+  const tag = "suchit_wx";
+  context.fillText(tag, width - 14, height - 13);
+  const tagWidth = context.measureText(tag).width;
+  const logoSize = 13;
+  context.save();
+  context.translate(width - 14 - tagWidth - 7 - logoSize, height - 13 - logoSize + 1);
+  context.scale(logoSize / 24, logoSize / 24);
+  context.fillStyle = "rgba(15, 23, 42, 0.9)";
+  context.fill(new Path2D("M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"));
+  context.restore();
+  context.textAlign = "left";
+}
+
+/** Commit a finished map plus its header into the visible canvas. */
+function commitPlot(canvas: HTMLCanvasElement, mapCanvas: HTMLCanvasElement, title: string, lines: { valid: string; issued: string }, headerMark: ImageBitmap | null) {
+  canvas.width = PLOT_WIDTH * RENDER_SCALE;
+  canvas.height = PLOT_HEIGHT * RENDER_SCALE;
+  const output = canvas.getContext("2d")!;
+  output.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
+  output.imageSmoothingEnabled = true;
+  output.imageSmoothingQuality = "high";
+  drawForecastHeader(output, title, lines, headerMark);
+  output.drawImage(mapCanvas, 0, HEADER_HEIGHT, PLOT_WIDTH, MAP_HEIGHT);
+}
+
+async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: FieldProductSpec, dayIndex: number, office: OfficeId) {
+  const { mapCanvas, context, plot, extent, projectPoint, width, height } = await beginMapCanvas(boundary, office);
 
   const points = forecast.points.filter((point) => point.metrics[spec.id][dayIndex] !== null);
   const gridPoints = points.filter((point) => !point.label);
@@ -504,25 +662,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   // neighbouring offices, and the CWA outline below is what marks the forecast area.
   context.drawImage(raster, plot.x, plot.y, plot.width, plot.height);
 
-  traceCounties(context, counties, projectPoint);
-  context.strokeStyle = "rgba(0, 0, 0, 0.42)";
-  context.lineWidth = 0.9;
-  context.stroke();
-
-  traceCounties(context, states, projectPoint);
-  context.strokeStyle = "rgba(8, 13, 24, 0.9)";
-  context.lineWidth = 1.7;
-  context.stroke();
-
-  traceLines(context, interstates, projectPoint);
-  context.strokeStyle = "#c02b1f";
-  context.lineWidth = 1.4;
-  context.stroke();
-
-  traceBoundary(context, boundary, office, projectPoint);
-  context.strokeStyle = "rgba(8, 13, 24, 0.98)";
-  context.lineWidth = 2.4;
-  context.stroke();
+  drawReferenceLayers(context, counties, states, interstates, boundary, office, projectPoint);
   context.restore();
 
   context.textAlign = "center";
@@ -592,45 +732,115 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     spec.stops.forEach((stop, index) => outlinedText(context, legendValue(stop.value, spec), legendX + index / (spec.stops.length - 1) * legendWidth - 4, legendY + 25, 3));
   }
 
-  // Signature tag (bottom-right) — X logo + handle, no plate.
-  context.textAlign = "right";
-  context.textBaseline = "alphabetic";
-  context.font = `600 13px ${PLOT_FONT_FAMILY}`;
-  context.fillStyle = "rgba(15, 23, 42, 0.9)";
-  const tag = "suchit_wx";
-  context.fillText(tag, width - 14, height - 13);
-  const tagWidth = context.measureText(tag).width;
-  const logoSize = 13;
-  context.save();
-  context.translate(width - 14 - tagWidth - 7 - logoSize, height - 13 - logoSize + 1);
-  context.scale(logoSize / 24, logoSize / 24);
-  context.fillStyle = "rgba(15, 23, 42, 0.9)";
-  context.fill(new Path2D("M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"));
-  context.restore();
-  context.textAlign = "left";
+  drawSignature(context, width, height);
 
   // Commit the completed map and header together. Rendering offscreen avoids
   // concurrent development-mode effects sharing one canvas drawing state.
-  canvas.width = width * RENDER_SCALE;
-  canvas.height = PLOT_HEIGHT * RENDER_SCALE;
-  const output = canvas.getContext("2d")!;
-  output.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
-  output.imageSmoothingEnabled = true;
-  output.imageSmoothingQuality = "high";
-  drawForecastHeader(output, forecast, spec, dayIndex, await loadHeaderMark(), office);
-  output.drawImage(mapCanvas, 0, HEADER_HEIGHT, width, height);
+  commitPlot(canvas, mapCanvas, spec.title, forecastHeaderLines(forecast, dayIndex, office), await loadHeaderMark());
 }
 
-function ForecastPlot({ spec, forecast, boundary, counties, states, interstates, dayIndex, office }: { spec: ProductSpec; forecast: ForecastPayload; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures; dayIndex: number; office: Office }) {
+function traceOutlookArea(context: CanvasRenderingContext2D, geometry: OutlookGeometry, projectPoint: (lon: number, lat: number) => [number, number]) {
+  const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+  context.beginPath();
+  for (const polygon of polygons) {
+    for (const ring of polygon) {
+      ring.forEach((position, index) => {
+        const [x, y] = projectPoint(position[0], position[1]);
+        if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+      });
+      context.closePath();
+    }
+  }
+}
+
+/** Cheap bbox test — enough to decide whether any risk area reaches this office's map. */
+function outlookTouchesFrame(area: OutlookArea, frame: Bounds) {
+  const polygons = area.geometry.type === "Polygon" ? [area.geometry.coordinates] : area.geometry.coordinates;
+  for (const polygon of polygons) {
+    for (const ring of polygon) {
+      for (const [lon, lat] of ring) {
+        if (lon >= frame.west && lon <= frame.east && lat >= frame.south && lat <= frame.north) return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookDay, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: OutlookProductSpec, office: OfficeId) {
+  const { mapCanvas, context, bounds, projectPoint, width, height } = await beginMapCanvas(boundary, office);
+
+  // Painted in DN order (the route sorts them), so a higher risk lands on top of the
+  // lower-risk area that always encloses it.
+  for (const area of outlook.features) {
+    traceOutlookArea(context, area.geometry, projectPoint);
+    context.fillStyle = area.fill;
+    context.globalAlpha = 0.55;
+    context.fill("evenodd");
+    context.globalAlpha = 1;
+    context.strokeStyle = area.stroke;
+    context.lineWidth = 2.2;
+    context.stroke();
+  }
+
+  drawReferenceLayers(context, counties, states, interstates, boundary, office, projectPoint);
+  context.restore();
+
+  // A national outlook usually has nothing over any one CWA. Say so, rather than
+  // shipping what looks like a map that failed to load.
+  const frame = frameBounds(bounds) as Bounds;
+  if (!outlook.features.some((area) => outlookTouchesFrame(area, frame))) {
+    context.textAlign = "center";
+    context.font = `600 19px ${PLOT_FONT_FAMILY}`;
+    outlinedText(context, "NO SEVERE WEATHER RISK AREA", width / 2, height / 2 - 6, 4);
+    context.font = `600 13px ${PLOT_FONT_FAMILY}`;
+    outlinedText(context, `for the ${office} forecast area`, width / 2, height / 2 + 15, 3);
+    context.textAlign = "left";
+  }
+
+  // Discrete swatches, and always the full category list — a legend that changed with
+  // the day would make two graphics look comparable when they aren't.
+  const swatchX = 26;
+  const swatchTop = 54;
+  const rowHeight = 30;
+  const swatchWidth = 34;
+  const swatchHeight = 20;
+  context.textAlign = "left";
+  context.font = `600 12px ${PLOT_FONT_FAMILY}`;
+  outlinedText(context, spec.legend, swatchX, swatchTop - 10, 3);
+  OUTLOOK_CATEGORIES.forEach((category, index) => {
+    const y = swatchTop + index * rowHeight;
+    context.fillStyle = category.fill;
+    context.globalAlpha = 0.9;
+    context.fillRect(swatchX, y, swatchWidth, swatchHeight);
+    context.globalAlpha = 1;
+    context.strokeStyle = category.stroke;
+    context.lineWidth = 1.6;
+    context.strokeRect(swatchX, y, swatchWidth, swatchHeight);
+    context.font = `600 12px ${PLOT_FONT_FAMILY}`;
+    outlinedText(context, category.label, swatchX + swatchWidth + 8, y + 14, 3);
+  });
+
+  drawSignature(context, width, height);
+  commitPlot(canvas, mapCanvas, spec.title, outlookHeaderLines(outlook), await loadHeaderMark());
+}
+
+function ForecastPlot({ spec, forecast, outlook, boundary, counties, states, interstates, dayIndex, office }: { spec: ProductSpec; forecast: ForecastPayload; outlook: OutlookDay | null; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures; dayIndex: number; office: Office }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [ready, setReady] = useState(false);
   useEffect(() => {
     if (!canvas.current) return;
     let active = true;
     setReady(false);
-    void renderPlot(canvas.current, forecast, boundary, counties, states, interstates, spec, dayIndex, office.id).then(() => { if (active) setReady(true); });
+    const done = () => { if (active) setReady(true); };
+    if (spec.kind === "outlook") {
+      // Nothing to draw until the SPC payload lands; the gallery holds the slot.
+      if (!outlook) return;
+      void renderOutlookPlot(canvas.current, outlook, boundary, counties, states, interstates, spec, office.id).then(done);
+    } else {
+      void renderPlot(canvas.current, forecast, boundary, counties, states, interstates, spec, dayIndex, office.id).then(done);
+    }
     return () => { active = false; };
-  }, [forecast, boundary, counties, states, interstates, spec, dayIndex, office]);
+  }, [forecast, outlook, boundary, counties, states, interstates, spec, dayIndex, office]);
 
   const download = useCallback(() => {
     if (!canvas.current || !ready) return;
@@ -878,6 +1088,7 @@ export function ForecastGraphic() {
   const [counties, setCounties] = useState<CountyBoundaries | null>(null);
   const [states, setStates] = useState<CountyBoundaries | null>(null);
   const [interstates, setInterstates] = useState<LineFeatures | null>(null);
+  const [outlook, setOutlook] = useState<OutlookPayload | null>(null);
   const [dayIndex, setDayIndex] = useState(0);
   const [error, setError] = useState(false);
 
@@ -950,6 +1161,25 @@ export function ForecastGraphic() {
     const refresh = window.setInterval(load, 15 * 60 * 1000);
     return () => { active = false; window.clearInterval(refresh); };
   }, [manifestNonce]);
+
+  // SPC outlooks are national, so they load once and are shared by every office. Only
+  // the live-canvas path needs them; published offices ship a baked PNG.
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/spc-outlook", { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = await response.json() as OutlookPayload;
+        if (active) setOutlook(payload);
+      } catch {
+        // The severe product simply stays unrendered; every other product is unaffected.
+      }
+    };
+    void load();
+    const refresh = window.setInterval(load, 15 * 60 * 1000);
+    return () => { active = false; window.clearInterval(refresh); };
+  }, []);
 
   const publishedDays = publishedDaysFor(publishedForecast, office.id);
   const hasPublishedOffice = Boolean(publishedDays && publishedDays.length >= FORECAST_DAYS.length);
@@ -1046,7 +1276,7 @@ export function ForecastGraphic() {
           {!hasPublishedOffice && officeForecast && boundary && counties && states && interstates && (
             <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} forecast plots`} data-office={office.id}>
               {availableProducts.map((spec) => (
-                <ForecastPlot key={spec.id} spec={spec} forecast={officeForecast} boundary={boundary} counties={counties} states={states} interstates={interstates} dayIndex={dayIndex} office={office} />
+                <ForecastPlot key={spec.id} spec={spec} forecast={officeForecast} outlook={outlook?.days.find((day) => day.day === dayIndex + 1) ?? null} boundary={boundary} counties={counties} states={states} interstates={interstates} dayIndex={dayIndex} office={office} />
               ))}
             </section>
           )}
