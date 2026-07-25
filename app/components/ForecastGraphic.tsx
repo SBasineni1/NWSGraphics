@@ -222,7 +222,8 @@ let headerMarkPromise: Promise<ImageBitmap | null> | null = null;
 
 function loadHeaderMark() {
   if (!headerMarkPromise) {
-    headerMarkPromise = fetch("/weather-mark-white.png")
+    // Awaited by every commit, so it gets the same hang guard as the basemap tiles.
+    headerMarkPromise = fetch("/weather-mark-white.png", { signal: AbortSignal.timeout(15_000) })
       .then(async (response) => response.ok ? createImageBitmap(await response.blob()) : null)
       .catch(() => null);
   }
@@ -354,14 +355,23 @@ function sampleField(points: ForecastPoint[], product: ProductId, dayIndex: numb
   return weights ? weighted / weights : 0;
 }
 
+// Every canvas at a given extent shares these promises, so a basemap request that hangs
+// would stall the whole page rather than one tile: `drawTiles` awaits them all, the
+// render never resolves, and the publisher's readiness wait times out. Two guards —
+// a hard timeout, and eviction on failure so a hung request is never cached and reused.
+const TILE_TIMEOUT_MS = 15_000;
+
 function loadTile(url: string) {
-  if (!tileCache.has(url)) {
-    tileCache.set(url, fetch(url).then(async (response) => {
+  const cached = tileCache.get(url);
+  if (cached) return cached;
+  const request = fetch(url, { signal: AbortSignal.timeout(TILE_TIMEOUT_MS) })
+    .then(async (response) => {
       if (!response.ok) throw new Error("Basemap unavailable");
       return createImageBitmap(await response.blob());
-    }));
-  }
-  return tileCache.get(url)!;
+    });
+  request.catch(() => tileCache.delete(url));
+  tileCache.set(url, request);
+  return request;
 }
 
 async function drawTiles(context: CanvasRenderingContext2D, extent: MapExtent, x: number, y: number, width: number) {
@@ -766,8 +776,26 @@ function outlookTouchesFrame(area: OutlookArea, frame: Bounds) {
   return false;
 }
 
-async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookDay, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: OutlookProductSpec, office: OfficeId) {
+async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookDay | null, boundary: Boundary, counties: CountyBoundaries, states: CountyBoundaries, interstates: LineFeatures, spec: OutlookProductSpec, dayIndex: number, office: OfficeId) {
   const { mapCanvas, context, bounds, projectPoint, width, height } = await beginMapCanvas(boundary, office);
+
+  // An unreachable SPC still has to produce a finished canvas. Leaving this one
+  // unresolved would hold `data-render-state="rendering"` forever and stall the
+  // publisher's readiness wait for every product on the page.
+  if (!outlook) {
+    drawReferenceLayers(context, counties, states, interstates, boundary, office, projectPoint);
+    context.restore();
+    context.textAlign = "center";
+    context.font = `600 19px ${PLOT_FONT_FAMILY}`;
+    outlinedText(context, "SPC OUTLOOK UNAVAILABLE", width / 2, height / 2 - 6, 4);
+    context.textAlign = "left";
+    drawSignature(context, width, height);
+    commitPlot(canvas, mapCanvas, spec.title, {
+      valid: `SPC DAY ${dayIndex + 1} CONVECTIVE OUTLOOK`,
+      issued: "SOURCE UNAVAILABLE",
+    }, await loadHeaderMark());
+    return;
+  }
 
   // Painted in DN order (the route sorts them), so a higher risk lands on top of the
   // lower-risk area that always encloses it.
@@ -824,7 +852,7 @@ async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookDay,
   commitPlot(canvas, mapCanvas, spec.title, outlookHeaderLines(outlook), await loadHeaderMark());
 }
 
-function ForecastPlot({ spec, forecast, outlook, boundary, counties, states, interstates, dayIndex, office }: { spec: ProductSpec; forecast: ForecastPayload; outlook: OutlookDay | null; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures; dayIndex: number; office: Office }) {
+function ForecastPlot({ spec, forecast, outlook, outlookPending, boundary, counties, states, interstates, dayIndex, office }: { spec: ProductSpec; forecast: ForecastPayload; outlook: OutlookDay | null; outlookPending: boolean; boundary: Boundary; counties: CountyBoundaries; states: CountyBoundaries; interstates: LineFeatures; dayIndex: number; office: Office }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [ready, setReady] = useState(false);
   useEffect(() => {
@@ -833,14 +861,16 @@ function ForecastPlot({ spec, forecast, outlook, boundary, counties, states, int
     setReady(false);
     const done = () => { if (active) setReady(true); };
     if (spec.kind === "outlook") {
-      // Nothing to draw until the SPC payload lands; the gallery holds the slot.
-      if (!outlook) return;
-      void renderOutlookPlot(canvas.current, outlook, boundary, counties, states, interstates, spec, office.id).then(done);
+      // Only hold the slot while SPC is genuinely still in flight. Once the fetch has
+      // settled — success or failure — render something, or this canvas never reports
+      // ready and the publisher waits on it until it times out.
+      if (outlookPending) return;
+      void renderOutlookPlot(canvas.current, outlook, boundary, counties, states, interstates, spec, dayIndex, office.id).then(done);
     } else {
       void renderPlot(canvas.current, forecast, boundary, counties, states, interstates, spec, dayIndex, office.id).then(done);
     }
     return () => { active = false; };
-  }, [forecast, outlook, boundary, counties, states, interstates, spec, dayIndex, office]);
+  }, [forecast, outlook, outlookPending, boundary, counties, states, interstates, spec, dayIndex, office]);
 
   const download = useCallback(() => {
     if (!canvas.current || !ready) return;
@@ -1089,6 +1119,8 @@ export function ForecastGraphic() {
   const [states, setStates] = useState<CountyBoundaries | null>(null);
   const [interstates, setInterstates] = useState<LineFeatures | null>(null);
   const [outlook, setOutlook] = useState<OutlookPayload | null>(null);
+  // Distinct from "no outlook": tracks whether the SPC fetch has settled at all.
+  const [outlookPending, setOutlookPending] = useState(true);
   const [dayIndex, setDayIndex] = useState(0);
   const [error, setError] = useState(false);
 
@@ -1168,12 +1200,14 @@ export function ForecastGraphic() {
     let active = true;
     const load = async () => {
       try {
-        const response = await fetch("/api/spc-outlook", { cache: "no-store" });
-        if (!response.ok) return;
+        const response = await fetch("/api/spc-outlook", { cache: "no-store", signal: AbortSignal.timeout(30_000) });
+        if (!response.ok) throw new Error(`SPC ${response.status}`);
         const payload = await response.json() as OutlookPayload;
         if (active) setOutlook(payload);
       } catch {
-        // The severe product simply stays unrendered; every other product is unaffected.
+        // The severe product renders an "unavailable" card rather than never resolving.
+      } finally {
+        if (active) setOutlookPending(false);
       }
     };
     void load();
@@ -1276,7 +1310,7 @@ export function ForecastGraphic() {
           {!hasPublishedOffice && officeForecast && boundary && counties && states && interstates && (
             <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} forecast plots`} data-office={office.id}>
               {availableProducts.map((spec) => (
-                <ForecastPlot key={spec.id} spec={spec} forecast={officeForecast} outlook={outlook?.days.find((day) => day.day === dayIndex + 1) ?? null} boundary={boundary} counties={counties} states={states} interstates={interstates} dayIndex={dayIndex} office={office} />
+                <ForecastPlot key={spec.id} spec={spec} forecast={officeForecast} outlook={outlook?.days.find((day) => day.day === dayIndex + 1) ?? null} outlookPending={outlookPending} boundary={boundary} counties={counties} states={states} interstates={interstates} dayIndex={dayIndex} office={office} />
               ))}
             </section>
           )}

@@ -324,6 +324,32 @@ test("renders SPC categorical outlooks alongside the gridpoint fields", async ()
   }
 });
 
+test("no render path can hang on an external request", async () => {
+  const [component, publisher] = await Promise.all([
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
+  ]);
+  // A fetch without a timeout inside the render path is the failure mode that stalls the
+  // publisher: the promise never settles, data-render-state stays "rendering", and the
+  // readiness wait times out. Basemap tiles hit a third party, so they must be bounded.
+  assert.match(component, /const TILE_TIMEOUT_MS = 15_000/);
+  assert.match(component, /fetch\(url, \{ signal: AbortSignal\.timeout\(TILE_TIMEOUT_MS\) \}\)/);
+  // A failed tile must be evicted: the promise is shared by every canvas at this extent,
+  // so caching a rejected or hung one would poison the whole page.
+  assert.match(component, /request\.catch\(\(\) => tileCache\.delete\(url\)\)/);
+  assert.match(component, /fetch\("\/weather-mark-white\.png", \{ signal: AbortSignal\.timeout/);
+  assert.match(component, /fetch\("\/api\/spc-outlook", \{ cache: "no-store", signal: AbortSignal\.timeout/);
+
+  // An unreachable SPC must still produce a finished canvas.
+  assert.match(component, /SPC OUTLOOK UNAVAILABLE/);
+  assert.match(component, /if \(outlookPending\) return;/);
+  assert.match(component, /setOutlookPending\(false\)/);
+
+  // The publisher renders from a fixed SPC snapshot, as it already does for the forecast.
+  assert.match(publisher, /page\.route\("\*\*\/api\/spc-outlook"/);
+  assert.match(publisher, /outlookSnapshot/);
+});
+
 test("resolves both published key shapes and rejects anything else", async () => {
   const source = await readFile(new URL("../app/api/forecast-assets/[...path]/route.ts", import.meta.url), "utf8");
   const pattern = new RegExp(/^releases\/\d{8}T\d{6}Z\/(?:[A-Z]{3}\/)?day-[1-3]\/[a-z][a-z-]*\.png$/);
