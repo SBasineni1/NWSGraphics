@@ -244,6 +244,10 @@ for (const line of placeText.split("\n").slice(1)) {
   }
   let name = cells[3].trim();
   // Some names carry two ("Athens-Clarke County unified government"); strip until stable.
+  // Trailing parentheticals first, or they shield the suffix behind them: the Census
+  // calls Nashville "Nashville-Davidson metropolitan government (balance)", and with
+  // "(balance)" on the end the government suffix is never at the end to be stripped.
+  name = name.replace(/\s*\([^)]*\)\s*$/, "").trim();
   for (let previous = ""; previous !== name; ) {
     previous = name;
     name = name.replace(SUFFIX, "").trim();
@@ -353,6 +357,21 @@ for (const place of byLabelRank) {
     area: place.area,
   });
 }
+// The national view labels the biggest cities in the country rather than any one office's.
+// build-office-cities.mjs spaces them for the CONUS frame, so this only has to be a
+// generous ranked pool.
+candidates.US = byLabelRank
+  .filter((place) => place.population > 0 && place.lat < 50 && place.lat > 24 && place.lon < -66 && place.lon > -126)
+  .slice(0, 120)
+  .map((place) => ({
+    name: place.name,
+    state: place.state,
+    lat: Math.round(place.lat * 1e4) / 1e4,
+    lon: Math.round(place.lon * 1e4) / 1e4,
+    population: place.population,
+    area: place.area,
+  }));
+
 await writeFile(
   new URL("../scripts/data/office-cities.json", import.meta.url),
   `${JSON.stringify(candidates)}\n`,

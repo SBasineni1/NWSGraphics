@@ -38,7 +38,10 @@ jobs:
     # not tens of minutes, so this ceiling exists to kill a run that has *stalled* —
     # usually waiting on api.weather.gov — rather than to accommodate a slow one. If a
     # run ever approaches it, the cause is a hang, not the plot count.
-    timeout-minutes: 45
+    # Raised from 45, which a cold run overshot and died on. The phases now each have
+    # their own ceiling — fetch 12 min, capture 15 min — so the job should finish well
+    # inside this; it is a backstop for a stall, not a budget to fill.
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -50,6 +53,17 @@ jobs:
       R2_BUCKET: ${{ vars.R2_BUCKET }}
       R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
       RELEASE_RETENTION_COUNT: ${{ vars.RELEASE_RETENTION_COUNT }}
+      # How many offices get pre-rendered PNGs, most populous first. Every drawable office
+      # gets forecast *data* regardless — that is what lets it render at all. Unset uses
+      # the script default of 24 (~110 MB and ~27 s per office when measured locally).
+      RENDER_OFFICE_COUNT: ${{ vars.RENDER_OFFICE_COUNT }}
+      # Per-phase ceilings. A cold run defers whatever does not fit rather than failing:
+      # deferred offices stay out of forecast/index.json, so the next probe still sees
+      # them as stale and picks them up. Cold start converges over a few runs.
+      PLOT_FETCH_BUDGET_MS: ${{ vars.PLOT_FETCH_BUDGET_MS }}
+      PLOT_CAPTURE_BUDGET_MS: ${{ vars.PLOT_CAPTURE_BUDGET_MS }}
+      # Narrows both tiers to a named set, for re-running one office after a failure.
+      PLOT_OFFICES: ${{ vars.PLOT_OFFICES }}
 
     steps:
       - name: Check publication configuration

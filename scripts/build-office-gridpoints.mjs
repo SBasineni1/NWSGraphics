@@ -46,6 +46,10 @@ const RETRIES = 3;
 // interpolation wants, and it bounds the per-office fetch cost, which is one
 // api.weather.gov request per point on every publish.
 const TARGET_POINTS = 340;
+// The national view gets more, because it is one map covering the whole country: at 340
+// the spacing is ~95 miles and the field reads as blobs. It costs one office's worth of
+// extra fetches on a publish, not 121.
+const NATIONAL_TARGET_POINTS = 1800;
 // `--rebalance` redoes just that last step from the files already on disk, with no
 // network at all — the resolving pass above is 30k lookups and ~18 minutes.
 const args = process.argv.slice(2);
@@ -101,6 +105,9 @@ for (const name of names) {
   };
   const fine = (sampled.east - sampled.west) / FINE_COLUMNS;
   const coarse = fine * COARSE_FACTOR;
+  // The national view has no CWA to sample "inside" — and it needs no new lookups at all,
+  // because the rebalance below fills it from every point already resolved nationally.
+  if (!bundle.cwa) continue;
   const polygons = bundle.cwa.type === "Polygon" ? [bundle.cwa.coordinates] : bundle.cwa.coordinates;
 
   let count = 0;
@@ -252,16 +259,21 @@ function thin(candidates, frame, target) {
 }
 
 // Every point resolved anywhere, so a frame can draw on its neighbours' sampling.
+//
+// Kept in its own file rather than reconstructed from the per-office outputs. Those are
+// already thinned, so rebuilding the pool from them is lossy: the first --rebalance read
+// 29,464 points and the second only 25,028, and each further run would erode it again.
+// The pool is the authoritative record of what the 31k-lookup resolving pass found.
+const poolPath = new URL("../scripts/data/gridpoints-national.json", import.meta.url);
 const national = new Map();
 if (rebalanceOnly) {
-  for (const name of names) {
-    const office = name.replace(".json", "");
-    const existing = await readFile(new URL(`${office}.json`, outDir), "utf8").catch(() => null);
-    if (!existing) continue;
-    for (const point of JSON.parse(existing)) national.set(`${point.wfo}-${point.x}-${point.y}`, point);
-  }
+  const saved = await readFile(poolPath, "utf8").catch(() => null);
+  if (!saved) throw new Error("no scripts/data/gridpoints-national.json — run without --rebalance first");
+  for (const point of JSON.parse(saved)) national.set(`${point.wfo}-${point.x}-${point.y}`, point);
 } else {
   for (const point of points.values()) national.set(`${point.wfo}-${point.x}-${point.y}`, point);
+  await mkdir(new URL("../scripts/data/", import.meta.url), { recursive: true });
+  await writeFile(poolPath, JSON.stringify([...national.values()]));
 }
 if (!national.size) throw new Error("no gridpoints to distribute");
 
@@ -282,7 +294,7 @@ for (const name of names) {
   }
   if (!candidates.length) continue;
 
-  const list = thin(candidates, frame, TARGET_POINTS)
+  const list = thin(candidates, frame, office === "US" ? NATIONAL_TARGET_POINTS : TARGET_POINTS)
     // Written back in the office's own coordinate space so the client never has to shift.
     .map((point) => ({ id: point.id, wfo: point.wfo, x: point.x, y: point.y, lat: point.lat, lon: point.lon }))
     .sort((a, b) => a.id.localeCompare(b.id));

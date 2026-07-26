@@ -20,6 +20,10 @@ import { plotExtent, project, PLOT_WIDTH, MAP_HEIGHT } from "../lib/map-frame.mj
 
 const USER_AGENT = "NWS Forecast Graphics (github.com/suchitbasineni/NWSGraphics)";
 const TARGET = 14;
+// The national frame is far larger, so it carries more labels without crowding.
+const NATIONAL_TARGET = 26;
+// Bar at x=30 (17 wide) plus its value labels; 104 clears the widest of them.
+const LEGEND_GUTTER_PX = 104;
 // Labels are drawn as a value above a dot with the city name below, roughly 90×34 px on
 // the 900×760 map. 66 px is not a guess: the hand-authored PHI layout this replaces put
 // its closest pair (Morristown/Somerville) 62 px apart, with every other neighbour at
@@ -41,16 +45,17 @@ const bundleDir = new URL("../public/offices/", import.meta.url);
 const names = (await readdir(bundleDir)).filter((name) => name.endsWith(".json")).sort();
 
 /** Greedy pick in rank order, keeping every accepted label at least `gap` pixels apart. */
-function spread(list, toPixel, gap) {
+function spread(list, toPixel, gap, target = TARGET) {
   const kept = [];
   for (const city of list) {
     const [x, y] = toPixel(city);
-    // Off-frame candidates exist: a place can sit inside the CWA but outside the drawn
-    // frame is impossible, yet a place near the edge can project just past it.
-    if (x < 8 || x > PLOT_WIDTH - 8 || y < 8 || y > MAP_HEIGHT - 8) continue;
+    // The vertical legend occupies the left gutter and is drawn *after* the labels, so
+    // anything placed under it is simply covered — on the national frame that hid
+    // Seattle, San Jose and Los Angeles behind the colour bar.
+    if (x < LEGEND_GUTTER_PX || x > PLOT_WIDTH - 8 || y < 8 || y > MAP_HEIGHT - 8) continue;
     if (kept.some((other) => Math.hypot(other.x - x, other.y - y) < gap)) continue;
     kept.push({ ...city, x, y });
-    if (kept.length >= TARGET) break;
+    if (kept.length >= target) break;
   }
   return kept;
 }
@@ -96,8 +101,9 @@ for (const name of names) {
   const shift = bundle.bounds.east > 180 ? (lon) => (lon < 0 ? lon + 360 : lon) : (lon) => lon;
   const toPixel = (city) => project(shift(city.lon), city.lat, extent, 0, 0, PLOT_WIDTH, MAP_HEIGHT);
 
-  let picked = spread(pool, toPixel, MIN_SEPARATION_PX);
-  if (picked.length < MIN_LABELS) picked = spread(pool, toPixel, RELAXED_SEPARATION_PX);
+  const target = office === "US" ? NATIONAL_TARGET : TARGET;
+  let picked = spread(pool, toPixel, MIN_SEPARATION_PX, target);
+  if (picked.length < MIN_LABELS) picked = spread(pool, toPixel, RELAXED_SEPARATION_PX, target);
 
   // Resolved in parallel within an office, serially across them, so the API sees a steady
   // trickle rather than 1,750 requests at once.
@@ -110,7 +116,9 @@ for (const name of names) {
       // The API is the authority on ownership. A candidate it assigns to a neighbour is
       // dropped rather than relabelled — labelling a town on a map that does not forecast
       // it is the exact failure the hand-authored table's verification existed to prevent.
-      if (!grid || grid.cwa !== office) return;
+      // The national view spans every office, so there is no single CWA to verify
+      // against — any US city is legitimately on it. Every other office still checks.
+      if (!grid || (office !== "US" && grid.cwa !== office)) return;
       resolved.push({
         id: `${office}-${city.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
         name: city.name,

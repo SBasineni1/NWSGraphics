@@ -623,5 +623,10 @@
     "id": "PQW",
     "label": "Micronesia Domain West",
     "ready": false
+  },
+  {
+    "id": "US",
+    "label": "National",
+    "ready": true
   }
 ]

@@ -139,7 +139,8 @@ export type OfficeId =
   | "HFO"
   | "PPG"
   | "PQE"
-  | "PQW";
+  | "PQW"
+  | "US";
 
 export type RegionId = "eastern" | "central" | "southern" | "western" | "alaska" | "pacific";
 
@@ -340,7 +341,10 @@ export const REGIONS: Region[] = [
   },
 ];
 
-export const OFFICES: Office[] = REGIONS.flatMap((region) => region.offices);
+/** The national view, which sits above the regions rather than inside one. */
+export const NATIONAL: Office = {"id":"US","city":"United States","state":"US","label":"National","ready":true};
+
+export const OFFICES: Office[] = [...REGIONS.flatMap((region) => region.offices), NATIONAL];
 export const OFFICE_IDS: OfficeId[] = OFFICES.map((office) => office.id);
 /** The offices the site can actually draw today. */
 export const READY_OFFICES: Office[] = OFFICES.filter((office) => office.ready);
@@ -368,4 +372,9 @@ export function findRegion(id: string | null | undefined) {
 /** The region that forecasts a given office, for opening the picker where you are. */
 export function regionOf(office: OfficeId) {
   return REGIONS.find((region) => region.offices.some((entry) => entry.id === office)) ?? REGIONS[0];
+}
+
+/** The national view spans every region, so it is never "in" one. */
+export function isNational(office: OfficeId) {
+  return office === NATIONAL.id;
 }

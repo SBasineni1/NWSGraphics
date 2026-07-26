@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { PLOT_FONT_FAMILY } from "../fonts";
-import { DEFAULT_OFFICE, findOffice, findRegion, OFFICES, REGIONS, regionOf, type Office, type OfficeId } from "../offices";
+import { DEFAULT_OFFICE, findOffice, findRegion, NATIONAL, OFFICES, REGIONS, regionOf, type Office, type OfficeId } from "../offices";
 import { MAP_HEIGHT, PLOT_WIDTH, frameBounds, inverseWorld, plotExtent, project } from "../../lib/map-frame.mjs";
 import { parsePlaceIndex, searchPlaces } from "../../lib/place-search.mjs";
 
@@ -82,7 +82,8 @@ type OfficeBundle = {
   office: string;
   zoom: number;
   bounds: Bounds;
-  cwa: AreaGeometry;
+  /** Absent for the national view: no single boundary to outline at that scale. */
+  cwa: AreaGeometry | null;
   counties: AreaGeometry[];
   states: AreaGeometry[];
   interstates: LineGeometry[];
@@ -491,8 +492,29 @@ function colorRamp(stops: ColorStop[]) {
 // Weights are float64, not float32: the per-plot sum has to stay bit-for-bit what the
 // per-pixel solve produced, or the ramp lookup can land a pixel in the neighbouring
 // colour band and the optimisation would show up as a changed map.
-type FieldSolve = { indices: Int32Array; weights: Float64Array; exact: Int32Array };
+type FieldSolve = { indices: Int32Array; weights: Float64Array; exact: Int32Array; support: Float32Array };
 const NEIGHBOR_COUNT = 8;
+/**
+ * Shepard smoothing, as a fraction of the lattice's own spacing.
+ *
+ * Inverse-distance weighting goes singular at a data point — the weight blows up and the
+ * cell takes that point's value outright — so a coarse lattice renders as one bullseye per
+ * gridpoint. A smoothing term in the denominator caps that. It has to scale with spacing:
+ * this was a hard-coded 0.0005, which is exactly (0.1 × 0.219°)², PHI's spacing. At
+ * national scale the spacing is ~1.7°, where that constant is 58× too small and every
+ * gridpoint shows as a blob. Expressed as a ratio it reproduces the old value for a CWA
+ * frame and widens correctly for the national one.
+ */
+const SHEPARD_SMOOTHING = 0.35;
+/**
+ * How far from real data a cell may sit, in multiples of lattice spacing, before the field
+ * fades out. A CWA lattice covers its whole frame, so this never fires there — that is why
+ * the old blanket coverage mask was removed. The national frame is different: it reaches
+ * far into the Atlantic, Pacific and Gulf where NWS publishes no gridded forecast at all,
+ * and without a fade the raster extrapolates land values hundreds of miles offshore.
+ */
+const SUPPORT_FULL = 1.6;
+const SUPPORT_NONE = 3.2;
 
 function solveFieldWeights(points: ForecastPoint[], columns: number, rows: number, positionOf: (column: number, row: number) => { lon: number; lat: number }): FieldSolve {
   const cells = columns * rows;
@@ -501,7 +523,20 @@ function solveFieldWeights(points: ForecastPoint[], columns: number, rows: numbe
   // A cell sitting exactly on a gridpoint takes that point's value outright, the same
   // short-circuit the per-pixel solve had.
   const exact = new Int32Array(cells).fill(-1);
+  // Distance to the nearest contributing point, in multiples of lattice spacing.
+  const support = new Float32Array(cells);
   const near: Array<{ distanceSquared: number; index: number }> = [];
+
+  // Characteristic spacing of this lattice: the frame's area shared between its points.
+  // Latitude-scaled to match the distance metric used below, so it is comparable across a
+  // 2.5° office frame and a 59° national one.
+  const first = positionOf(0, 0);
+  const last = positionOf(columns - 1, rows - 1);
+  const midLatitude = (first.lat + last.lat) / 2;
+  const width = Math.abs(last.lon - first.lon) * Math.cos(midLatitude * Math.PI / 180);
+  const height = Math.abs(last.lat - first.lat);
+  const spacing = Math.sqrt(Math.max(width * height, 1e-9) / Math.max(points.length, 1));
+  const smoothing = (SHEPARD_SMOOTHING * spacing) ** 2;
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
       const cell = row * columns + column;
@@ -525,14 +560,18 @@ function solveFieldWeights(points: ForecastPoint[], columns: number, rows: numbe
           if (near.length > NEIGHBOR_COUNT) near.pop();
         }
       }
-      if (exact[cell] !== -1) continue;
+      if (exact[cell] !== -1) {
+        support[cell] = 0;
+        continue;
+      }
+      support[cell] = near.length ? Math.sqrt(near[0].distanceSquared) / spacing : Infinity;
       for (let slot = 0; slot < near.length; slot += 1) {
         indices[cell * NEIGHBOR_COUNT + slot] = near[slot].index;
-        weights[cell * NEIGHBOR_COUNT + slot] = 1 / Math.pow(near[slot].distanceSquared + 0.0005, 1.35);
+        weights[cell * NEIGHBOR_COUNT + slot] = 1 / Math.pow(near[slot].distanceSquared + smoothing, 1.35);
       }
     }
   }
-  return { indices, weights, exact };
+  return { indices, weights, exact, support };
 }
 
 // Cleared whenever the lattice geometry changes, so a solve can never outlive the frame
@@ -644,7 +683,9 @@ function forecastHeaderLines(forecast: ForecastPayload, dayIndex: number, office
   }).format(validDate).toUpperCase();
   return {
     valid: `VALID  ${validLabel} · 12:00 AM–11:59 PM ${timeZoneName(validDate)}`,
-    issued: `NWS ${office} ISSUED  ${stampLabel(forecast.updatedAt)}`,
+    // The national view aggregates every office's grids, so naming one would be wrong —
+    // and "NWS US ISSUED" reads as nonsense.
+    issued: `${office === "US" ? "NWS" : `NWS ${office}`} ISSUED  ${stampLabel(forecast.updatedAt)}`,
   };
 }
 
@@ -777,10 +818,12 @@ function drawReferenceLayers(
   context.lineWidth = 1.4;
   context.stroke();
 
-  traceAreas(context, [bundle.cwa], projectPoint);
-  context.strokeStyle = "rgba(8, 13, 24, 0.98)";
-  context.lineWidth = 2.4;
-  context.stroke();
+  if (bundle.cwa) {
+    traceAreas(context, [bundle.cwa], projectPoint);
+    context.strokeStyle = "rgba(8, 13, 24, 0.98)";
+    context.lineWidth = 2.4;
+    context.stroke();
+  }
 }
 
 /** The X handle in the bottom-right corner, identical on every product. */
@@ -865,9 +908,19 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   // Which points are nearest each cell doesn't change between products or days, so the
   // search behind it is solved once per point set and every plot reuses it.
   const frame = `${office}:${extent.zoom}:${extent.left}:${extent.top}:${columns}x${rows}`;
-  const { indices, weights, exact } = fieldSolveFor(fieldPoints, frame, columns, rows, positionOf);
+  const { indices, weights, exact, support } = fieldSolveFor(fieldPoints, frame, columns, rows, positionOf);
   const field = new Float32Array(columns * rows);
+  // Per-cell opacity, so the raster can fade where there is no data behind it rather than
+  // painting an extrapolation. Upsampled alongside the value, or the fade would step in
+  // blocks the size of a lattice cell.
+  const cover = new Float32Array(columns * rows);
   for (let cell = 0; cell < field.length; cell += 1) {
+    const reach = support[cell];
+    cover[cell] = reach <= SUPPORT_FULL
+      ? 1
+      : reach >= SUPPORT_NONE
+        ? 0
+        : 1 - (reach - SUPPORT_FULL) / (SUPPORT_NONE - SUPPORT_FULL);
     if (exact[cell] !== -1) {
       field[cell] = fieldPoints[exact[cell]].metrics[spec.id][dayIndex] ?? 0;
       continue;
@@ -900,6 +953,9 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
       const top = field[topOffset + column] + (field[topOffset + right] - field[topOffset + column]) * columnFraction;
       const bottom = field[bottomOffset + column] + (field[bottomOffset + right] - field[bottomOffset + column]) * columnFraction;
       const value = top + (bottom - top) * rowFraction;
+      const coverTop = cover[topOffset + column] + (cover[topOffset + right] - cover[topOffset + column]) * columnFraction;
+      const coverBottom = cover[bottomOffset + column] + (cover[bottomOffset + right] - cover[bottomOffset + column]) * columnFraction;
+      const coverage = coverTop + (coverBottom - coverTop) * rowFraction;
       let index = Math.round((value - min) * scale);
       if (index < 0) index = 0;
       else if (index > COLOR_LUT_SIZE - 1) index = COLOR_LUT_SIZE - 1;
@@ -908,7 +964,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
       image.data[offset] = table[source];
       image.data[offset + 1] = table[source + 1];
       image.data[offset + 2] = table[source + 2];
-      image.data[offset + 3] = fillAlpha;
+      image.data[offset + 3] = coverage >= 1 ? fillAlpha : Math.round(fillAlpha * coverage);
     }
   }
   rasterContext.putImageData(image, 0, 0);
@@ -1323,6 +1379,90 @@ type IndexState = "idle" | "loading" | "ready" | "error";
  * Most visits never open it, and someone who opens the picker to browse regions should
  * not pay for a search they aren't doing.
  */
+type LocateState = "idle" | "locating" | "denied" | "unavailable" | "unsupported";
+
+/**
+ * The office that forecasts a coordinate, straight from NWS.
+ *
+ * `properties.cwa` is the authority, not a local point-in-polygon: the client only ever
+ * holds one office's boundary, and shipping all 125 to answer this would cost more than
+ * the request does. `api.weather.gov` sends `Access-Control-Allow-Origin: *`, so this
+ * works from the browser with no proxy.
+ */
+async function officeAt(latitude: number, longitude: number): Promise<Office | null> {
+  const response = await fetch(
+    `https://api.weather.gov/points/${latitude.toFixed(4)},${longitude.toFixed(4)}`,
+    { headers: { Accept: "application/geo+json" }, signal: AbortSignal.timeout(15_000) },
+  );
+  if (!response.ok) return null;
+  const properties = (await response.json())?.properties;
+  const found = OFFICE_BY_ID.get(properties?.cwa as OfficeId);
+  return found ?? null;
+}
+
+/**
+ * Jump to the visitor's own forecast office.
+ *
+ * Deliberately **never prompts on page load**. An unbidden location prompt is a poor
+ * trade for the reader and browsers increasingly penalise it, so the permission is only
+ * ever requested from a real click. The one exception costs nothing: if permission was
+ * *already* granted on a previous visit, the position is read silently — that returning
+ * visitor has said yes, and re-asking would be the rude part.
+ *
+ * Silent location never overrides an explicit `?office=`, or a shared deep link would
+ * quietly retarget itself at whoever opened it.
+ */
+function useLocalOffice(onSelect: (office: Office) => void) {
+  const [state, setState] = useState<LocateState>("idle");
+  const attempted = useRef(false);
+
+  const apply = useCallback(async (position: GeolocationPosition) => {
+    try {
+      const found = await officeAt(position.coords.latitude, position.coords.longitude);
+      // An office we can't draw is reported, not silently swapped for the default — the
+      // same rule the ZIP/town search follows.
+      if (!found?.ready) {
+        setState("unavailable");
+        return;
+      }
+      onSelect(found);
+      setState("idle");
+    } catch {
+      setState("unavailable");
+    }
+  }, [onSelect]);
+
+  const locate = useCallback(() => {
+    if (!navigator.geolocation) {
+      setState("unsupported");
+      return;
+    }
+    setState("locating");
+    navigator.geolocation.getCurrentPosition(
+      (position) => void apply(position),
+      (error) => setState(error.code === error.PERMISSION_DENIED ? "denied" : "unavailable"),
+      { timeout: 12_000, maximumAge: 10 * 60 * 1000 },
+    );
+  }, [apply]);
+
+  useEffect(() => {
+    if (attempted.current) return;
+    attempted.current = true;
+    // Only for a visitor who has already granted it, and only when they have not asked
+    // for a specific office.
+    if (new URLSearchParams(window.location.search).has("office")) return;
+    if (!navigator.geolocation || !navigator.permissions?.query) return;
+    void navigator.permissions
+      .query({ name: "geolocation" as PermissionName })
+      .then((status) => {
+        if (status.state === "granted") locate();
+      })
+      .catch(() => {});
+  }, [locate]);
+
+  return { state, locate };
+}
+
 function usePlaceIndex() {
   const [index, setIndex] = useState<PlaceIndex | null>(null);
   const [state, setState] = useState<IndexState>("idle");
@@ -1373,6 +1513,7 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
   const region = findRegion(openRegion);
   const homeRegion = useMemo(() => regionOf(office.id), [office]);
   const places = usePlaceIndex();
+  const local = useLocalOffice(onSelect);
 
   const searching = query.trim().length > 0;
   // An office found by search may not be drawable yet. It is still listed — telling
@@ -1568,6 +1709,22 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
               </button>
             )}
           </div>
+          {/* Under the search box, because it answers the same question the search does —
+              "which office is mine" — and is the one-tap version of it. */}
+          <button
+            type="button"
+            className="office-locate"
+            onClick={local.locate}
+            disabled={local.state === "locating" || local.state === "unsupported"}
+          >
+            <b aria-hidden="true">◎</b>
+            <span>
+              {local.state === "locating" ? "Finding your forecast office…" : "Use my location"}
+              {local.state === "denied" && <i>Location permission is blocked — search instead</i>}
+              {local.state === "unavailable" && <i>Couldn’t find a forecast office for you</i>}
+              {local.state === "unsupported" && <i>This browser can’t share a location</i>}
+            </span>
+          </button>
           {searching ? (
             <div
               className="office-group"
@@ -1670,20 +1827,32 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
                   >
                     <b>{entry.short}</b>
                     <span>{entry.name}</span>
-                    <em>{ready ? `${ready} of ${entry.offices.length}` : `${entry.offices.length} soon`}</em>
+                    {/* No count. It read as "23 of 23" on almost every row once the
+                        country was built out — noise that said nothing. A region with
+                        nothing drawable is still marked, because that is the case where
+                        the reader needs telling. */}
+                    {!ready && <em>Soon</em>}
                   </button>
                 );
               })}
+              {/* Sits above the regions rather than inside one — it spans all of them. */}
               <button
                 type="button"
-                className="office-national"
+                role="option"
+                aria-selected={office.id === NATIONAL.id}
+                className={`office-national${office.id === NATIONAL.id ? " is-active" : ""}`}
                 data-region="national"
-                disabled
+                data-office={NATIONAL.id}
+                disabled={!NATIONAL.ready}
                 style={{ "--row": REGIONS.length + 1 } as React.CSSProperties}
+                onClick={() => {
+                  onSelect(NATIONAL);
+                  close(true);
+                }}
               >
                 <b aria-hidden="true">US</b>
                 <span>National map</span>
-                <em>Soon</em>
+                {!NATIONAL.ready && <em>Soon</em>}
               </button>
             </div>
           )}

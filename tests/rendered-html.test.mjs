@@ -89,7 +89,9 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /Maximum POP %/);
   assert.match(component, /Total Precipitation Forecast/);
   // The graphic must name the issuing office, not just "NWS".
-  assert.match(component, /NWS \$\{office\} ISSUED/);
+  // The national view aggregates every office, so it is "NWS ISSUED" with no code; every
+  // real office still names itself.
+  assert.match(component, /office === "US" \? "NWS" : `NWS \$\{office\}`/);
   assert.match(component, /12:00 AM–11:59 PM/);
   assert.match(component, /weather-mark-white\.png/);
   assert.match(component, /drawImage\(headerMark/);
@@ -114,7 +116,22 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.doesNotMatch(component, /context\.clip\("evenodd"\)/);
   assert.match(component, /const NEIGHBOR_COUNT = 8/);
   assert.match(component, /points\.filter\(\(point\) => !point\.label\)/);
+  // The blanket coverage mask really was removed — a CWA lattice covers its whole frame,
+  // so masking there only ate real data. What replaced it is *support*: a cell fades only
+  // when the nearest contributing point is several lattice spacings away, which never
+  // happens on a CWA frame and is exactly what the national frame needs, since it reaches
+  // far into ocean where NWS publishes no gridded forecast at all.
   assert.doesNotMatch(component, /coverageFalloff|maskFar/);
+  assert.match(component, /const SUPPORT_FULL/);
+  assert.match(component, /const SUPPORT_NONE/);
+  assert.match(component, /support\[cell\] = near\.length/);
+  // Shepard smoothing scales with the lattice, rather than the constant it used to be.
+  // That constant was (0.1 x 0.219 deg)^2 — PHI's spacing — so at national scale, where
+  // spacing is ~1.5 deg, inverse-distance weighting went near-singular at every point and
+  // painted one bullseye per gridpoint.
+  assert.match(component, /const SHEPARD_SMOOTHING/);
+  assert.match(component, /\(SHEPARD_SMOOTHING \* spacing\) \*\* 2/);
+  assert.doesNotMatch(component, /distanceSquared \+ 0\.0005/);
   assert.match(component, /rastertiles\/voyager/);
   assert.match(component, /offices\/\$\{office\.id\}\.json/);
   assert.match(component, /item\.label/);
@@ -322,6 +339,39 @@ test("browses offices by NWS region, with the national map staked out", async ()
   assert.match(component, /querySelectorAll<HTMLButtonElement>\("button:not\(\[disabled\]\)"\)/);
 });
 
+test("offers the visitor's own office without ever prompting unbidden", async () => {
+  const component = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
+  assert.match(component, /function useLocalOffice/);
+  assert.match(component, /navigator\.geolocation\.getCurrentPosition/);
+  // NWS is the authority on which office owns a coordinate. Answering it locally would
+  // mean shipping all 125 boundaries to the client to save one request.
+  assert.match(component, /api\.weather\.gov\/points\/\$\{latitude/);
+  assert.match(component, /properties\?\.cwa/);
+  // The prompt only ever comes from a click. The single silent path is a visitor who
+  // already granted permission on an earlier visit — re-asking them is the rude part.
+  assert.match(component, /permissions\s*\n?\s*\.query\(\{ name: "geolocation"/);
+  assert.match(component, /status\.state === "granted"/);
+  // And it must never override a deep link, or a shared URL retargets itself at whoever
+  // opens it.
+  assert.match(component, /if \(new URLSearchParams\(window\.location\.search\)\.has\("office"\)\) return/);
+  // An office we cannot draw is reported, not silently swapped for the default.
+  assert.match(component, /if \(!found\?\.ready\)/);
+  // Denied and unsupported are distinct outcomes and say different things.
+  assert.match(component, /PERMISSION_DENIED/);
+  assert.match(component, /Location permission is blocked/);
+});
+
+test("the region list drops counts that said nothing", async () => {
+  const component = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
+  // "23 of 23" on nearly every row once the country was built out. A region with nothing
+  // drawable is still marked, because that is the case a reader needs told.
+  assert.doesNotMatch(component, /\$\{ready\} of \$\{entry\.offices\.length\}/);
+  assert.match(component, /\{!ready && <em>Soon<\/em>\}/);
+  // The national view is selectable, not a placeholder.
+  assert.match(component, /data-office=\{NATIONAL\.id\}/);
+  assert.match(component, /disabled=\{!NATIONAL\.ready\}/);
+});
+
 test("finds an office by town or ZIP without scrolling 125 of them", async () => {
   const [component, search, builder] = await Promise.all([
     readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
@@ -407,7 +457,12 @@ test("publishes changed forecast canvases on the issuance-aware schedule", async
   assert.match(publisher, /await pooled\(uploads, UPLOAD_CONCURRENCY/);
   // Each office's forecast fans out to hundreds of gridpoints; fetched together the
   // phase costs the slowest office rather than the sum of all four.
-  assert.match(publisher, /await Promise\.all\(OFFICES\.map\(async \(office\)/);
+  // Fetching is pooled and budgeted now, not an unbounded Promise.all over every office:
+  // a cold run looked at 121 offices and hit the job timeout having rendered nothing.
+  assert.match(publisher, /await pooled\(toFetch, 4, async \(office\)/);
+  assert.match(publisher, /PLOT_FETCH_BUDGET_MS/);
+  // Render-tier offices are fetched first, so a budget cut can never leave nothing to render.
+  assert.match(publisher, /\[\.\.\.new Set\(\[\.\.\.RENDER_OFFICES, \.\.\.staleOffices\]\)\]/);
   assert.match(workflow, /cron: "27 \* \* \* \*"/);
   assert.match(workflow, /cron: "5,25,45 3,15 \* \* \*"/);
   assert.match(workflow, /timezone: "America\/New_York"/);
@@ -440,7 +495,9 @@ test("publishes every office and prunes aged-out releases", async () => {
   assert.match(publisher, /RENDER_OFFICE_COUNT/);
   assert.doesNotMatch(publisher, /const OFFICES = \[\s*"[A-Z]{3}"/);
   // The default office must always have imagery, wherever it lands in the ranking.
-  assert.match(publisher, /RENDER_OFFICES\.includes\("PHI"\)/);
+  // PHI (the default) and US (the national view, absent from the per-CWA ranking) are
+  // pinned into the render tier regardless of population.
+  assert.match(publisher, /for \(const pinned of \["PHI", "US"\]\)/);
   // A HEAD probe carries `last-modified` with a zero-byte body, so an unchanged office
   // costs one request instead of ~290. Refreshing all 121 blindly is ~35,000 requests.
   assert.match(publisher, /method: "HEAD"/);
@@ -746,7 +803,9 @@ test("resolves both published key shapes and rejects anything else", async () =>
 test("ships one self-contained map bundle per forecast office", async () => {
   const dir = new URL("../public/offices/", import.meta.url);
   const names = (await readdir(dir)).filter((name) => name.endsWith(".json"));
-  assert.equal(names.length, 125, "expected a bundle for every NWS forecast office");
+  // 125 CWAs plus the national view, which rides the same pipeline as a synthetic office.
+  assert.equal(names.length, 126, "expected a bundle per office plus the national view");
+  assert.ok(names.includes("US.json"), "expected a national bundle");
 
   for (const office of ["PHI", "OKX", "CTP", "LWX"]) {
     const bundle = JSON.parse(await readFile(new URL(`${office}.json`, dir), "utf8"));

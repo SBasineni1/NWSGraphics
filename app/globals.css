@@ -210,6 +210,38 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
 .office-search-clear:hover { background: #3d3d3d; color: #f4f4f4; }
 .office-search-clear:focus-visible { outline: 2px solid #f4f4f4; outline-offset: 2px; }
 
+/* Same pill as a list row, but it sits outside the keyed group so it survives level
+   changes alongside the search box. */
+.office-locate {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 11px 18px;
+  border: 0;
+  border-radius: 999px;
+  background: #191919;
+  color: #c9c9c9;
+  font: 500 13px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: -.015em;
+  text-align: left;
+  cursor: pointer;
+  transition: background .16s ease, color .16s ease, transform .12s ease;
+}
+.office-locate b { flex: 0 0 34px; color: #f4f4f4; font-size: 15px; font-weight: 650; }
+.office-locate span { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.office-locate span i {
+  color: #8b8b8b;
+  font: 500 11px var(--font-geist-sans), Arial, sans-serif;
+  font-style: normal;
+  letter-spacing: -.01em;
+}
+.office-locate:hover:not(:disabled) { background: #242424; color: #f4f4f4; }
+.office-locate:active:not(:disabled) { transform: scale(.975); }
+.office-locate:focus-visible { outline: 2px solid #f4f4f4; outline-offset: 2px; }
+.office-locate:disabled { color: #6f6f6f; cursor: default; }
+
 .office-group {
   display: flex;
   flex-direction: column;

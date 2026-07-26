@@ -92,7 +92,19 @@ for (const feature of features) {
 }
 for (const bucket of byRegion.values()) bucket.sort((a, b) => a.id.localeCompare(b.id));
 
-const offices = REGIONS.flatMap((region) => byRegion.get(region.short));
+// The national view. Deliberately *not* inside a region — it belongs to all of them, and
+// putting it in one would list it under that region in the picker. It still joins OFFICES
+// so findOffice/isOfficeId resolve "US" like any other id.
+const NATIONAL = {
+  id: "US",
+  city: "United States",
+  state: "US",
+  label: "National",
+  ready: await isReady("US"),
+};
+
+const regionOffices = REGIONS.flatMap((region) => byRegion.get(region.short));
+const offices = [...regionOffices, NATIONAL];
 if (!offices.some((office) => office.ready)) {
   throw new Error("no office has a complete asset set — run build-office-bundles → build-office-gridpoints → build-office-cities first");
 }
@@ -154,7 +166,10 @@ ${byRegion.get(region.short).map(line).join("\n")}
   },`).join("\n")}
 ];
 
-export const OFFICES: Office[] = REGIONS.flatMap((region) => region.offices);
+/** The national view, which sits above the regions rather than inside one. */
+export const NATIONAL: Office = ${JSON.stringify({ id: NATIONAL.id, city: NATIONAL.city, state: NATIONAL.state, label: NATIONAL.label, ...(NATIONAL.ready ? { ready: true } : {}) })};
+
+export const OFFICES: Office[] = [...REGIONS.flatMap((region) => region.offices), NATIONAL];
 export const OFFICE_IDS: OfficeId[] = OFFICES.map((office) => office.id);
 /** The offices the site can actually draw today. */
 export const READY_OFFICES: Office[] = OFFICES.filter((office) => office.ready);
@@ -182,6 +197,11 @@ export function findRegion(id: string | null | undefined) {
 /** The region that forecasts a given office, for opening the picker where you are. */
 export function regionOf(office: OfficeId) {
   return REGIONS.find((region) => region.offices.some((entry) => entry.id === office)) ?? REGIONS[0];
+}
+
+/** The national view spans every region, so it is never "in" one. */
+export function isNational(office: OfficeId) {
+  return office === NATIONAL.id;
 }
 `;
 

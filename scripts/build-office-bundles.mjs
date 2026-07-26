@@ -187,6 +187,34 @@ process.stdout.write("\n");
 const missing = ids.filter((id) => !offices.some((office) => office.id === id));
 if (missing.length) throw new Error(`no geometry returned for: ${missing.join(", ")}`);
 
+// The national view, as a synthetic office so it travels through the same pipeline as
+// every real one — same bundle shape, same lattice build, same renderer. The plan called
+// for an "area" concept above office; this is the cheap version of it, and it earns its
+// place because SPC and WPC issue their outlooks *nationally*, so this is the frame those
+// products were drawn for.
+//
+// It carries no CWA: there is no single boundary to outline, and stroking all 122 of them
+// at this scale is unreadable. State lines carry the geography instead.
+const NATIONAL = {
+  id: "US",
+  // The lower 48. Alaska, Hawaii and the territories have their own offices, and
+  // stretching the frame to include them would shrink CONUS to a corner of the canvas.
+  bounds: { west: -125.0, south: 24.4, east: -66.9, north: 49.4 },
+};
+offices.push({
+  id: NATIONAL.id,
+  geometry: null,
+  bounds: NATIONAL.bounds,
+  zoom: fitZoom(NATIONAL.bounds),
+  frame: frameBounds(NATIONAL.bounds),
+  counties: [],
+  states: [],
+  interstates: [],
+  // Counties and interstates are skipped for this one: at zoom 4 a county is a couple of
+  // pixels, so all 3,143 of them would be unreadable mush and a multi-megabyte download.
+  nationalScale: true,
+});
+
 /**
  * One device pixel in degrees at the office's own zoom, which is what "sub-pixel" means
  * here. A fixed tolerance would over-simplify a zoom-9 office and leave a zoom-4 one
@@ -212,6 +240,8 @@ function distribute(features, key, { closed, factor, filter }) {
     if (filter && !filter(feature)) continue;
     const plain = bboxOf(feature.geometry.coordinates);
     for (const office of offices) {
+      // County and interstate detail is meaningless at national scale; states only.
+      if (office.nationalScale && key !== "states") continue;
       const offset = offsetFor(office.frame, plain);
       const box = offset
         ? { west: plain.west + offset, east: plain.east + offset, south: plain.south, north: plain.north }
@@ -250,7 +280,7 @@ const sizes = [];
 for (const office of offices) {
   // Computed once per office, not inside the closure: coordinateBounds walks the full
   // unsimplified CWA, so calling it per longitude turned a 21-second build into minutes.
-  const offset = offsetFor(office.frame, coordinateBounds(office.geometry.coordinates));
+  const offset = office.geometry ? offsetFor(office.frame, coordinateBounds(office.geometry.coordinates)) : 0;
   const shift = (lon) => lon + offset;
   const bundle = {
     office: office.id,
@@ -258,10 +288,13 @@ for (const office of offices) {
     // was built against and the frame drawn have to be the same one.
     zoom: office.zoom,
     bounds: office.bounds,
-    cwa: {
-      type: office.geometry.type,
-      coordinates: prepare(office.geometry.coordinates, shift, toleranceFor(office.zoom), true, 1e4),
-    },
+    // Null for the national view — nothing to outline, and the renderer skips it.
+    cwa: office.geometry
+      ? {
+          type: office.geometry.type,
+          coordinates: prepare(office.geometry.coordinates, shift, toleranceFor(office.zoom), true, 1e4),
+        }
+      : null,
     counties: office.counties,
     states: office.states,
     interstates: office.interstates,

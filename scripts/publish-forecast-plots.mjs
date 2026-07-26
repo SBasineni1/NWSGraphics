@@ -40,9 +40,12 @@ const RENDER_OFFICES = populationRank
   .filter((id) => DATA_OFFICES.includes(id))
   .slice(0, Math.max(0, renderCount));
 if (!DATA_OFFICES.length) throw new Error("registry lists no drawable office — run the asset chain first");
-// PHI is the site's default office, so it must always have imagery even if the population
-// ranking would not otherwise reach it.
-if (!RENDER_OFFICES.includes("PHI") && DATA_OFFICES.includes("PHI")) RENDER_OFFICES.push("PHI");
+// Two offices are pinned into the render tier regardless of the population ranking: PHI
+// because it is the site's default, and US because the national view is not in that
+// ranking at all (it is scored per CWA) yet is the single most-viewed map there is.
+for (const pinned of ["PHI", "US"]) {
+  if (!RENDER_OFFICES.includes(pinned) && DATA_OFFICES.includes(pinned)) RENDER_OFFICES.push(pinned);
+}
 // Releases are immutable and only the newest is ever referenced, so old ones are dead
 // weight — without pruning the bucket grows by ~174 MB per publish, forever.
 //
@@ -191,8 +194,17 @@ const staleOffices = DATA_OFFICES.filter((office) => {
 console.error(`probed ${DATA_OFFICES.length} offices in ${((Date.now() - probeStarted) / 1000).toFixed(1)}s: ${staleOffices.length} changed`);
 
 // Render offices are always fetched — their imagery is rebuilt from this snapshot even if
-// only one of them moved, because a release is published whole.
-const toFetch = [...new Set([...staleOffices, ...RENDER_OFFICES])];
+// only one of them moved, because a release is published whole — and they go *first*, so
+// a budget cut can never leave the run with nothing to render.
+const toFetch = [...new Set([...RENDER_OFFICES, ...staleOffices])];
+
+// The fetch phase gets a ceiling, like the capture phase already had. Without one a cold
+// run — no index, so all 121 offices look stale — grinds through every office before
+// rendering starts, and the job hits its own timeout having published nothing. Bounded,
+// the same run publishes data for as many offices as fit, writes the index, and the next
+// run's probe finds the remainder still stale and picks them up. Cold start becomes
+// incremental instead of all-or-nothing.
+const FETCH_BUDGET_MS = Number(process.env.PLOT_FETCH_BUDGET_MS ?? 12 * 60 * 1000);
 
 // Each office's forecast fans out to a couple of hundred api.weather.gov gridpoints, so a
 // single request runs into the tens of seconds. Overlapping them costs the slowest office
@@ -205,7 +217,12 @@ const fetchFailures = [];
 // the route, so this is already ~1,200 upstream requests in flight. At six the local
 // Worker started returning 500s that were pure overload — the same office fetched alone
 // succeeded immediately — so a transient failure is retried rather than written off.
+let budgetSkipped = 0;
 await pooled(toFetch, 4, async (office) => {
+  if (Date.now() - fetchStarted > FETCH_BUDGET_MS) {
+    budgetSkipped += 1;
+    return;
+  }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const payload = await fetchJson(`${siteUrl}/api/forecast?office=${office}`, { cache: "no-store" });
@@ -227,6 +244,9 @@ await pooled(toFetch, 4, async (office) => {
   }
 });
 console.error(`fetched ${Object.keys(forecasts).length}/${toFetch.length} offices in ${((Date.now() - fetchStarted) / 1000).toFixed(1)}s`);
+if (budgetSkipped) {
+  console.error(`fetch budget spent — ${budgetSkipped} offices deferred to the next run (they stay absent from the index, so the next probe still sees them as stale)`);
+}
 
 const renderable = RENDER_OFFICES.filter((office) => forecasts[office]);
 if (!renderable.length) throw new Error(`no render-tier office returned a forecast (${fetchFailures.join(", ")})`);
