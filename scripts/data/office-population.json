@@ -1,0 +1,502 @@
+[
+  {
+    "id": "OKX",
+    "population": 14069474
+  },
+  {
+    "id": "LOX",
+    "population": 9965994
+  },
+  {
+    "id": "SGX",
+    "population": 9757725
+  },
+  {
+    "id": "LOT",
+    "population": 9237155
+  },
+  {
+    "id": "FWD",
+    "population": 8776843
+  },
+  {
+    "id": "MTR",
+    "population": 6793119
+  },
+  {
+    "id": "PSR",
+    "population": 4933479
+  },
+  {
+    "id": "PHI",
+    "population": 4721864
+  },
+  {
+    "id": "BOX",
+    "population": 4618215
+  },
+  {
+    "id": "HGX",
+    "population": 4515121
+  },
+  {
+    "id": "MFL",
+    "population": 4414260
+  },
+  {
+    "id": "MPX",
+    "population": 4287719
+  },
+  {
+    "id": "EWX",
+    "population": 4130513
+  },
+  {
+    "id": "ILN",
+    "population": 3982267
+  },
+  {
+    "id": "FFC",
+    "population": 3955707
+  },
+  {
+    "id": "CLE",
+    "population": 3770743
+  },
+  {
+    "id": "SEW",
+    "population": 3728314
+  },
+  {
+    "id": "STO",
+    "population": 3508616
+  },
+  {
+    "id": "DTX",
+    "population": 3474741
+  },
+  {
+    "id": "BOU",
+    "population": 3380352
+  },
+  {
+    "id": "RAH",
+    "population": 3297742
+  },
+  {
+    "id": "SLC",
+    "population": 3276861
+  },
+  {
+    "id": "GSP",
+    "population": 2959408
+  },
+  {
+    "id": "MKX",
+    "population": 2898892
+  },
+  {
+    "id": "LWX",
+    "population": 2877124
+  },
+  {
+    "id": "PQR",
+    "population": 2733894
+  },
+  {
+    "id": "IND",
+    "population": 2608434
+  },
+  {
+    "id": "MLB",
+    "population": 2527923
+  },
+  {
+    "id": "LSX",
+    "population": 2469848
+  },
+  {
+    "id": "EAX",
+    "population": 2371515
+  },
+  {
+    "id": "TBW",
+    "population": 2365504
+  },
+  {
+    "id": "HNX",
+    "population": 2247052
+  },
+  {
+    "id": "OUN",
+    "population": 2174507
+  },
+  {
+    "id": "OHX",
+    "population": 2074254
+  },
+  {
+    "id": "AKQ",
+    "population": 2028465
+  },
+  {
+    "id": "LMK",
+    "population": 2013120
+  },
+  {
+    "id": "BMX",
+    "population": 1852070
+  },
+  {
+    "id": "MEG",
+    "population": 1806685
+  },
+  {
+    "id": "TSA",
+    "population": 1784748
+  },
+  {
+    "id": "PBZ",
+    "population": 1697124
+  },
+  {
+    "id": "JAX",
+    "population": 1674720
+  },
+  {
+    "id": "VEF",
+    "population": 1585493
+  },
+  {
+    "id": "DMX",
+    "population": 1343679
+  },
+  {
+    "id": "OAX",
+    "population": 1318391
+  },
+  {
+    "id": "IWX",
+    "population": 1264570
+  },
+  {
+    "id": "LIX",
+    "population": 1259228
+  },
+  {
+    "id": "ILX",
+    "population": 1252473
+  },
+  {
+    "id": "GRR",
+    "population": 1247522
+  },
+  {
+    "id": "MRX",
+    "population": 1184063
+  },
+  {
+    "id": "DVN",
+    "population": 1183445
+  },
+  {
+    "id": "CTP",
+    "population": 1131270
+  },
+  {
+    "id": "SHV",
+    "population": 1128173
+  },
+  {
+    "id": "ABQ",
+    "population": 1111591
+  },
+  {
+    "id": "BGM",
+    "population": 1098066
+  },
+  {
+    "id": "BUF",
+    "population": 1087778
+  },
+  {
+    "id": "CHS",
+    "population": 1074822
+  },
+  {
+    "id": "BRO",
+    "population": 1037081
+  },
+  {
+    "id": "LZK",
+    "population": 1027350
+  },
+  {
+    "id": "EPZ",
+    "population": 987016
+  },
+  {
+    "id": "GRB",
+    "population": 913625
+  },
+  {
+    "id": "LCH",
+    "population": 903372
+  },
+  {
+    "id": "TAE",
+    "population": 883457
+  },
+  {
+    "id": "BOI",
+    "population": 871855
+  },
+  {
+    "id": "OTX",
+    "population": 863312
+  },
+  {
+    "id": "ICT",
+    "population": 857682
+  },
+  {
+    "id": "TWC",
+    "population": 851271
+  },
+  {
+    "id": "JAN",
+    "population": 850809
+  },
+  {
+    "id": "CRP",
+    "population": 831088
+  },
+  {
+    "id": "PAH",
+    "population": 811093
+  },
+  {
+    "id": "PDT",
+    "population": 807320
+  },
+  {
+    "id": "PUB",
+    "population": 769332
+  },
+  {
+    "id": "GYX",
+    "population": 758489
+  },
+  {
+    "id": "SGF",
+    "population": 724078
+  },
+  {
+    "id": "FSD",
+    "population": 723259
+  },
+  {
+    "id": "CAE",
+    "population": 722602
+  },
+  {
+    "id": "HUN",
+    "population": 710268
+  },
+  {
+    "id": "ALY",
+    "population": 703172
+  },
+  {
+    "id": "MOB",
+    "population": 684883
+  },
+  {
+    "id": "RNK",
+    "population": 625497
+  },
+  {
+    "id": "ARX",
+    "population": 572765
+  },
+  {
+    "id": "REV",
+    "population": 552305
+  },
+  {
+    "id": "RLX",
+    "population": 533369
+  },
+  {
+    "id": "FGF",
+    "population": 511368
+  },
+  {
+    "id": "ILM",
+    "population": 505746
+  },
+  {
+    "id": "MAF",
+    "population": 499173
+  },
+  {
+    "id": "TOP",
+    "population": 463346
+  },
+  {
+    "id": "LUB",
+    "population": 414049
+  },
+  {
+    "id": "AFC",
+    "population": 362648
+  },
+  {
+    "id": "AMA",
+    "population": 352559
+  },
+  {
+    "id": "MFR",
+    "population": 349267
+  },
+  {
+    "id": "HFO",
+    "population": 344967
+  },
+  {
+    "id": "DLH",
+    "population": 332806
+  },
+  {
+    "id": "SJT",
+    "population": 332322
+  },
+  {
+    "id": "PIH",
+    "population": 332299
+  },
+  {
+    "id": "GJT",
+    "population": 321672
+  },
+  {
+    "id": "FGZ",
+    "population": 318897
+  },
+  {
+    "id": "MHX",
+    "population": 313247
+  },
+  {
+    "id": "BIS",
+    "population": 304838
+  },
+  {
+    "id": "GID",
+    "population": 234652
+  },
+  {
+    "id": "BTV",
+    "population": 232952
+  },
+  {
+    "id": "TFX",
+    "population": 221032
+  },
+  {
+    "id": "MSO",
+    "population": 216941
+  },
+  {
+    "id": "UNR",
+    "population": 193982
+  },
+  {
+    "id": "BYZ",
+    "population": 191321
+  },
+  {
+    "id": "CYS",
+    "population": 191251
+  },
+  {
+    "id": "RIW",
+    "population": 187045
+  },
+  {
+    "id": "DDC",
+    "population": 165300
+  },
+  {
+    "id": "JKL",
+    "population": 138838
+  },
+  {
+    "id": "APX",
+    "population": 132731
+  },
+  {
+    "id": "MQT",
+    "population": 119273
+  },
+  {
+    "id": "EKA",
+    "population": 118800
+  },
+  {
+    "id": "ABR",
+    "population": 117821
+  },
+  {
+    "id": "CAR",
+    "population": 78861
+  },
+  {
+    "id": "AFG",
+    "population": 70145
+  },
+  {
+    "id": "LBF",
+    "population": 64406
+  },
+  {
+    "id": "AJK",
+    "population": 56071
+  },
+  {
+    "id": "GLD",
+    "population": 51761
+  },
+  {
+    "id": "LKN",
+    "population": 40709
+  },
+  {
+    "id": "KEY",
+    "population": 33246
+  },
+  {
+    "id": "GGW",
+    "population": 27423
+  },
+  {
+    "id": "GUM",
+    "population": 0
+  },
+  {
+    "id": "PPG",
+    "population": 0
+  },
+  {
+    "id": "PQE",
+    "population": 0
+  },
+  {
+    "id": "PQW",
+    "population": 0
+  },
+  {
+    "id": "SJU",
+    "population": 0
+  }
+]

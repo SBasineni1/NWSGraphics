@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 async function render() {
@@ -60,9 +60,11 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(route, /windGust/);
   assert.match(route, /probabilityOfPrecipitation/);
   assert.match(route, /quantitativePrecipitation/);
-  assert.match(route, /GRID_LOCATIONS/);
-  assert.match(route, /grid-points\.json/);
-  assert.match(route, /city-points\.json/);
+  // Read as static assets, not imported: bundling every office's points into the Worker
+  // would spend ~1.5 MB of the 3 MB budget on data all but one office's slice never uses.
+  assert.match(route, /\/cities\/\$\{office\}\.json/);
+  assert.match(route, /\/gridpoints\/\$\{office\}\.json/);
+  assert.doesNotMatch(route, /^import .*(grid-points|city-points)\.json/m);
   assert.match(route, /index \+= 24/);
   assert.match(route, /label: false/);
   assert.match(route, /Cache-Control/);
@@ -107,15 +109,14 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /id: "probabilityOfPrecipitation"[^\n]*verticalLegend: true/);
   assert.match(component, /id: "quantitativePrecipitation"[^\n]*verticalLegend: true/);
   assert.match(component, /outlinedText/);
-  assert.match(component, /traceCounties/);
-  assert.match(component, /traceBoundary/);
+  assert.match(component, /traceAreas/);
   // The field now fills the whole frame; the CWA is marked by its outline alone.
   assert.doesNotMatch(component, /context\.clip\("evenodd"\)/);
   assert.match(component, /const NEIGHBOR_COUNT = 8/);
   assert.match(component, /points\.filter\(\(point\) => !point\.label\)/);
   assert.doesNotMatch(component, /coverageFalloff|maskFar/);
   assert.match(component, /rastertiles\/voyager/);
-  assert.match(component, /counties\.geojson/);
+  assert.match(component, /offices\/\$\{office\.id\}\.json/);
   assert.match(component, /item\.label/);
 });
 
@@ -167,12 +168,23 @@ test("selects the forecast office by region", async () => {
   assert.match(component, /aria-expanded=\{expanded\}/);
   assert.match(component, /event\.key === "Escape"/);
   assert.match(component, /window\.history\.replaceState/);
-  assert.match(component, /\/api\/forecast\?office=\$\{office\.id\}/);
-  assert.match(component, /cwa\.geojson/);
+  // Precomputed forecasts come first; the route is the local/dev fallback. The Worker
+  // cannot serve a live office at all — ~250 gridpoint subrequests against a 50 limit.
+  assert.match(component, /function loadForecast/);
+  assert.match(component, /\/api\/forecast-assets\/forecast\/\$\{office\}\.json/);
+  assert.match(component, /\/api\/forecast\?office=\$\{office\}/);
+  // Geometry is per-office now, so changing office refetches the bundle rather than
+  // re-slicing four national files that every visitor had already downloaded.
+  assert.match(component, /offices\/\$\{office\.id\}\.json/);
+  assert.match(component, /\}, \[office\.id\]\);/);
+  // A bundle for the office we have already navigated away from must not be drawn.
+  assert.match(component, /bundle\?\.office === office\.id \? bundle : null/);
   assert.match(component, /data-office=/);
   assert.match(route, /searchParams\.get\("office"\)/);
   assert.match(route, /function locationsFor/);
-  assert.match(route, /location\.offices\.includes\(office\)/);
+  // The lattice is stored per office, so scoping is the file it reads rather than a
+  // filter over one national array every request had to carry.
+  assert.match(route, /read<GridPoint>\(`\/gridpoints\/\$\{office\}\.json`\)/);
 });
 
 test("animates the office menu open with a staggered cascade", async () => {
@@ -188,8 +200,15 @@ test("animates the office menu open with a staggered cascade", async () => {
   assert.match(component, /"--row": index \+ 1/);
   assert.match(component, /"--row": index \+ 2/);
   // Changing level replaces the list, so it has to re-mount or the incoming rows appear
-  // already settled instead of cascading in.
-  assert.match(component, /key=\{openRegion \?\? "regions"\}/);
+  // already settled instead of cascading in. The key lives on the group rather than the
+  // menu because the search box is a sibling of the group — keying the menu would
+  // re-mount the input on every level change and drop the caret mid-typing.
+  assert.match(component, /key="search"/);
+  assert.match(component, /key=\{region\.id\}/);
+  assert.match(component, /key="regions"/);
+  const menuTag = /<div className=\{`office-menu\$\{[^}]*\}`\}[^>]*>/.exec(component);
+  assert.ok(menuTag, "could not find the .office-menu element");
+  assert.doesNotMatch(menuTag[0], /key=/, "the menu itself must not re-mount — the search input lives in it");
 
   assert.match(css, /@keyframes office-row-in/);
   assert.match(css, /@keyframes office-row-out/);
@@ -220,10 +239,30 @@ test("browses offices by NWS region, with the national map staked out", async ()
     readFile(new URL("../app/offices.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
   ]);
-  // All six NWS regions are listed from the start so the picker is the real map; the
-  // five without offices are visible but not selectable.
+  // All six NWS regions, and every office in the country — the picker shows the real
+  // map rather than pretending the country is four offices wide.
   for (const region of ["eastern", "central", "southern", "western", "alaska", "pacific"]) {
     assert.match(offices, new RegExp(`id: "${region}"`), `expected the ${region} region`);
+  }
+  const officeCount = [...offices.matchAll(/\{ id: "[A-Z]{3}", city:/g)].length;
+  assert.equal(officeCount, 125, "expected every NWS forecast office in the registry");
+  // Region membership comes from the service's own `region` field, not hand-assignment.
+  assert.match(offices, /Generated by scripts\/build-offices\.mjs/);
+  // An office is only selectable once its boundary, lattice and cities exist. Without
+  // this a deep link to an unbuilt office draws a different office's map.
+  assert.match(offices, /ready\?: boolean/);
+  assert.match(offices, /if \(office\?\.ready\) return office/);
+  assert.match(component, /disabled=\{!entry\.ready\}/);
+  const ready = [...offices.matchAll(/\{ id: "([A-Z]{3})",[^}]*ready: true/g)].map((m) => m[1]);
+  // Readiness is derived from the assets on disk, so this pins the shape rather than a
+  // hand-kept list. The four that stay out are the Pacific domains: GUM and PPG have no
+  // Census place coverage to label, PQW and PQE are open ocean with no gridded forecast.
+  assert.ok(ready.length >= 120, `expected nearly every office drawable, got ${ready.length}`);
+  for (const office of ["PHI", "OKX", "CTP", "LWX", "AFC", "HFO", "SJU", "LOX", "LOT"]) {
+    assert.ok(ready.includes(office), `expected ${office} to be drawable`);
+  }
+  for (const office of ["GUM", "PPG", "PQE", "PQW"]) {
+    assert.ok(!ready.includes(office), `${office} has no forecast data and must stay unselectable`);
   }
   assert.match(offices, /short: "ER"/);
   assert.match(offices, /export function findRegion/);
@@ -231,7 +270,10 @@ test("browses offices by NWS region, with the national map staked out", async ()
   // Region first, offices second — a flat list of every CWA would not survive 122.
   assert.match(component, /const \[openRegion, setOpenRegion\] = useState<string \| null>\(null\)/);
   assert.match(component, /data-region=\{entry\.id\}/);
-  assert.match(component, /disabled=\{!entry\.offices\.length\}/);
+  // A region is selectable when it has something drawable, not merely something listed —
+  // every region has offices now, but most have no assets yet.
+  assert.match(component, /const ready = entry\.offices\.filter\(\(item\) => item\.ready\)\.length/);
+  assert.match(component, /disabled=\{!ready\}/);
   assert.match(component, /office-national/);
   assert.match(component, /data-region="national"/);
   assert.match(component, /National map/);
@@ -248,6 +290,49 @@ test("browses offices by NWS region, with the national map staked out", async ()
   assert.match(component, /const enterRegion = useCallback/);
   // Disabled regions are skipped rather than trapping the keyboard on a dead row.
   assert.match(component, /querySelectorAll<HTMLButtonElement>\("button:not\(\[disabled\]\)"\)/);
+});
+
+test("finds an office by town or ZIP without scrolling 125 of them", async () => {
+  const [component, search, builder] = await Promise.all([
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/place-search.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/build-places.mjs", import.meta.url), "utf8"),
+  ]);
+
+  // Search is a third level of the picker, not a filter over whichever level is showing.
+  assert.match(component, /const \[query, setQuery\] = useState\(""\)/);
+  assert.match(component, /const searching = query\.trim\(\)\.length > 0/);
+  assert.match(component, /aria-label="Find a forecast office by town or ZIP code"/);
+  assert.match(component, /role="combobox"/);
+
+  // ~280 KB of towns is fetched on intent to search, not with the page and not with the
+  // menu — most visits never search at all.
+  assert.match(component, /function usePlaceIndex/);
+  assert.match(component, /fetch\("\/place-index\.json"\)/);
+  assert.match(component, /onFocus=\{places\.load\}/);
+  assert.doesNotMatch(component, /useEffect\(\(\) => \{\s*\n\s*void fetch\("\/place-index\.json"\)/);
+  // A failed load must not kill search for the rest of the session.
+  assert.match(search, /export function searchPlaces/);
+  assert.match(search, /export function parsePlaceIndex/);
+
+  // An office that search finds but the site can't draw is named and disabled, not
+  // dropped — "your town is forecast by GYX, which isn't built yet" is a real answer,
+  // and falling back to PHI would silently show the wrong forecast.
+  assert.match(component, /disabled=\{!found\.ready\}/);
+  assert.match(component, /const OFFICE_BY_ID = new Map/);
+  assert.doesNotMatch(component, /searchPlaces\([^)]*\)[^;]*findOffice/);
+
+  // ZIP runs are ordered where they're consumed, not trusted from the generator.
+  assert.match(search, /zips\.sort\(\(a, b\) => a\.start - b\.start\)/);
+  // A numeric query is a ZIP query; letting digits reach the name ranking would sort
+  // towns by population for a query that is not a name.
+  assert.match(search, /if \(digits\) return searchZips/);
+
+  // The index is generated offline against the same CWA polygons the renderer draws, so
+  // search answers instantly and still answers when api.weather.gov is down.
+  assert.match(builder, /public\/place-index\.json/);
+  assert.match(builder, /scripts\/data\/office-population\.json/);
+  assert.match(builder, /nws_reference_map/);
 });
 
 test("scrolls the catalogue without scrolling the sidebar's data status away", async () => {
@@ -294,7 +379,7 @@ test("publishes changed forecast canvases on the issuance-aware schedule", async
   // phase costs the slowest office rather than the sum of all four.
   assert.match(publisher, /await Promise\.all\(OFFICES\.map\(async \(office\)/);
   assert.match(workflow, /cron: "27 \* \* \* \*"/);
-  assert.match(workflow, /cron: "5,15,25,35,45,55 3,15 \* \* \*"/);
+  assert.match(workflow, /cron: "5,25,45 3,15 \* \* \*"/);
   assert.match(workflow, /timezone: "America\/New_York"/);
   assert.match(workflow, /workflow_dispatch/);
   assert.match(workflow, /R2_PUBLIC_BASE_URL/);
@@ -315,7 +400,28 @@ test("publishes every office and prunes aged-out releases", async () => {
     readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/forecast-assets/[...path]/route.ts", import.meta.url), "utf8"),
   ]);
-  assert.match(publisher, /const OFFICES = \["PHI", "OKX", "CTP", "LWX"\]/);
+  // Two tiers, both derived from the generated registry rather than a list in the script.
+  // Every drawable office gets forecast data — that object is *how* it renders — while
+  // only the most populous get pre-rendered PNGs, because a release is ~110 MB per office.
+  assert.match(publisher, /data\/offices\.json/);
+  assert.match(publisher, /data\/office-population\.json/);
+  assert.match(publisher, /const DATA_OFFICES = registry/);
+  assert.match(publisher, /const RENDER_OFFICES = populationRank/);
+  assert.match(publisher, /RENDER_OFFICE_COUNT/);
+  assert.doesNotMatch(publisher, /const OFFICES = \[\s*"[A-Z]{3}"/);
+  // The default office must always have imagery, wherever it lands in the ranking.
+  assert.match(publisher, /RENDER_OFFICES\.includes\("PHI"\)/);
+  // A HEAD probe carries `last-modified` with a zero-byte body, so an unchanged office
+  // costs one request instead of ~290. Refreshing all 121 blindly is ~35,000 requests.
+  assert.match(publisher, /method: "HEAD"/);
+  assert.match(publisher, /last-modified/);
+  assert.match(publisher, /forecast\/index\.json/);
+  // Forecast data publishes before the imagery decision: an office with no PNGs still
+  // needs its forecast refreshed, so an unchanged-imagery run must not exit first.
+  assert.ok(
+    publisher.indexOf("publishObject(`forecast/${office}.json`") < publisher.indexOf("const renderUnchanged"),
+    "forecast data must publish before the render change-check",
+  );
   assert.match(publisher, /schemaVersion: 2/);
   assert.match(publisher, /manifest\.offices\[office\] = \{ days: await captureOffice\(office\) \}/);
   assert.match(publisher, /\?office=\$\{office\}/);
@@ -570,6 +676,16 @@ test("a crashed or slow office does not cost the whole release", async () => {
   // One retry, then carry on without that office rather than losing the other three.
   assert.match(publisher, /attempt <= 2/);
   assert.match(publisher, /failedOffices/);
+  // A render that never settles used to cost 18 minutes an attempt, doubled by the
+  // retry and repeated per office — a two-hour worst case for a three-minute job, which
+  // is what turned slow runs into cancelled ones. The waits are bounded, and a budget
+  // bounds the phase as a whole so a stall can't starve the offices behind it.
+  assert.match(publisher, /const PAGE_LOAD_TIMEOUT_MS = 60_000/);
+  assert.match(publisher, /const RENDER_READY_TIMEOUT_MS = 120_000/);
+  assert.match(publisher, /const CAPTURE_BUDGET_MS/);
+  assert.match(publisher, /if \(captureDeadline\(\)\) \{/);
+  assert.match(publisher, /if \(attempt === 2 \|\| captureDeadline\(\)\)/);
+  assert.doesNotMatch(publisher, /timeout: 300_000/);
   // But an empty manifest would strand every viewer on the live-canvas path.
   assert.match(publisher, /No office rendered successfully/);
 });
@@ -597,72 +713,79 @@ test("resolves both published key shapes and rejects anything else", async () =>
   }
 });
 
-test("uses the official County Warning Area boundary for every office", async () => {
-  const source = await readFile(new URL("../public/cwa.geojson", import.meta.url), "utf8");
-  const boundary = JSON.parse(source);
-  assert.equal(boundary.type, "FeatureCollection");
-  assert.equal(boundary.features.length, 4);
+test("ships one self-contained map bundle per forecast office", async () => {
+  const dir = new URL("../public/offices/", import.meta.url);
+  const names = (await readdir(dir)).filter((name) => name.endsWith(".json"));
+  assert.equal(names.length, 125, "expected a bundle for every NWS forecast office");
+
   for (const office of ["PHI", "OKX", "CTP", "LWX"]) {
-    const feature = boundary.features.find((entry) => entry.properties.cwa === office);
-    assert.ok(feature, `expected a boundary for ${office}`);
-    assert.equal(feature.properties.wfo, office);
+    const bundle = JSON.parse(await readFile(new URL(`${office}.json`, dir), "utf8"));
+    assert.equal(bundle.office, office);
     // The NWS source mixes Polygon and MultiPolygon, so consumers must handle both.
-    assert.match(feature.geometry.type, /^(Polygon|MultiPolygon)$/);
+    assert.match(bundle.cwa.type, /^(Polygon|MultiPolygon)$/);
+    assert.ok(bundle.counties.length > 20, `${office} should carry its counties`);
+    assert.ok(bundle.states.length > 0, `${office} should carry its state lines`);
+    assert.ok(bundle.interstates.length > 0, `${office} should carry its interstates`);
+    // A single tile level cannot serve 125 offices, so the zoom travels with the frame.
+    assert.ok(Number.isInteger(bundle.zoom) && bundle.zoom >= 1 && bundle.zoom <= 12);
   }
 });
 
-test("bundles trimmed county boundaries for the region", async () => {
-  const source = await readFile(new URL("../public/counties.geojson", import.meta.url), "utf8");
-  const counties = JSON.parse(source);
-  assert.equal(counties.type, "FeatureCollection");
-  assert.ok(counties.features.length > 30, "expected county coverage for the region");
-  for (const feature of counties.features.slice(0, 5)) {
-    assert.match(feature.geometry.type, /^(Polygon|MultiPolygon)$/);
+test("only a genuine dateline crosser gets shifted longitudes", async () => {
+  const dir = new URL("../public/offices/", import.meta.url);
+  const names = (await readdir(dir)).filter((name) => name.endsWith(".json"));
+  const shifted = [];
+  for (const name of names) {
+    const bundle = JSON.parse(await readFile(new URL(name, dir), "utf8"));
+    if (bundle.bounds.east > 180) shifted.push(bundle.office);
   }
-  const states = new Set(counties.features.map((feature) => String(feature.id).slice(0, 2)));
-  // WV and CT are only reachable once the frame widens past the original PHI-only box.
-  for (const fips of ["10", "24", "34", "36", "42", "54", "09"]) {
-    assert.ok(states.has(fips), `expected state FIPS ${fips}`);
-  }
+  // Comparing longitude spans alone let float noise shift western-hemisphere offices into
+  // 283..286, which put every city label off the canvas. Alaska really does cross 180.
+  assert.deepEqual(shifted, ["AFC"]);
 });
 
-test("bundles a regional grid of forecast points tagged by office", async () => {
-  const source = await readFile(new URL("../app/api/forecast/grid-points.json", import.meta.url), "utf8");
-  const points = JSON.parse(source);
-  assert.ok(Array.isArray(points) && points.length > 300, "expected a regional lattice of gridpoints");
-  for (const point of points.slice(0, 5)) {
-    assert.match(point.wfo, /^[A-Z]{3}$/);
-    assert.equal(typeof point.x, "number");
-    assert.equal(typeof point.y, "number");
-    assert.equal(typeof point.lat, "number");
-    assert.equal(typeof point.lon, "number");
+test("bundles a per-office lattice dense enough to interpolate", async () => {
+  const dir = new URL("../public/gridpoints/", import.meta.url);
+  const names = (await readdir(dir)).filter((name) => name.endsWith(".json"));
+  assert.ok(names.length > 120, `expected a lattice for nearly every office, got ${names.length}`);
+
+  for (const office of ["PHI", "OKX", "AFC", "HFO", "LOX"]) {
+    const points = JSON.parse(await readFile(new URL(`${office}.json`, dir), "utf8"));
+    assert.ok(points.length >= 40, `${office} lattice too thin to interpolate: ${points.length}`);
+    for (const point of points.slice(0, 5)) {
+      assert.match(point.wfo, /^[A-Z]{3}$/);
+      for (const key of ["x", "y", "lat", "lon"]) assert.equal(typeof point[key], "number");
+    }
   }
-  for (const office of ["PHI", "OKX", "CTP", "LWX"]) {
-    const forOffice = points.filter((point) => point.offices.includes(office));
-    assert.ok(forOffice.length > 80, `expected a usable field for ${office}, got ${forOffice.length}`);
-    // Per-office scoping is what keeps each request inside the subrequest budget.
-    assert.ok(forOffice.length < points.length, `expected ${office} to fetch less than the whole lattice`);
-  }
-  // The frame extends past the CWAs, so neighbouring offices supply the outer band.
-  const owners = new Set(points.map((point) => point.wfo));
-  assert.ok(owners.size > 4, "expected neighbouring offices to supply the buffer band");
+  // The frame reaches past the CWA, so neighbouring offices supply the outer band — that
+  // is what stops the field smearing one office's value into the corner of the canvas.
+  const phi = JSON.parse(await readFile(new URL("PHI.json", dir), "utf8"));
+  assert.ok(new Set(phi.map((point) => point.wfo)).size > 1, "expected neighbours in the buffer band");
 });
 
-test("bundles labeled cities attributed to the office that forecasts them", async () => {
-  const source = await readFile(new URL("../app/api/forecast/city-points.json", import.meta.url), "utf8");
-  const cities = JSON.parse(source);
-  assert.ok(Array.isArray(cities) && cities.length > 50, "expected labeled cities for every office");
-  for (const office of ["PHI", "OKX", "CTP", "LWX"]) {
-    const forOffice = cities.filter((city) => city.office === office);
-    assert.ok(forOffice.length >= 10, `expected at least 10 labeled cities for ${office}`);
+test("labels cities against the office that forecasts them", async () => {
+  const dir = new URL("../public/cities/", import.meta.url);
+  const names = (await readdir(dir)).filter((name) => name.endsWith(".json"));
+  let total = 0;
+  for (const name of names) {
+    const cities = JSON.parse(await readFile(new URL(name, dir), "utf8"));
+    const office = name.replace(".json", "");
+    total += cities.length;
+    for (const city of cities) {
+      // Every city is filed under the office api.weather.gov says forecasts it.
+      assert.equal(city.office, office, `${city.name} is in ${office}.json`);
+      assert.match(city.wfo, /^[A-Z]{3}$/);
+      for (const key of ["x", "y", "lat", "lon"]) assert.equal(typeof city[key], "number");
+    }
+    const ids = cities.map((city) => city.id);
+    assert.equal(new Set(ids).size, ids.length, `${office} has duplicate city ids`);
   }
-  for (const city of cities) {
-    assert.match(city.office, /^[A-Z]{3}$/);
-    assert.equal(typeof city.x, "number");
-    assert.equal(typeof city.y, "number");
-    assert.equal(typeof city.lat, "number");
-    assert.equal(typeof city.lon, "number");
-  }
-  const ids = cities.map((city) => city.id);
-  assert.equal(new Set(ids).size, ids.length, "expected city ids to be unique");
+  assert.ok(total > 1500, `expected labels across the country, got ${total}`);
+
+  // NWS splits Alaska's CWA into the AER and ALU gridpoint domains, so the domain a
+  // city's forecast is fetched from is not always its office. Comparing the two rejected
+  // every city in Anchorage's area and left AFC with no labels at all.
+  const afc = JSON.parse(await readFile(new URL("AFC.json", dir), "utf8"));
+  assert.ok(afc.length > 0, "AFC must have labels");
+  assert.ok(afc.some((city) => city.wfo !== city.office), "expected AFC to use a separate gridpoint domain");
 });

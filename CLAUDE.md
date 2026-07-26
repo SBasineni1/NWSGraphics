@@ -4,20 +4,50 @@ Guidance for working in this repository.
 
 ## What this is
 
-**NWS Forecast Graphics** — publication-ready 3-day weather graphics for four
-National Weather Service forecast offices in Eastern Region: Philadelphia /
-Mount Holly (**PHI**), New York City (**OKX**), State College (**CTP**), and
-Baltimore / Washington (**LWX**). It pulls official `api.weather.gov` gridpoint
+**NWS Forecast Graphics** — publication-ready 3-day weather graphics for **121 of the
+125 National Weather Service forecast offices**, nationwide. PHI (Philadelphia / Mount
+Holly) is the default and the four Eastern Region offices — PHI, OKX, CTP, LWX — are the
+ones with published PNGs; everything else renders live from precomputed forecast data.
+It pulls official `api.weather.gov` gridpoint
 data and renders Day 1–3 maps for nine gridpoint fields (apparent temperature,
 temperature, minimum temperature, wind gust, sustained wind, sky cover, dewpoint,
 probability of precipitation, quantitative precipitation) plus five outlook
 products off SPC and WPC (categorical convective risk, tornado / hail / damaging
 wind probability, any-severe probability, and excessive rainfall).
 
-The covered offices are declared in `app/offices.ts` (`REGIONS` → offices) —
-that table is the single source of truth. The selected office lives in the
-`?office=` query parameter, read through `useSyncExternalStore` so deep links,
-browser history, and the publisher's per-office navigation all agree.
+`app/offices.ts` lists **all 125 NWS forecast offices** in their six regions and is
+**generated** by `scripts/build-offices.mjs` from the NWS reference map service —
+don't hand-edit it. **121 of the 125 are drawable.** `ready` is *derived from the assets
+on disk*, not declared: an office needs a bundle in `public/offices/`, a lattice of at
+least 40 points in `public/gridpoints/`, and labelled cities in `public/cities/`.
+The picker lists every office but disables the rest, and `findOffice` falls back to the
+default for a non-ready id, because rendering one would silently draw a *different*
+office's boundary rather than fail.
+
+The four that stay out are all Pacific, and for two different reasons: **PQW and PQE** are
+open-ocean domains where NWS publishes no gridded forecast (PQW resolved to 2 gridpoints,
+PQE to none), and **GUM and PPG** have no labels because the Census place gazetteer covers
+the states, DC and Puerto Rico but not Guam or American Samoa. Guam is a real populated
+CWA — it needs a different place source, not a lower threshold.
+
+To rebuild everything: `build-office-bundles` → `build-office-gridpoints` →
+`build-office-cities` → `build-offices`.
+
+The selected office lives in the `?office=` query parameter, read through
+`useSyncExternalStore` so deep links, browser history, and the publisher's
+per-office navigation all agree.
+
+**Rendering is national; publishing is not** — see
+`docs/superpowers/plans/2026-07-25-national-coverage.md`. Publishing PNGs for all 125
+offices would need ~17.9 GB per release against R2's 10 GB free tier, so only a subset
+ever gets pre-rendered imagery.
+
+**`/api/forecast` cannot serve a live office in production, and that is by design.** It
+fans out one subrequest per gridpoint (~250 per office) against a **50-subrequest** free-tier
+ceiling, and parses ~66 MB of JSON against a **10 ms CPU** budget per invocation — it breaks
+both, not just one. The production path is instead `forecast/{OFFICE}.json`, precomputed in
+the publisher (Node, no limits) and served from R2; the route survives as the local/dev
+fallback. Don't "fix" it by widening the batch size — batching cannot buy back CPU.
 
 ## Stack
 
@@ -36,15 +66,110 @@ browser history, and the publisher's per-office navigation all agree.
 - `npm run dev` — local dev server (vinext under Wrangler).
 - `npm run build` — production build to `dist/`.
 - `npm test` — **builds first**, then runs `tests/rendered-html.test.mjs`
-  (imports the built worker from `dist/` and asserts the SSR HTML).
+  (imports the built worker from `dist/` and asserts the SSR HTML) plus
+  `tests/place-search.test.mjs` and `tests/map-frame.test.mjs` (pure logic, no build).
 - `npm run lint` — ESLint (`eslint-config-next`).
 - `npm run plots:publish` — run the R2 publisher (see below).
-- `node scripts/build-cwa.mjs` / `build-grid-points.mjs` /
-  `build-city-points.mjs` / `build-counties.mjs` / `build-overlays.mjs` —
-  regenerate the geojson + grid-point assets in `public/` and
-  `app/api/forecast/`. After adding an office to `app/offices.ts`, re-run
-  `build-cwa` → `build-grid-points` → `build-city-points` in that order
-  (`build-grid-points` reads `public/cwa.geojson`).
+- `node --max-old-space-size=6144 scripts/build-office-bundles.mjs` → `build-office-gridpoints.mjs`
+  → `build-office-cities.mjs` → `build-offices.mjs` — the national asset chain, in that
+  order. Bundles ~12s, the lattice ~18 min (31k `api.weather.gov/points` lookups; use
+  `--dry-run` to size it first), cities ~70s, registry seconds.
+- `scripts/build-cwa.mjs`, `build-grid-points.mjs`, `build-city-points.mjs`,
+  `build-counties.mjs`, `build-overlays.mjs` are the **superseded four-office chain**.
+  They still write `public/cwa.geojson` and friends, which nothing in the client reads
+  any more. Keep them only until the last reference goes.
+- `node scripts/build-places.mjs` — regenerate the search index. Independent of the
+  chain above: it fetches all 125 CWA polygons itself and doesn't read `public/`.
+  Re-run when the Census ships a new gazetteer, not when an office becomes ready.
+- `node --max-old-space-size=6144 scripts/build-office-bundles.mjs` — regenerate
+  `public/offices/{OFFICE}.json` for all 125 offices (~20s once the sources are cached).
+  Caches ~128 MB of upstream geo sources in `.cache/` (gitignored); delete to refresh.
+
+## Per-office map bundles
+
+Each office's map is drawn from **one** file, `public/offices/{OFFICE}.json`: its CWA
+outline, the counties / state lines / interstates inside its frame, its `bounds`, and the
+tile `zoom` that frame wants. This replaced four national geojson files in `public/` that
+were clipped to the union of the *four original* offices' frames — going national with
+those meant every visitor downloading every county in the country to draw one map.
+~114 KB average, ~30 KB gzipped, and flat per visitor no matter how many offices exist.
+
+`public/cwa.geojson`, `counties.geojson`, `states.geojson` and `interstates.geojson` are
+**no longer read by the client**. `build-grid-points.mjs` still reads `cwa.geojson`.
+
+Three things in `lib/map-frame.mjs` are load-bearing here and were all real bugs:
+
+- **`coordinateBounds` must not spread.** `Math.min(...lons)` throws `RangeError` past the
+  engine's ~65k argument limit, and an unsimplified CWA ring runs to 60k+ vertices. It
+  survived only because it was fed pre-simplified geometry.
+- **Longitudes only unwrap when the direct span exceeds 180°.** Adding 360 to a longitude
+  near -76 costs low-order precision, so a "shifted span is smaller" test alone let *every
+  CONUS office* flip into 283..286. That one bug put city labels off-canvas, made
+  `drawTiles` request tile x=328 at zoom 8 (valid range is 0–255, so CartoCDN 503'd the
+  whole basemap), and — because `loadTile` evicts failures — turned 20 tile fetches into a
+  320-request retry storm. Exactly one office, **AFC**, genuinely crosses the dateline.
+- **`fitZoom` per office, never a global `PLOT_ZOOM`.** Zoom does not change what is drawn
+  (`plotExtent` stretches any extent to the canvas); it only selects basemap tiles. Across
+  the real CWAs the right level runs 4–9. Held at 7, AFC alone asked for 14,541 tiles;
+  per-office it is 9, and the whole country drops 15,620 → 1,466.
+
+Anything projecting a forecast point must go through `projectPoint` (which applies the
+office's longitude shift), never `project` directly — that is what stranded the labels.
+
+**Shift a feature by one offset chosen from the whole feature, never per coordinate.**
+`build-office-bundles.mjs` decides `offsetFor` from a feature's own bounding box. Adding
+360 to each negative longitude independently tears apart anything crossing the *prime*
+meridian: a European road at ±0.5° became points at 359.5 and 0.5, a bbox spanning the
+globe, which "overlapped" every frame — six of them were drawn as straight red lines
+across Alaska. And compute that offset **outside** the per-coordinate closure;
+`coordinateBounds` walks the full unsimplified CWA, so calling it per longitude turned a
+12-second build into minutes.
+
+## Forecast data at 125 offices
+
+Labelled cities and the interpolation lattice are generated, not authored:
+
+- `public/gridpoints/{OFFICE}.json` — ~250 points per office, sampled at a **fixed count
+  per frame, not a fixed degree step**. The original 0.22° was tuned for a ~3° mid-Atlantic
+  frame; AFC's frame is 46° wide, where that step means ~11,500 samples for one office.
+- `public/cities/{OFFICE}.json` — ~13 labels per office, greedy by population and spaced
+  **66 px** apart. That number is measured, not chosen: the hand-authored PHI layout it
+  replaces put its closest pair 62 px apart with every other neighbour at 91–144 px.
+- **`cwa` and `gridId` are different fields and only coincide in CONUS.** NWS splits
+  Alaska's AFC into the **AER** and **ALU** gridpoint domains, so a city's forecast is
+  fetched from `wfo` (the domain) while ownership is checked against `cwa` (the office).
+  Conflating them rejected every city around Anchorage and left AFC with no labels.
+- Census population has real holes: **Hawaii has one row** in the estimates file (Urban
+  Honolulu — it has no other incorporated places) and **Puerto Rico has none** (separate
+  file). Label ranking falls back to land area, which is why HFO and SJU are sensible
+  rather than alphabetical. The gazetteer is decoded as **UTF-8**, not latin1, or Spanish
+  names arrive as "BayamÃ³n".
+
+## Finding an office (ZIP / town search)
+
+The picker's search box resolves a town or ZIP to its forecast office **entirely in the
+browser**. `scripts/build-places.mjs` does the geography offline — point-in-polygon of
+every Census place and ZCTA centroid against the CWA polygons — and writes
+`public/place-index.json` (899 KB raw, **281 KB gzipped**). It is fetched on first focus
+of the search box, never with the page: most visits never search.
+
+- Ranking lives in `lib/place-search.mjs` (plain `.mjs` like `map-frame.mjs`, so Node can
+  test it directly): exact > prefix > word-start > substring, population as the tiebreak.
+  `tests/place-search.test.mjs` pins every one of those rules — change the tiers there.
+- **A numeric query is always a ZIP query.** Letting digits reach the name ranking would
+  sort towns by population for something that isn't a name.
+- **ZIP runs are sorted in `parsePlaceIndex`, not trusted from the generator.** Both ZIP
+  lookups scan in order and break early; unsorted input silently returns nothing.
+- **A found-but-unbuilt office is listed and disabled, never swapped for the default.**
+  Search deliberately does *not* go through `findOffice` — its fallback would answer a
+  search for a Maine town with Philadelphia's forecast.
+- Two data quirks that are correct, not bugs: the Census calls Honolulu **"Urban
+  Honolulu"** (the word-start tier is what finds it), and PO-box-only ZIPs like 77001
+  have **no ZCTA**, so "not found" is the right answer there.
+
+The same build writes `scripts/data/office-population.json` — population served per
+office, the ranking that should decide which offices get published PNGs. It counts only
+population inside incorporated places and CDPs, so it is a ranking input, not a census.
 
 ## How it renders (two paths)
 
@@ -89,6 +214,46 @@ affordable and must not be undone casually:
   `colorFor`; the stops aren't evenly spaced (QPF runs 0, 0.01, 0.1, 0.25 …).
 
 ## Publishing pipeline
+
+**Two tiers, both derived from `scripts/data/offices.json` — never a list in the script.**
+
+- **Data tier** — every drawable office (121) gets `forecast/{OFFICE}.json`, ~117 KB each,
+  ~14 MB total. This is *how a live office renders at all*; it is not an optimisation.
+  Written under a stable key, not inside a release, so `pruneOldReleases` (scoped to
+  `Prefix: "releases/"`) can never delete it.
+- **Render tier** — only `RENDER_OFFICE_COUNT` offices (default 24) get PNGs, taken from
+  `scripts/data/office-population.json`. PHI is always included, since it is the default
+  office and must have imagery wherever it ranks.
+
+**A HEAD on a gridpoint returns `last-modified` and downloads zero bytes**, against ~285 KB
+for a GET. That probe is what makes 121 offices affordable: `forecast/index.json` records
+each office's last probe, so a run costs 121 HEADs plus a fan-out only for the offices that
+actually reissued. A cold run with no index refreshes everything — **~35,000 upstream
+requests**. `PLOT_OFFICES=PHI,OKX` narrows both tiers for testing or for re-running one
+office after a failure.
+
+**Forecast data publishes before the imagery change-check**, deliberately. A run where no
+render-tier office moved must still refresh the offices that did, so the old
+"unchanged → exit(0)" now only skips rendering.
+
+Measured 2026-07-26 on a scoped dry run (PHI, OKX, LOX):
+
+| | measured |
+|---|---|
+| release size | **~110 MB/office** (PHI 138, OKX 121, LOX 72) |
+| render | **~60 s/office dev**, ~27 s prod-equivalent |
+| storage ceiling | 10 GB / 110 MB = **~93 offices** at retention 1 |
+| capture-budget ceiling | 900 s / 27 s = **~33 offices** |
+
+Render time, not storage, is the binding constraint — and it has roughly doubled from the
+11.6 s/office in the older table, so **re-measure before raising `RENDER_OFFICE_COUNT`
+past ~24**. At 32 the budget is essentially spent.
+
+Fetch concurrency is **4**, not higher: each office is itself ~290 gridpoint requests
+fanned out by the route, so four is already ~1,200 upstream in flight. At six the local
+Worker returned 500s that were pure overload — the same office fetched alone succeeded —
+so the fetch retries with backoff rather than writing an office off.
+
 
 `scripts/publish-forecast-plots.mjs` drives a headless Playwright Chromium over
 the running site, navigating to `?office=…` per office, and captures each
@@ -140,11 +305,26 @@ the full R2 / GitHub secrets setup.
 | Upload | ~571 MB, 320 objects | Pooled 8-wide; latency-bound, not bandwidth-bound. |
 
 The whole pipeline is minutes. **If a run takes tens of minutes it has stalled, it
-is not "a lot of plots"** — check the forecast-fetch phase first, since it is the
-one that waits on api.weather.gov. Profile with the CDP sampling profiler
-(`Profiler.start` over a page that renders all three days) rather than guessing;
-the two things that looked expensive by eye (reference-layer tracing, PNG
-encoding) measured at under 1% each.
+is not "a lot of plots"** — workflow history bears this out: every run over ~16
+minutes failed or was cancelled, while successful ones clustered at 2–9 minutes.
+Profile with the CDP sampling profiler (`Profiler.start` over a page that renders all
+three days) rather than guessing; the two things that looked expensive by eye
+(reference-layer tracing, PNG encoding) measured at under 1% each.
+
+**The capture phase is bounded, deliberately.** `PAGE_LOAD_TIMEOUT_MS` (60s),
+`RENDER_READY_TIMEOUT_MS` (120s) and `CAPTURE_BUDGET_MS` (15 min for the phase as a
+whole) exist because a render that never settles used to cost 18 minutes per attempt —
+a 3-minute page load plus three 5-minute readiness waits — doubled by the retry and
+repeated per office, for a two-hour worst case. Once the budget is spent the remaining
+offices are skipped and the release publishes what it has. Don't loosen these back to
+"safe" values: a day renders in ~1–10s, so they already carry an order of magnitude of
+headroom, and their job is to convert a stall into a partial release instead of a
+cancelled run.
+
+**Most scheduled runs publish nothing.** The change-detection check means ~36 runs a
+day yield ~6–10 real publishes; the rest exit in ~2 minutes. Extra schedule entries
+cost Actions minutes, not R2 quota — which is the opposite of the intuition, so size
+the schedule against Actions and the *published office count* against R2.
 
 ## Conventions & gotchas
 

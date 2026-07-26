@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { DeleteObjectsCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { chromium } from "playwright";
@@ -9,8 +9,40 @@ const outputOnly = process.env.PLOT_OUTPUT_ONLY === "true";
 const forcePublish = process.env.FORCE_PUBLISH === "true";
 const outputDirectory = resolve(process.env.PLOT_OUTPUT_DIR ?? "outputs/forecast-publish");
 const sourceRevision = process.env.GITHUB_SHA ?? "local";
-// Every covered office is baked each run. Change-detection keys off the first one.
-const OFFICES = ["PHI", "OKX", "CTP", "LWX"];
+// Two tiers, both derived from the generated registry rather than listed here.
+//
+// **Data tier** — every drawable office gets `forecast/{OFFICE}.json`. That is what lets
+// an office render at all: `/api/forecast` fans out ~290 gridpoint subrequests against
+// Cloudflare's 50-subrequest limit and a 10 ms CPU budget, so the fan-out happens here,
+// in Node, once per publish.
+//
+// **Render tier** — only the most populous offices get pre-rendered PNGs, because a
+// release is ~115 MB per office against R2's 10 GB free tier, and rendering is ~11.6 s
+// per office against a 15-minute capture budget. Storage allows ~86 and the budget ~77
+// *on a fast local box*; a GitHub runner is slower and that has not been measured yet,
+// so the default is deliberately well under both. Raise RENDER_OFFICE_COUNT once a real
+// run has been timed.
+const registry = JSON.parse(await readFile(new URL("./data/offices.json", import.meta.url), "utf8"));
+const populationRank = JSON.parse(await readFile(new URL("./data/office-population.json", import.meta.url), "utf8"))
+  .map((entry) => entry.id);
+// PLOT_OFFICES narrows both tiers to a named set. Meant for testing and for re-running a
+// single office after a failure — a full cold run with no index refreshes all 121, which
+// is ~35,000 upstream requests.
+const officeOverride = process.env.PLOT_OFFICES?.trim();
+const overrideList = officeOverride ? officeOverride.split(",").map((id) => id.trim()).filter(Boolean) : null;
+const DATA_OFFICES = registry
+  .filter((office) => office.ready)
+  .map((office) => office.id)
+  .filter((id) => !overrideList || overrideList.includes(id));
+const renderCountSetting = process.env.RENDER_OFFICE_COUNT?.trim();
+const renderCount = renderCountSetting ? Number(renderCountSetting) : 24;
+const RENDER_OFFICES = populationRank
+  .filter((id) => DATA_OFFICES.includes(id))
+  .slice(0, Math.max(0, renderCount));
+if (!DATA_OFFICES.length) throw new Error("registry lists no drawable office — run the asset chain first");
+// PHI is the site's default office, so it must always have imagery even if the population
+// ranking would not otherwise reach it.
+if (!RENDER_OFFICES.includes("PHI") && DATA_OFFICES.includes("PHI")) RENDER_OFFICES.push("PHI");
 // Releases are immutable and only the newest is ever referenced, so old ones are dead
 // weight — without pruning the bucket grows by ~174 MB per publish, forever.
 //
@@ -105,22 +137,102 @@ async function canvasPngs(locator) {
   };
 }
 
-// Each office's forecast fans out to a couple of hundred api.weather.gov gridpoints, so
-// a single request runs into the tens of seconds. Fetched together the phase costs the
-// slowest office rather than the sum of all four — the requests are almost entirely
-// spent waiting on upstream, so overlapping them costs nothing locally.
-const forecasts = {};
-await Promise.all(OFFICES.map(async (office) => {
-  const startedFetch = Date.now();
-  const payload = await fetchJson(`${siteUrl}/api/forecast?office=${office}`, { cache: "no-store" });
-  if (!payload.updatedAt || !Array.isArray(payload.days) || payload.days.length < 3) {
-    throw new Error(`Forecast endpoint did not return a complete three-day payload for ${office}`);
+/**
+ * When NWS last revised an office's grids, for the cost of a single request that
+ * downloads **nothing**.
+ *
+ * A GET on a gridpoint is ~285 KB; HEAD returns the same `last-modified` with a zero-byte
+ * body. That is the whole reason 121 offices is affordable: refreshing them all blindly
+ * would be ~35,000 upstream requests every run, where probing first costs 121 and then
+ * fans out only for the handful that actually reissued. NWS revises a given office's
+ * package a few times a day, so most runs refresh almost nothing.
+ */
+async function probeOffice(office) {
+  try {
+    const cities = JSON.parse(await readFile(new URL(`../public/cities/${office}.json`, import.meta.url), "utf8"));
+    const anchor = cities[0];
+    if (!anchor) return null;
+    const response = await fetch(`https://api.weather.gov/gridpoints/${anchor.wfo}/${anchor.x},${anchor.y}`, {
+      method: "HEAD",
+      headers: { "User-Agent": "NWS Forecast Graphics (github.com/suchitbasineni/NWSGraphics)" },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!response.ok) return null;
+    return response.headers.get("last-modified");
+  } catch {
+    // A probe that fails is treated as "changed": refetching costs time, skipping an
+    // office that really did update would serve a stale forecast until the next run.
+    return null;
   }
-  forecasts[office] = payload;
-  console.error(`fetched ${office}: ${payload.points.length} points, ${payload.failures} failures, ${((Date.now() - startedFetch) / 1000).toFixed(1)}s`);
-}));
-// All offices publish together, so one office's issuance time gates the whole release.
-const forecast = forecasts[OFFICES[0]];
+}
+
+/** Per-office `last-modified` from the previous run, so a probe has something to compare. */
+async function forecastIndex() {
+  if (!publicBaseUrl) return {};
+  try {
+    return await fetchJson(`${publicBaseUrl}/forecast/index.json?ts=${Date.now()}`, { cache: "no-store" });
+  } catch {
+    return {};
+  }
+}
+
+const previousIndex = await forecastIndex();
+const probeStarted = Date.now();
+const probes = {};
+await pooled(DATA_OFFICES, 12, async (office) => {
+  probes[office] = await probeOffice(office);
+});
+const staleOffices = DATA_OFFICES.filter((office) => {
+  if (forcePublish) return true;
+  const seen = previousIndex[office]?.probe;
+  // Unknown either side means we cannot prove it is unchanged, so refresh it.
+  return !seen || !probes[office] || probes[office] !== seen;
+});
+console.error(`probed ${DATA_OFFICES.length} offices in ${((Date.now() - probeStarted) / 1000).toFixed(1)}s: ${staleOffices.length} changed`);
+
+// Render offices are always fetched — their imagery is rebuilt from this snapshot even if
+// only one of them moved, because a release is published whole.
+const toFetch = [...new Set([...staleOffices, ...RENDER_OFFICES])];
+
+// Each office's forecast fans out to a couple of hundred api.weather.gov gridpoints, so a
+// single request runs into the tens of seconds. Overlapping them costs the slowest office
+// rather than the sum — the time is almost entirely spent waiting on upstream — but the
+// pool is bounded so 121 offices don't open 35,000 sockets at once.
+const forecasts = {};
+const fetchStarted = Date.now();
+const fetchFailures = [];
+// Four at a time, not more: each office is itself ~290 gridpoint requests fanned out by
+// the route, so this is already ~1,200 upstream requests in flight. At six the local
+// Worker started returning 500s that were pure overload — the same office fetched alone
+// succeeded immediately — so a transient failure is retried rather than written off.
+await pooled(toFetch, 4, async (office) => {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const payload = await fetchJson(`${siteUrl}/api/forecast?office=${office}`, { cache: "no-store" });
+      if (!payload.updatedAt || !Array.isArray(payload.days) || payload.days.length < 3) {
+        throw new Error("incomplete three-day payload");
+      }
+      forecasts[office] = payload;
+      return;
+    } catch (error) {
+      if (attempt === 2) {
+        // One office failing must not cost the whole national run; a render office that
+        // fails is caught below, where the release still goes out without it.
+        fetchFailures.push(office);
+        console.error(`forecast fetch failed for ${office}: ${error.message}`);
+        return;
+      }
+      await new Promise((done) => setTimeout(done, 2000 * 2 ** attempt));
+    }
+  }
+});
+console.error(`fetched ${Object.keys(forecasts).length}/${toFetch.length} offices in ${((Date.now() - fetchStarted) / 1000).toFixed(1)}s`);
+
+const renderable = RENDER_OFFICES.filter((office) => forecasts[office]);
+if (!renderable.length) throw new Error(`no render-tier office returned a forecast (${fetchFailures.join(", ")})`);
+// The release is keyed off the default office's issuance when it is available, so the id
+// stays comparable with every release published before this became a national build.
+const forecast = forecasts.PHI ?? forecasts[renderable[0]];
 
 // Snapshot each outlook centre once and serve it to every office, so every outlook
 // canvas in the release comes from the same issuance — and so a slow upstream can't
@@ -136,9 +248,53 @@ await Promise.all([["spc", "/api/spc-outlook"], ["wpc", "/api/wpc-outlook"]].map
   }
 }));
 
+// A release is ~320 objects. Uploaded one at a time each pays a full round trip to R2,
+// so the phase is dominated by latency rather than bandwidth — a pool turns that into
+// roughly one round trip per batch. Kept modest so a slow runner doesn't open so many
+// sockets that they start timing each other out.
+const UPLOAD_CONCURRENCY = 8;
+
+const s3 = outputOnly ? null : new S3Client({
+  region: "auto",
+  endpoint: process.env.R2_ENDPOINT ?? `https://${required("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: required("R2_ACCESS_KEY_ID"),
+    secretAccessKey: required("R2_SECRET_ACCESS_KEY"),
+  },
+});
+const bucket = outputOnly ? "" : required("R2_BUCKET");
+
+// The data tier publishes before any rendering decision, and independently of it. An
+// office with no imagery still needs its forecast refreshed — that object *is* how it
+// renders — so a run where no render-tier office moved must not exit before writing it.
+let forecastBytes = 0;
+const publishedIndex = { ...previousIndex };
+await pooled(Object.keys(forecasts), UPLOAD_CONCURRENCY, async (office) => {
+  const payload = forecasts[office];
+  const body = Buffer.from(JSON.stringify(payload));
+  forecastBytes += body.length;
+  await publishObject(`forecast/${office}.json`, body, "application/json", "public, max-age=300, s-maxage=300");
+  publishedIndex[office] = { probe: probes[office] ?? null, updatedAt: payload.updatedAt };
+});
+await publishObject(
+  "forecast/index.json",
+  Buffer.from(`${JSON.stringify(publishedIndex, null, 2)}\n`),
+  "application/json",
+  "no-store, max-age=0",
+);
+console.error(`published forecast data: ${Object.keys(forecasts).length} offices, ${(forecastBytes / 1024).toFixed(0)} KB`);
+
 const previous = await currentManifest();
-if (!forcePublish && previous?.updatedAt === forecast.updatedAt && previous?.sourceRevision === sourceRevision) {
-  console.log(JSON.stringify({ published: false, reason: "unchanged", updatedAt: forecast.updatedAt }));
+const renderUnchanged = !forcePublish
+  && previous?.updatedAt === forecast.updatedAt
+  && previous?.sourceRevision === sourceRevision;
+if (renderUnchanged) {
+  console.log(JSON.stringify({
+    published: false,
+    reason: "imagery unchanged",
+    updatedAt: forecast.updatedAt,
+    forecastsRefreshed: Object.keys(forecasts).length,
+  }));
   process.exit(0);
 }
 
@@ -168,8 +324,20 @@ async function openPage() {
   // Serve the payloads already fetched above, so the page never re-queries
   // api.weather.gov or SPC and every office renders from the same snapshot.
   await page.route("**/api/forecast*", async (route) => {
-    const office = new URL(route.request().url()).searchParams.get("office") ?? OFFICES[0];
+    const office = new URL(route.request().url()).searchParams.get("office") ?? renderable[0];
     const payload = forecasts[office];
+    if (!payload) {
+      await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "Unknown office" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+  });
+  // The client prefers the precomputed forecast from R2 and only falls back to the route,
+  // so that path has to be served from the same snapshot too — otherwise the page would
+  // render against whatever is already published instead of what this run just fetched.
+  await page.route("**/api/forecast-assets/forecast/*.json", async (route) => {
+    const office = /forecast\/([A-Z]{3})\.json/.exec(route.request().url())?.[1];
+    const payload = office ? forecasts[office] : null;
     if (!payload) {
       await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "Unknown office" }) });
       return;
@@ -191,21 +359,7 @@ async function openPage() {
   return page;
 }
 
-const s3 = outputOnly ? null : new S3Client({
-  region: "auto",
-  endpoint: process.env.R2_ENDPOINT ?? `https://${required("R2_ACCOUNT_ID")}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: required("R2_ACCESS_KEY_ID"),
-    secretAccessKey: required("R2_SECRET_ACCESS_KEY"),
-  },
-});
-const bucket = outputOnly ? "" : required("R2_BUCKET");
 
-// A release is ~320 objects. Uploaded one at a time each pays a full round trip to R2,
-// so the phase is dominated by latency rather than bandwidth — a pool turns that into
-// roughly one round trip per batch. Kept modest so a slow runner doesn't open so many
-// sockets that they start timing each other out.
-const UPLOAD_CONCURRENCY = 8;
 
 /** Runs `task` over `items`, at most `limit` in flight, failing on the first rejection. */
 async function pooled(items, limit, task) {
@@ -245,7 +399,23 @@ const manifest = {
   offices: {},
 };
 
+// A render that never settles used to cost 18 minutes per attempt — a 3-minute page
+// load plus three 5-minute readiness waits — doubled by the retry and repeated for every
+// office, for a worst case over two hours. That is how a run that normally takes three
+// minutes ends up cancelled at an hour with nothing to show.
+//
+// Measured, a full day renders in about a second against the production build and the
+// slowest (day 1, fetching basemap tiles) in about ten, so these still leave an order of
+// magnitude of headroom while bounding the damage. The budget bounds the phase as a
+// whole: once spent, the remaining offices are skipped and the release goes out with
+// what it has, which is the same partial-publish path a crashed office already takes.
+const PAGE_LOAD_TIMEOUT_MS = 60_000;
+const RENDER_READY_TIMEOUT_MS = 120_000;
+const CAPTURE_BUDGET_MS = Number(process.env.PLOT_CAPTURE_BUDGET_MS ?? 15 * 60 * 1000);
+
 const startedAt = Date.now();
+const captureDeadline = () => Date.now() - startedAt > CAPTURE_BUDGET_MS;
+
 /** Progress goes to stderr as it happens, so a killed run still shows how far it got. */
 function progress(message) {
   const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0).padStart(4);
@@ -259,7 +429,7 @@ async function captureOffice(office) {
   const page = await openPage();
   try {
     progress(`${office}: loading`);
-    await page.goto(`${siteUrl}/?office=${office}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+    await page.goto(`${siteUrl}/?office=${office}`, { waitUntil: "domcontentloaded", timeout: PAGE_LOAD_TIMEOUT_MS });
     const officeForecast = forecasts[office];
     const days = [];
 
@@ -271,7 +441,7 @@ async function captureOffice(office) {
           canvas.dataset.dayIndex === String(selectedDay)
           && canvas.dataset.office === selectedOffice
           && canvas.dataset.renderState === "ready");
-      }, { selectedDay: dayIndex, selectedOffice: office }, { timeout: 300_000 });
+      }, { selectedDay: dayIndex, selectedOffice: office }, { timeout: RENDER_READY_TIMEOUT_MS });
 
       const day = {
         date: officeForecast.days[dayIndex].date,
@@ -315,16 +485,26 @@ async function captureOffice(office) {
 
 const failedOffices = [];
 try {
-  for (const office of OFFICES) {
+  for (const office of renderable) {
+    if (captureDeadline()) {
+      console.error(`capture budget spent, skipping ${office}`);
+      failedOffices.push(office);
+      continue;
+    }
     // One retry on a fresh page. A crashed tab or a single slow render shouldn't cost
-    // the whole release, and it shouldn't cost the other three offices either.
+    // the whole release, and it shouldn't cost the other offices either — which is also
+    // why the retry is skipped once the budget is gone, rather than spending the rest of
+    // it re-attempting one office and starving every office after it.
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
         manifest.offices[office] = { days: await captureOffice(office) };
         break;
       } catch (error) {
         console.error(`${office} attempt ${attempt}/2 failed: ${error.message}`);
-        if (attempt === 2) failedOffices.push(office);
+        if (attempt === 2 || captureDeadline()) {
+          failedOffices.push(office);
+          break;
+        }
       }
     }
   }

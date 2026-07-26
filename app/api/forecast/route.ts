@@ -1,49 +1,68 @@
 import { NextResponse } from "next/server";
-import gridPoints from "./grid-points.json";
-import cityPoints from "./city-points.json";
 import { findOffice, type OfficeId } from "../../offices";
 
 export const runtime = "edge";
 
-type GridPoint = { id: string; wfo: string; x: number; y: number; lat: number; lon: number; offices: string[] };
-type CityPoint = { id: string; name: string; state: string; office: string; lat: number; lon: number; x: number; y: number };
+type GridPoint = { id: string; wfo: string; x: number; y: number; lat: number; lon: number };
+type CityPoint = { id: string; name: string; state: string; office: string; wfo?: string; lat: number; lon: number; x: number; y: number };
 
-// Labeled cities carry their own coordinates so a label never lands on the centroid of
-// its gridpoint, and stay separate from the lattice so they can't distort the field.
-const LABEL_LOCATIONS = (cityPoints as CityPoint[]).map((city) => ({
-  id: city.id,
-  name: city.name,
-  state: city.state,
-  office: city.office,
-  wfo: city.office,
-  lat: city.lat,
-  lon: city.lon,
-  x: city.x,
-  y: city.y,
-  label: true,
-}));
+type Location = {
+  id: string;
+  name: string;
+  state: string;
+  wfo: string;
+  x: number;
+  y: number;
+  lat?: number;
+  lon?: number;
+  label: boolean;
+};
 
-// Background lattice across every covered office's render frame (see
-// build-grid-points.mjs). `offices` lists the maps each point is needed for.
-const GRID_LOCATIONS = (gridPoints as GridPoint[]).map((point) => ({
-  id: point.id,
-  name: "",
-  state: "",
-  offices: point.offices,
-  wfo: point.wfo,
-  x: point.x,
-  y: point.y,
-  label: false,
-}));
-
-type Location = (typeof LABEL_LOCATIONS)[number] | (typeof GRID_LOCATIONS)[number];
-
-// Each map only needs the points inside its own frame; fetching the whole region on
-// every request would multiply the subrequest count for data that is never drawn.
-function locationsFor(office: OfficeId): Location[] {
+/**
+ * The lattice and labelled cities for one office, read from the static assets rather than
+ * imported.
+ *
+ * Importing them bundles every office's points into the Worker: at 125 offices that is
+ * ~1.5 MB of the 3 MB budget for data where all but one office's slice is dead weight on
+ * any given request. Two asset reads cost two subrequests against a 50 limit — the
+ * gridpoint fan-out below is what actually breaks that ceiling, which is why production
+ * serves precomputed forecasts from R2 and this route is the local/dev path.
+ */
+async function locationsFor(office: OfficeId, request: Request): Promise<Location[]> {
+  const read = async <T>(path: string): Promise<T[]> => {
+    const response = await fetch(new URL(path, request.url), { signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) throw new Error(`${path} returned ${response.status}`);
+    return (await response.json()) as T[];
+  };
+  const [cities, grid] = await Promise.all([
+    read<CityPoint>(`/cities/${office}.json`).catch(() => []),
+    read<GridPoint>(`/gridpoints/${office}.json`).catch(() => []),
+  ]);
   return [
-    ...LABEL_LOCATIONS.filter((location) => location.office === office),
-    ...GRID_LOCATIONS.filter((location) => location.offices.includes(office)),
+    // Labelled cities carry their own coordinates so a label never lands on the centroid
+    // of its gridpoint, and stay separate from the lattice so they can't distort the field.
+    ...cities.map((city) => ({
+      id: city.id,
+      name: city.name,
+      state: city.state,
+      // The gridpoint domain, which is not always the office: NWS splits Alaska's AFC
+      // into the AER and ALU domains, so fetching from `office` would 404 for Anchorage.
+      wfo: city.wfo ?? city.office,
+      lat: city.lat,
+      lon: city.lon,
+      x: city.x,
+      y: city.y,
+      label: true,
+    })),
+    ...grid.map((point) => ({
+      id: point.id,
+      name: "",
+      state: "",
+      wfo: point.wfo,
+      x: point.x,
+      y: point.y,
+      label: false,
+    })),
   ];
 }
 
@@ -118,8 +137,10 @@ async function fetchLocation(location: Location, dates: string[]) {
   const uniqueRing = ring.length > 1 ? ring.slice(0, -1) : ring;
   const gridLon = uniqueRing.length ? uniqueRing.reduce((sum, position) => sum + position[0], 0) / uniqueRing.length : 0;
   const gridLat = uniqueRing.length ? uniqueRing.reduce((sum, position) => sum + position[1], 0) / uniqueRing.length : 0;
-  const lat = "lat" in location ? location.lat : gridLat;
-  const lon = "lon" in location ? location.lon : gridLon;
+  // A labelled city carries its own coordinates; a lattice point falls back to the centre
+  // of the gridpoint polygon the API returned.
+  const lat = location.lat ?? gridLat;
+  const lon = location.lon ?? gridLon;
   const metrics: Record<ProductId, Array<number | null>> = {
     apparentTemperature: dailyValues(data.properties.apparentTemperature, dates, (value) => value * 9 / 5 + 32, "max"),
     temperature: dailyValues(data.properties.temperature, dates, (value) => value * 9 / 5 + 32, "max"),
@@ -145,7 +166,7 @@ async function fetchLocation(location: Location, dates: string[]) {
 
 export async function GET(request: Request) {
   const office = findOffice(new URL(request.url).searchParams.get("office")).id;
-  const locations = locationsFor(office);
+  const locations = await locationsFor(office, request);
   const now = new Date();
   const today = easternDate(now);
   const [year, month, day] = today.split("-").map(Number);

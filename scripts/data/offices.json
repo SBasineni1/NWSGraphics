@@ -1,0 +1,627 @@
+[
+  {
+    "id": "AKQ",
+    "label": "Wakefield",
+    "ready": true
+  },
+  {
+    "id": "ALY",
+    "label": "Albany",
+    "ready": true
+  },
+  {
+    "id": "BGM",
+    "label": "Binghamton",
+    "ready": true
+  },
+  {
+    "id": "BOX",
+    "label": "Boston/Norton",
+    "ready": true
+  },
+  {
+    "id": "BTV",
+    "label": "Burlington",
+    "ready": true
+  },
+  {
+    "id": "BUF",
+    "label": "Buffalo",
+    "ready": true
+  },
+  {
+    "id": "CAE",
+    "label": "Columbia",
+    "ready": true
+  },
+  {
+    "id": "CAR",
+    "label": "Caribou",
+    "ready": true
+  },
+  {
+    "id": "CHS",
+    "label": "Charleston",
+    "ready": true
+  },
+  {
+    "id": "CLE",
+    "label": "Cleveland",
+    "ready": true
+  },
+  {
+    "id": "CTP",
+    "label": "Central Pennsylvania",
+    "ready": true
+  },
+  {
+    "id": "GSP",
+    "label": "Greenville-Spartanburg",
+    "ready": true
+  },
+  {
+    "id": "GYX",
+    "label": "Gray",
+    "ready": true
+  },
+  {
+    "id": "ILM",
+    "label": "Wilmington",
+    "ready": true
+  },
+  {
+    "id": "ILN",
+    "label": "Wilmington",
+    "ready": true
+  },
+  {
+    "id": "LWX",
+    "label": "Baltimore / Washington",
+    "ready": true
+  },
+  {
+    "id": "MHX",
+    "label": "Newport/Morehead City",
+    "ready": true
+  },
+  {
+    "id": "OKX",
+    "label": "New York City",
+    "ready": true
+  },
+  {
+    "id": "PBZ",
+    "label": "Pittsburgh",
+    "ready": true
+  },
+  {
+    "id": "PHI",
+    "label": "Philadelphia / Mount Holly",
+    "ready": true
+  },
+  {
+    "id": "RAH",
+    "label": "Raleigh",
+    "ready": true
+  },
+  {
+    "id": "RLX",
+    "label": "Charleston",
+    "ready": true
+  },
+  {
+    "id": "RNK",
+    "label": "Blacksburg",
+    "ready": true
+  },
+  {
+    "id": "ABR",
+    "label": "Aberdeen",
+    "ready": true
+  },
+  {
+    "id": "APX",
+    "label": "Gaylord",
+    "ready": true
+  },
+  {
+    "id": "ARX",
+    "label": "La Crosse",
+    "ready": true
+  },
+  {
+    "id": "BIS",
+    "label": "Bismarck",
+    "ready": true
+  },
+  {
+    "id": "BOU",
+    "label": "Denver",
+    "ready": true
+  },
+  {
+    "id": "CYS",
+    "label": "Cheyenne",
+    "ready": true
+  },
+  {
+    "id": "DDC",
+    "label": "Dodge City",
+    "ready": true
+  },
+  {
+    "id": "DLH",
+    "label": "Duluth",
+    "ready": true
+  },
+  {
+    "id": "DMX",
+    "label": "Des Moines",
+    "ready": true
+  },
+  {
+    "id": "DTX",
+    "label": "Detroit/Pontiac",
+    "ready": true
+  },
+  {
+    "id": "DVN",
+    "label": "Quad Cities IA",
+    "ready": true
+  },
+  {
+    "id": "EAX",
+    "label": "Kansas City/Pleasant Hill",
+    "ready": true
+  },
+  {
+    "id": "FGF",
+    "label": "Grand Forks",
+    "ready": true
+  },
+  {
+    "id": "FSD",
+    "label": "Sioux Falls",
+    "ready": true
+  },
+  {
+    "id": "GID",
+    "label": "Hastings",
+    "ready": true
+  },
+  {
+    "id": "GJT",
+    "label": "Grand Junction",
+    "ready": true
+  },
+  {
+    "id": "GLD",
+    "label": "Goodland",
+    "ready": true
+  },
+  {
+    "id": "GRB",
+    "label": "Green Bay",
+    "ready": true
+  },
+  {
+    "id": "GRR",
+    "label": "Grand Rapids",
+    "ready": true
+  },
+  {
+    "id": "ICT",
+    "label": "Wichita",
+    "ready": true
+  },
+  {
+    "id": "ILX",
+    "label": "Lincoln",
+    "ready": true
+  },
+  {
+    "id": "IND",
+    "label": "Indianapolis",
+    "ready": true
+  },
+  {
+    "id": "IWX",
+    "label": "Northern Indiana",
+    "ready": true
+  },
+  {
+    "id": "JKL",
+    "label": "Jackson",
+    "ready": true
+  },
+  {
+    "id": "LBF",
+    "label": "North Platte",
+    "ready": true
+  },
+  {
+    "id": "LMK",
+    "label": "Louisville",
+    "ready": true
+  },
+  {
+    "id": "LOT",
+    "label": "Chicago",
+    "ready": true
+  },
+  {
+    "id": "LSX",
+    "label": "St Louis",
+    "ready": true
+  },
+  {
+    "id": "MKX",
+    "label": "Milwaukee/Sullivan",
+    "ready": true
+  },
+  {
+    "id": "MPX",
+    "label": "Twin Cities/Chanhassen",
+    "ready": true
+  },
+  {
+    "id": "MQT",
+    "label": "Marquette",
+    "ready": true
+  },
+  {
+    "id": "OAX",
+    "label": "Omaha/Valley",
+    "ready": true
+  },
+  {
+    "id": "PAH",
+    "label": "Paducah",
+    "ready": true
+  },
+  {
+    "id": "PUB",
+    "label": "Pueblo",
+    "ready": true
+  },
+  {
+    "id": "RIW",
+    "label": "Riverton",
+    "ready": true
+  },
+  {
+    "id": "SGF",
+    "label": "Springfield",
+    "ready": true
+  },
+  {
+    "id": "TOP",
+    "label": "Topeka",
+    "ready": true
+  },
+  {
+    "id": "UNR",
+    "label": "Rapid City",
+    "ready": true
+  },
+  {
+    "id": "ABQ",
+    "label": "Albuquerque",
+    "ready": true
+  },
+  {
+    "id": "AMA",
+    "label": "Amarillo",
+    "ready": true
+  },
+  {
+    "id": "BMX",
+    "label": "Birmingham",
+    "ready": true
+  },
+  {
+    "id": "BRO",
+    "label": "Brownsville",
+    "ready": true
+  },
+  {
+    "id": "CRP",
+    "label": "Corpus Christi",
+    "ready": true
+  },
+  {
+    "id": "EPZ",
+    "label": "El Paso Tx/Santa Teresa",
+    "ready": true
+  },
+  {
+    "id": "EWX",
+    "label": "Austin/San Antonio",
+    "ready": true
+  },
+  {
+    "id": "FFC",
+    "label": "Peachtree City",
+    "ready": true
+  },
+  {
+    "id": "FWD",
+    "label": "Fort Worth",
+    "ready": true
+  },
+  {
+    "id": "HGX",
+    "label": "Houston/Galveston",
+    "ready": true
+  },
+  {
+    "id": "HUN",
+    "label": "Huntsville",
+    "ready": true
+  },
+  {
+    "id": "JAN",
+    "label": "Jackson",
+    "ready": true
+  },
+  {
+    "id": "JAX",
+    "label": "Jacksonville",
+    "ready": true
+  },
+  {
+    "id": "KEY",
+    "label": "Key West",
+    "ready": true
+  },
+  {
+    "id": "LCH",
+    "label": "Lake Charles",
+    "ready": true
+  },
+  {
+    "id": "LIX",
+    "label": "New Orleans",
+    "ready": true
+  },
+  {
+    "id": "LUB",
+    "label": "Lubbock",
+    "ready": true
+  },
+  {
+    "id": "LZK",
+    "label": "Little Rock",
+    "ready": true
+  },
+  {
+    "id": "MAF",
+    "label": "Midland/Odessa",
+    "ready": true
+  },
+  {
+    "id": "MEG",
+    "label": "Memphis",
+    "ready": true
+  },
+  {
+    "id": "MFL",
+    "label": "Miami",
+    "ready": true
+  },
+  {
+    "id": "MLB",
+    "label": "Melbourne",
+    "ready": true
+  },
+  {
+    "id": "MOB",
+    "label": "Mobile",
+    "ready": true
+  },
+  {
+    "id": "MRX",
+    "label": "Morristown",
+    "ready": true
+  },
+  {
+    "id": "OHX",
+    "label": "Nashville",
+    "ready": true
+  },
+  {
+    "id": "OUN",
+    "label": "Norman",
+    "ready": true
+  },
+  {
+    "id": "SHV",
+    "label": "Shreveport",
+    "ready": true
+  },
+  {
+    "id": "SJT",
+    "label": "San Angelo",
+    "ready": true
+  },
+  {
+    "id": "SJU",
+    "label": "San Juan",
+    "ready": true
+  },
+  {
+    "id": "TAE",
+    "label": "Tallahassee",
+    "ready": true
+  },
+  {
+    "id": "TBW",
+    "label": "Tampa Bay Ruskin",
+    "ready": true
+  },
+  {
+    "id": "TSA",
+    "label": "Tulsa",
+    "ready": true
+  },
+  {
+    "id": "BOI",
+    "label": "Boise",
+    "ready": true
+  },
+  {
+    "id": "BYZ",
+    "label": "Billings",
+    "ready": true
+  },
+  {
+    "id": "EKA",
+    "label": "Eureka",
+    "ready": true
+  },
+  {
+    "id": "FGZ",
+    "label": "Flagstaff",
+    "ready": true
+  },
+  {
+    "id": "GGW",
+    "label": "Glasgow",
+    "ready": true
+  },
+  {
+    "id": "HNX",
+    "label": "Hanford",
+    "ready": true
+  },
+  {
+    "id": "LKN",
+    "label": "Elko",
+    "ready": true
+  },
+  {
+    "id": "LOX",
+    "label": "Los Angeles/Oxnard",
+    "ready": true
+  },
+  {
+    "id": "MFR",
+    "label": "Medford",
+    "ready": true
+  },
+  {
+    "id": "MSO",
+    "label": "Missoula",
+    "ready": true
+  },
+  {
+    "id": "MTR",
+    "label": "San Francisco",
+    "ready": true
+  },
+  {
+    "id": "OTX",
+    "label": "Spokane",
+    "ready": true
+  },
+  {
+    "id": "PDT",
+    "label": "Pendleton",
+    "ready": true
+  },
+  {
+    "id": "PIH",
+    "label": "Pocatello",
+    "ready": true
+  },
+  {
+    "id": "PQR",
+    "label": "Portland",
+    "ready": true
+  },
+  {
+    "id": "PSR",
+    "label": "Phoenix",
+    "ready": true
+  },
+  {
+    "id": "REV",
+    "label": "Reno",
+    "ready": true
+  },
+  {
+    "id": "SEW",
+    "label": "Seattle",
+    "ready": true
+  },
+  {
+    "id": "SGX",
+    "label": "San Diego",
+    "ready": true
+  },
+  {
+    "id": "SLC",
+    "label": "Salt Lake City",
+    "ready": true
+  },
+  {
+    "id": "STO",
+    "label": "Sacramento",
+    "ready": true
+  },
+  {
+    "id": "TFX",
+    "label": "Great Falls",
+    "ready": true
+  },
+  {
+    "id": "TWC",
+    "label": "Tucson",
+    "ready": true
+  },
+  {
+    "id": "VEF",
+    "label": "Las Vegas",
+    "ready": true
+  },
+  {
+    "id": "AFC",
+    "label": "Anchorage",
+    "ready": true
+  },
+  {
+    "id": "AFG",
+    "label": "Fairbanks",
+    "ready": true
+  },
+  {
+    "id": "AJK",
+    "label": "Juneau",
+    "ready": true
+  },
+  {
+    "id": "GUM",
+    "label": "Tiyan",
+    "ready": false
+  },
+  {
+    "id": "HFO",
+    "label": "Honolulu",
+    "ready": true
+  },
+  {
+    "id": "PPG",
+    "label": "Pago Pago",
+    "ready": false
+  },
+  {
+    "id": "PQE",
+    "label": "Micronesia Domain East",
+    "ready": false
+  },
+  {
+    "id": "PQW",
+    "label": "Micronesia Domain West",
+    "ready": false
+  }
+]

@@ -21,10 +21,16 @@ export async function GET(
   // v2: releases/{releaseId}/{OFFICE}/day-{n}/{product}[-preview].png
   // v1: releases/{releaseId}/day-{n}/{product}[-preview].png
   const ASSET_KEY = /^releases\/\d{8}T\d{6}Z\/(?:[A-Z]{3}\/)?day-[1-3]\/[a-z][a-z-]*\.png$/;
+  // Precomputed gridpoint forecasts, one per office. These are what let an office render
+  // live on Cloudflare's free plan at all: fanning out to ~250 api.weather.gov gridpoints
+  // from the Worker breaks both the 50-subrequest and the 10 ms CPU limits, so the fan-out
+  // happens once an hour in the publisher instead and the Worker only relays the result.
+  const FORECAST_KEY = /^forecast\/[A-Z]{3}\.json$/;
 
   const { path } = await context.params;
   const assetKey = path.join("/");
-  if (!ASSET_KEY.test(assetKey) || assetKey.includes("..")) {
+  const isForecast = FORECAST_KEY.test(assetKey);
+  if ((!isForecast && !ASSET_KEY.test(assetKey)) || assetKey.includes("..")) {
     return NextResponse.json({ error: "Invalid forecast asset path" }, { status: 400 });
   }
 
@@ -45,8 +51,14 @@ export async function GET(
     return new NextResponse(response.body, {
       status: 200,
       headers: {
-        "Content-Type": response.headers.get("Content-Type") ?? "image/png",
-        "Cache-Control": "public, max-age=31536000, s-maxage=31536000, immutable",
+        "Content-Type": response.headers.get("Content-Type") ?? (isForecast ? "application/json" : "image/png"),
+        // Releases are immutable and keyed by issuance time; a forecast is rewritten in
+        // place whenever NWS reissues, so it can only be cached as long as we are willing
+        // to show a stale one. Five minutes keeps repeat views free without outliving the
+        // ten-minute publish cadence in the issuance windows.
+        "Cache-Control": isForecast
+          ? "public, max-age=300, s-maxage=300"
+          : "public, max-age=31536000, s-maxage=31536000, immutable",
       },
     });
   } catch {

@@ -8,6 +8,13 @@ on:
         required: false
         default: false
         type: boolean
+  # Checking often is nearly free and does not cost R2 quota: a run whose NWS update
+  # time is unchanged exits in about two minutes without writing anything, and this repo
+  # is public so Actions minutes are unmetered. Checking *more* often does not publish
+  # more often either — the number of real publishes is set by how often NWS reissues,
+  # not by how often we look — it only shortens how long the site shows a stale forecast.
+  # So this stays dense. To publish less (which is a real lever on the R2 object budget),
+  # gate the publisher on a minimum interval; don't thin the schedule.
   schedule:
     # Normal monitoring: once per hour, away from the busiest top-of-hour window.
     - cron: "27 * * * *"

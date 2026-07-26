@@ -41,3 +41,6 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# cached upstream geo sources for scripts/build-office-bundles.mjs (128 MB)
+/.cache/
