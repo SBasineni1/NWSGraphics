@@ -180,6 +180,16 @@ export async function GET(request: Request) {
     results.push(...await Promise.allSettled(batch.map((location) => fetchLocation(location, dates))));
   }
   const successful = results.filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof fetchLocation>>> => result.status === "fulfilled");
+  // A payload with no points is worse than an error: the renderer interpolates over an
+  // empty set, every cell falls back to 0, and the page draws a confident-looking map of
+  // 0°F across the whole area rather than showing anything is wrong. A partial result is
+  // fine — the field degrades gracefully — but nothing at all is a failure, so say so.
+  if (!successful.length) {
+    return NextResponse.json(
+      { error: `No gridpoint data available for ${office}`, failures: results.length },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
+  }
   const updatedAt = successful.map((result) => result.value.updatedAt).filter(Boolean).sort().at(-1) ?? now.toISOString();
   return NextResponse.json({
     office,

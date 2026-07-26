@@ -823,6 +823,26 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   const points = forecast.points.filter((point) => point.metrics[spec.id][dayIndex] !== null);
   const gridPoints = points.filter((point) => !point.label);
   const fieldPoints = gridPoints.length ? gridPoints : points;
+
+  // With nothing to interpolate from, every cell would fall back to 0 and the map would
+  // read as a real forecast of 0 across the whole area — the same colour a genuine 0°F
+  // gets. Say the data is missing instead. The canvas is still finished either way, or
+  // `data-render-state` never reaches "ready" and the publisher waits on it until it
+  // times out.
+  if (!fieldPoints.length) {
+    drawReferenceLayers(context, bundle, projectPoint);
+    context.restore();
+    context.textAlign = "center";
+    context.font = `600 19px ${PLOT_FONT_FAMILY}`;
+    outlinedText(context, "FORECAST DATA UNAVAILABLE", width / 2, height / 2 - 6, 4);
+    context.textAlign = "left";
+    drawSignature(context, width, height);
+    commitPlot(canvas, mapCanvas, spec.title, {
+      valid: forecast.days[dayIndex]?.label?.toUpperCase() ?? `DAY ${dayIndex + 1}`,
+      issued: "SOURCE UNAVAILABLE",
+    }, await loadHeaderMark());
+    return;
+  }
   const fillAlpha = spec.fillAlpha ?? 185;
   const raster = document.createElement("canvas");
   raster.width = PLOT_WIDTH;

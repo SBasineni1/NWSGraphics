@@ -120,6 +120,25 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.match(component, /item\.label/);
 });
 
+test("missing forecast data reads as missing, not as a forecast of zero", async () => {
+  const [route, component] = await Promise.all([
+    readFile(new URL("../app/api/forecast/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+  ]);
+  // The route used to answer 200 with `points: []` when every gridpoint fetch failed. The
+  // renderer then interpolated over an empty set, every cell fell back to 0, and the page
+  // drew a confident uniform map — 0°F is a real colour on the ramp, so it looked like a
+  // forecast rather than a failure. Both ends now refuse that.
+  assert.match(route, /if \(!successful\.length\)/);
+  assert.match(route, /status: 503/);
+  assert.match(component, /if \(!fieldPoints\.length\)/);
+  assert.match(component, /FORECAST DATA UNAVAILABLE/);
+  // The canvas must still be finished, or data-render-state never reaches "ready" and the
+  // publisher waits on it until it times out.
+  const guard = component.slice(component.indexOf("if (!fieldPoints.length)"));
+  assert.match(guard.slice(0, 900), /commitPlot\(/);
+});
+
 test("fills the whole frame without re-solving the field per pixel", async () => {
   const component = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
   assert.match(component, /const FIELD_STRIDE = 4/);
