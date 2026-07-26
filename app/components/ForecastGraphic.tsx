@@ -1701,7 +1701,13 @@ export function ForecastGraphic() {
   // Distinct from "no outlook": tracks whether the outlook fetches have settled at all.
   const [outlookPending, setOutlookPending] = useState(true);
   const [dayIndex, setDayIndex] = useState(0);
-  const [error, setError] = useState(false);
+  // Tracked separately per source. A single boolean could never be cleared correctly:
+  // whichever loader succeeded last would wipe the other's failure, and the bundle loader
+  // never cleared it at all — so one transient miss pinned the page on "temporarily
+  // unavailable" until a hard reload, even once everything was fetching fine again.
+  const [bundleError, setBundleError] = useState(false);
+  const [forecastError, setForecastError] = useState(false);
+  const error = bundleError || forecastError;
 
   // The server can't see the query string, so it renders the default office; the client
   // swaps to the requested one on hydration without a markup mismatch.
@@ -1716,14 +1722,26 @@ export function ForecastGraphic() {
   useEffect(() => {
     let active = true;
     void (async () => {
-      try {
-        const response = await fetch(`/offices/${office.id}.json`);
-        if (!response.ok) throw new Error(`Office bundle ${response.status}`);
-        const data = (await response.json()) as OfficeBundle;
-        if (!active) return;
-        setBundle(data);
-      } catch {
-        if (active) setError(true);
+      // Retried, because this effect only re-runs when the office changes: without it a
+      // single transient miss — a deploy swapping the file, a dropped connection — would
+      // strand the office until the visitor picked a different one and came back.
+      for (let attempt = 0; active; attempt += 1) {
+        try {
+          const response = await fetch(`/offices/${office.id}.json`);
+          if (!response.ok) throw new Error(`Office bundle ${response.status}`);
+          const data = (await response.json()) as OfficeBundle;
+          if (!active) return;
+          setBundle(data);
+          setBundleError(false);
+          return;
+        } catch {
+          if (!active) return;
+          if (attempt >= 2) {
+            setBundleError(true);
+            return;
+          }
+          await new Promise((done) => setTimeout(done, 500 * 2 ** attempt));
+        }
       }
     })();
     return () => { active = false; };
@@ -1810,9 +1828,9 @@ export function ForecastGraphic() {
         const payload = await loadForecast(office.id);
         if (!active) return;
         setForecast(payload);
-        setError(false);
+        setForecastError(false);
       } catch {
-        if (active) setError(true);
+        if (active) setForecastError(true);
       }
     };
     void load();

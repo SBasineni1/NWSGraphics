@@ -133,6 +133,17 @@ test("missing forecast data reads as missing, not as a forecast of zero", async 
   assert.match(route, /status: 503/);
   assert.match(component, /if \(!fieldPoints\.length\)/);
   assert.match(component, /FORECAST DATA UNAVAILABLE/);
+  // Failure state has to be *clearable*. A single boolean could not be: whichever loader
+  // succeeded last wiped the other's failure, and the bundle loader never cleared it at
+  // all, so one transient miss pinned "temporarily unavailable" until a hard reload.
+  assert.match(component, /const \[bundleError, setBundleError\]/);
+  assert.match(component, /const \[forecastError, setForecastError\]/);
+  assert.match(component, /const error = bundleError \|\| forecastError/);
+  assert.match(component, /setBundleError\(false\)/);
+  assert.match(component, /setForecastError\(false\)/);
+  // And retried: the bundle effect only re-runs when the office changes, so without a
+  // retry a transient miss strands that office entirely.
+  assert.match(component, /for \(let attempt = 0; active; attempt \+= 1\)/);
   // The canvas must still be finished, or data-render-state never reaches "ready" and the
   // publisher waits on it until it times out.
   const guard = component.slice(component.indexOf("if (!fieldPoints.length)"));
