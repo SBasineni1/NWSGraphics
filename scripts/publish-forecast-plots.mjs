@@ -204,7 +204,15 @@ const toFetch = [...new Set([...RENDER_OFFICES, ...staleOffices])];
 // the same run publishes data for as many offices as fit, writes the index, and the next
 // run's probe finds the remainder still stale and picks them up. Cold start becomes
 // incremental instead of all-or-nothing.
-const FETCH_BUDGET_MS = Number(process.env.PLOT_FETCH_BUDGET_MS ?? 12 * 60 * 1000);
+//
+// Blank means unset, and `??` cannot express that: the workflow passes this through as
+// `${{ vars.PLOT_FETCH_BUDGET_MS }}`, which GitHub renders as the empty string when the
+// variable does not exist, so the variable *is* defined and `Number("")` is 0. A zero
+// budget is not "no ceiling", it is "stop after the first office" — which is exactly what
+// it did, freezing every office's forecast data but the first. Same shape as the
+// retention and render-count settings above, for the same reason.
+const fetchBudgetSetting = process.env.PLOT_FETCH_BUDGET_MS?.trim();
+const FETCH_BUDGET_MS = fetchBudgetSetting ? Number(fetchBudgetSetting) : 12 * 60 * 1000;
 
 // Each office's forecast fans out to a couple of hundred api.weather.gov gridpoints, so a
 // single request runs into the tens of seconds. Overlapping them costs the slowest office
@@ -431,7 +439,11 @@ const manifest = {
 // what it has, which is the same partial-publish path a crashed office already takes.
 const PAGE_LOAD_TIMEOUT_MS = 60_000;
 const RENDER_READY_TIMEOUT_MS = 120_000;
-const CAPTURE_BUDGET_MS = Number(process.env.PLOT_CAPTURE_BUDGET_MS ?? 15 * 60 * 1000);
+// Blank means unset — see FETCH_BUDGET_MS. An unset workflow variable arrives as "", and
+// `Number("")` is 0, which skipped every office in the capture loop below except the
+// first and published a one-office manifest.
+const captureBudgetSetting = process.env.PLOT_CAPTURE_BUDGET_MS?.trim();
+const CAPTURE_BUDGET_MS = captureBudgetSetting ? Number(captureBudgetSetting) : 15 * 60 * 1000;
 
 const startedAt = Date.now();
 const captureDeadline = () => Date.now() - startedAt > CAPTURE_BUDGET_MS;

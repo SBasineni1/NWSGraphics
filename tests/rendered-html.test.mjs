@@ -777,6 +777,32 @@ test("a crashed or slow office does not cost the whole release", async () => {
   assert.match(publisher, /No office rendered successfully/);
 });
 
+test("an unset workflow variable falls back to the default, not to zero", async () => {
+  const [publisher, workflow] = await Promise.all([
+    readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../.github/workflows/publish-forecast-plots.yml", import.meta.url), "utf8"),
+  ]);
+  // GitHub renders an unset `vars.X` as the empty string, so the workflow always defines
+  // the variable — `?? default` never fires and `Number("")` is 0. That zeroed both phase
+  // budgets, and a zero budget is not "no limit", it is "stop after the first office":
+  // every run fetched one office's forecast and rendered one office's imagery, so 121
+  // offices froze at whatever the last unbudgeted run had published.
+  const passedThrough = [...workflow.matchAll(/^\s{6}([A-Z0-9_]+): \$\{\{ vars\./gm)].map((m) => m[1]);
+  assert.ok(passedThrough.length > 0, "workflow passes no repository variables through");
+  for (const name of passedThrough) {
+    assert.doesNotMatch(
+      publisher,
+      new RegExp(`Number\\(\\s*process\\.env\\.${name}\\s*\\?\\?`),
+      `${name} is blank when the variable is unset, so \`?? default\` cannot catch it`,
+    );
+  }
+  // The blank-tolerant shape the settings already established for retention and counts.
+  assert.match(publisher, /const fetchBudgetSetting = process\.env\.PLOT_FETCH_BUDGET_MS\?\.trim\(\)/);
+  assert.match(publisher, /fetchBudgetSetting \? Number\(fetchBudgetSetting\) : 12 \* 60 \* 1000/);
+  assert.match(publisher, /const captureBudgetSetting = process\.env\.PLOT_CAPTURE_BUDGET_MS\?\.trim\(\)/);
+  assert.match(publisher, /captureBudgetSetting \? Number\(captureBudgetSetting\) : 15 \* 60 \* 1000/);
+});
+
 test("resolves both published key shapes and rejects anything else", async () => {
   const source = await readFile(new URL("../app/api/forecast-assets/[...path]/route.ts", import.meta.url), "utf8");
   const pattern = new RegExp(/^releases\/\d{8}T\d{6}Z\/(?:[A-Z]{3}\/)?day-[1-3]\/[a-z][a-z-]*\.png$/);
