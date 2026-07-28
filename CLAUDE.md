@@ -43,31 +43,66 @@ offices would need ~17.9 GB per release against R2's 10 GB free tier, so only a 
 ever gets pre-rendered imagery.
 
 **`/api/forecast` cannot serve a live office in production, and that is by design.** It
-fans out one subrequest per gridpoint (~250 per office) against a **50-subrequest** free-tier
-ceiling, and parses ~66 MB of JSON against a **10 ms CPU** budget per invocation — it breaks
-both, not just one. The production path is instead `forecast/{OFFICE}.json`, precomputed in
-the publisher (Node, no limits) and served from R2; the route survives as the local/dev
-fallback. Don't "fix" it by widening the batch size — batching cannot buy back CPU.
+fans out one subrequest per gridpoint (~250 per office), and on Vercel it **504s at 91.8
+seconds** — twelve sequential batches, each waiting on its slowest upstream request
+(measured; `docs/superpowers/specs/2026-07-27-forecast-freshness-design.md`). The production
+path is instead `forecast/{OFFICE}.json`, precomputed in the publisher (Node, no limits) and
+served from R2; the route survives as the local/dev fallback.
+
+**The binding constraint is function duration, and it did not use to be.** This route was
+written against Cloudflare Workers, where it broke a **50-subrequest** ceiling and a **10 ms
+CPU** budget — two limits that no longer apply now that the site is on Vercel. Only the
+duration wall does. That changes which fixes are even conceivable: widening the batch size
+was futile on Workers because batching cannot buy back CPU, but here the cost is wall-clock
+latency, so more concurrency is at least the right *shape* of fix. It still isn't worth
+doing — the precomputed R2 path already serves every office for free, and a live fan-out to
+~250 upstreams per request would be slower and more fragile no matter how it is scheduled.
+Treat any surviving "50 subrequests / 10 ms CPU" reasoning elsewhere in the docs as stale.
 
 ## Stack
 
-- **Next.js 16 App Router + React 19**, but built and served on **Cloudflare
-  Workers** via **vinext** (`vinext` + Vite + `@cloudflare/vite-plugin`), not
-  the `next` CLI. Local dev runs under Wrangler/Miniflare.
+- **Next.js 16 App Router + React 19**, **deployed on Vercel** at
+  `www.basinenigraphics.online` (the apex 308-redirects to it). Vercel's GitHub
+  integration deploys every push to `main` — there is no deploy workflow in
+  `.github/`, and `publish-forecast-plots.yml` publishes to R2, not the site.
+- **`vercel.json` pins `buildCommand: next build`, and that is load-bearing.** The
+  `build` script in `package.json` is `vinext build`, which emits a Cloudflare Worker
+  into `dist/` — output Vercel cannot serve. Don't remove the override on the grounds
+  that Vercel's Next.js preset already defaults to `next build`; the fallback if the
+  preset ever misfires is the wrong builder, not a warning.
+- **Local dev is still vinext, and that is a second build of the same source.**
+  `vinext` + Vite + `@cloudflare/vite-plugin` under Wrangler/Miniflare, driven by
+  `wrangler.jsonc`. So `npm run dev` and production do not share a builder: a bug that
+  only appears under one of them is possible, and `npm test` asserts the *vinext* build
+  in `dist/`, not what Vercel ships. `npx next build` is the check that matches
+  production.
 - **Tailwind CSS 4** (`@tailwindcss/postcss`), **TypeScript** strict mode.
 - **Drizzle ORM** targeting Cloudflare **D1** is wired up but unused —
   `db/schema.ts` is intentionally empty. Don't assume a database exists.
 - Originated from an OpenAI "site creator" vinext starter; `.openai/hosting.json`
   holds the D1/R2 binding names (both `null` by default) and `worker/index.ts`
-  is the Cloudflare Worker entry (image optimization + app-router handler).
+  is the Cloudflare Worker entry (image optimization + app-router handler). Both are
+  local-dev-only now — nothing in production reads them.
+- **R2 is unaffected by the host.** The publisher uploads over the S3 API and the
+  client fetches over HTTPS from `NEXT_PUBLIC_FORECAST_ASSET_BASE_URL`, so neither
+  end cares what serves the site. That variable is **build-time**: it must be set in
+  Vercel's project environment, and changing it needs a redeploy, not just a publish.
 
 ## Commands
 
-- `npm run dev` — local dev server (vinext under Wrangler).
-- `npm run build` — production build to `dist/`.
-- `npm test` — **builds first**, then runs `tests/rendered-html.test.mjs`
+- `npm run dev` — local dev server (vinext under Wrangler). **Not the production
+  builder** — see Stack.
+- `npm run build` — vinext build to `dist/`. Despite the name this is the *local*
+  build; Vercel runs `next build` into `.next/`. The publisher uses this one, because
+  it serves the site itself to drive Playwright.
+- `npx next build` — the build that matches production. Run it before pushing anything
+  that could plausibly build differently under the two toolchains.
+- `npm test` — **builds first** (vinext), then runs `tests/rendered-html.test.mjs`
   (imports the built worker from `dist/` and asserts the SSR HTML) plus
   `tests/place-search.test.mjs` and `tests/map-frame.test.mjs` (pure logic, no build).
+  So the SSR assertions cover the vinext output, not the deployed one.
+- Deploying is `git push` — Vercel builds from `main`. There is no manual deploy step
+  and no `deploy` script.
 - `npm run lint` — ESLint (`eslint-config-next`).
 - `npm run plots:publish` — run the R2 publisher (see below).
 - `node --max-old-space-size=6144 scripts/build-office-bundles.mjs` → `build-office-gridpoints.mjs`
@@ -254,7 +289,7 @@ off does *not* turn off `forecast/{OFFICE}.json` — `loadForecast` gates that o
 URL alone, deliberately, because `/api/forecast` cannot serve an office in production at
 all (see below). Collapsing them onto one flag, or reaching for
 `NEXT_PUBLIC_FORECAST_ASSET_BASE_URL` to disable imagery, drops production onto a route
-that breaks two Workers limits. A test pins this.
+that 504s. A test pins this.
 
 **There is no publisher-side kill switch for imagery, despite appearances.**
 `RENDER_OFFICE_COUNT=0` does not disable rendering: PHI and US are force-pinned back into
@@ -268,7 +303,8 @@ batched requests to `api.weather.gov/gridpoints/{wfo}/{x},{y}` for the selected
 office's labeled cities (`city-points.json`) plus the slice of the regional
 lattice (`grid-points.json`) tagged for that office, aggregates each day's
 values (max for temps/wind/PoP, sum for QPF; unit-converted to °F / mph /
-inches), and returns JSON with Cloudflare edge caching.
+inches), and returns JSON with edge cache headers. It is the local/dev path only —
+in production this route 504s (see above).
 
 **The field fills the whole canvas, not just the CWA.** Each office's lattice
 slice covers its full render frame using real gridpoint data from neighbouring
