@@ -3,6 +3,9 @@ import { dirname, resolve } from "node:path";
 import { DeleteObjectsCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { chromium } from "playwright";
 
+import { anchorFor, probeAnchor, staleOfficesFrom } from "../lib/office-probe.mjs";
+import { pooled } from "../lib/pooled.mjs";
+
 const siteUrl = (process.env.PLOT_SITE_URL ?? "http://127.0.0.1:3000").replace(/\/+$/, "");
 const publicBaseUrl = (process.env.R2_PUBLIC_BASE_URL ?? "").replace(/\/+$/, "");
 const outputOnly = process.env.PLOT_OUTPUT_ONLY === "true";
@@ -153,15 +156,7 @@ async function canvasPngs(locator) {
 async function probeOffice(office) {
   try {
     const cities = JSON.parse(await readFile(new URL(`../public/cities/${office}.json`, import.meta.url), "utf8"));
-    const anchor = cities[0];
-    if (!anchor) return null;
-    const response = await fetch(`https://api.weather.gov/gridpoints/${anchor.wfo}/${anchor.x},${anchor.y}`, {
-      method: "HEAD",
-      headers: { "User-Agent": "NWS Forecast Graphics (github.com/suchitbasineni/NWSGraphics)" },
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!response.ok) return null;
-    return response.headers.get("last-modified");
+    return await probeAnchor(anchorFor(cities), fetch);
   } catch {
     // A probe that fails is treated as "changed": refetching costs time, skipping an
     // office that really did update would serve a stale forecast until the next run.
@@ -185,13 +180,23 @@ const probes = {};
 await pooled(DATA_OFFICES, 12, async (office) => {
   probes[office] = await probeOffice(office);
 });
-const staleOffices = DATA_OFFICES.filter((office) => {
-  if (forcePublish) return true;
-  const seen = previousIndex[office]?.probe;
-  // Unknown either side means we cannot prove it is unchanged, so refresh it.
-  return !seen || !probes[office] || probes[office] !== seen;
-});
+const staleOffices = staleOfficesFrom(DATA_OFFICES, probes, previousIndex, forcePublish);
 console.error(`probed ${DATA_OFFICES.length} offices in ${((Date.now() - probeStarted) / 1000).toFixed(1)}s: ${staleOffices.length} changed`);
+
+// Exit before the fetch phase, not after it. The fetch is ~290 gridpoint requests per
+// office and every render-tier office is fetched unconditionally, so a run that reaches
+// the old exit at the bottom has already spent ~7,250 upstream requests discovering it
+// had nothing to do. That cost is what kept the schedule hourly.
+const previous = await currentManifest();
+if (!forcePublish && !staleOffices.length && previous?.sourceRevision === sourceRevision) {
+  console.log(JSON.stringify({
+    published: false,
+    reason: "nothing to publish",
+    updatedAt: previous?.updatedAt ?? null,
+    forecastsRefreshed: 0,
+  }));
+  process.exit(0);
+}
 
 // Render offices are always fetched — their imagery is rebuilt from this snapshot even if
 // only one of them moved, because a release is published whole — and they go *first*, so
@@ -312,9 +317,24 @@ await publishObject(
 );
 console.error(`published forecast data: ${Object.keys(forecasts).length} offices, ${(forecastBytes / 1024).toFixed(0)} KB`);
 
-const previous = await currentManifest();
+// Per office, not on the default office's clock. This used to compare the whole release
+// against `forecast.updatedAt` — PHI's issuance, or the first renderable office's — so an
+// office that reissued while PHI stood still had its data refreshed and then kept serving
+// the previous release's PNGs. That is the common case, not the corner one: NWS offices
+// reissue independently, and only one of the ~25 rendered offices is PHI.
+//
+// Compared against the manifest's own per-office record rather than the probe index, so
+// an office whose render failed or was cut by the capture budget stays behind and is
+// picked up next run. A manifest predating that field reports undefined and re-renders
+// once, which is the safe direction.
+const previousOfficeUpdatedAt = (office) => (
+  previous?.schemaVersion === 2 ? previous.offices?.[office]?.updatedAt : undefined
+);
+const staleRenderOffices = renderable.filter(
+  (office) => forecasts[office].updatedAt !== previousOfficeUpdatedAt(office),
+);
 const renderUnchanged = !forcePublish
-  && previous?.updatedAt === forecast.updatedAt
+  && !staleRenderOffices.length
   && previous?.sourceRevision === sourceRevision;
 if (renderUnchanged) {
   console.log(JSON.stringify({
@@ -325,6 +345,7 @@ if (renderUnchanged) {
   }));
   process.exit(0);
 }
+console.error(`rendering ${staleRenderOffices.length}/${renderable.length} render-tier offices that moved`);
 
 if (!outputOnly) {
   required("R2_ACCOUNT_ID");
@@ -390,18 +411,6 @@ async function openPage() {
 
 
 /** Runs `task` over `items`, at most `limit` in flight, failing on the first rejection. */
-async function pooled(items, limit, task) {
-  let next = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const index = next;
-      next += 1;
-      await task(items[index]);
-    }
-  });
-  await Promise.all(workers);
-}
-
 async function publishObject(key, body, contentType, cacheControl) {
   if (outputOnly) {
     const destination = resolve(outputDirectory, key);
@@ -529,7 +538,11 @@ try {
     // it re-attempting one office and starving every office after it.
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        manifest.offices[office] = { days: await captureOffice(office) };
+        // `updatedAt` per office, not just at the release level: the release-level one is
+        // the representative office's issuance, so without this every published office
+        // would be dated with PHI's. It is what the page shows and what the next run's
+        // change-check compares against.
+        manifest.offices[office] = { updatedAt: forecasts[office].updatedAt, days: await captureOffice(office) };
         break;
       } catch (error) {
         console.error(`${office} attempt ${attempt}/2 failed: ${error.message}`);

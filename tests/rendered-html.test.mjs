@@ -170,7 +170,10 @@ test("missing forecast data reads as missing, not as a forecast of zero", async 
 test("fills the whole frame without re-solving the field per pixel", async () => {
   const component = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
   assert.match(component, /const FIELD_STRIDE = 4/);
-  assert.match(component, /const COLOR_LUT_SIZE = 1024/);
+  // The ramp is uniform in value but QPF's stops are not — it runs to 12" while crowding
+  // five stops below 0.5". 1024 entries left the 0.01–0.1 band, most of a typical map,
+  // with 8 steps for a 68-unit RGB traverse; don't drop it back.
+  assert.match(component, /const COLOR_LUT_SIZE = 4096/);
   // The +1 keeps a lattice sample at or past each far edge; without it the last stride
   // of pixels has no upper neighbour and the raster ends in a seam.
   assert.match(component, /Math\.ceil\(\(raster\.width - 1\) \/ FIELD_STRIDE\) \+ 1/);
@@ -437,11 +440,15 @@ test("scrolls the catalogue without scrolling the sidebar's data status away", a
 });
 
 test("publishes changed forecast canvases on the issuance-aware schedule", async () => {
-  const [publisher, workflow] = await Promise.all([
+  const [publisher, workflow, poolModule] = await Promise.all([
     readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
     readFile(new URL("../.github/workflows/publish-forecast-plots.yml", import.meta.url), "utf8"),
+    readFile(new URL("../lib/pooled.mjs", import.meta.url), "utf8"),
   ]);
-  assert.match(publisher, /previous\?\.updatedAt === forecast\.updatedAt/);
+  // The change-check is per render-tier office now, against the manifest's own record of
+  // what each office was last rendered from — not against the representative office's
+  // timestamp, which held back every office that moved while PHI did not.
+  assert.match(publisher, /const staleRenderOffices = renderable\.filter/);
   assert.match(publisher, /previous\?\.sourceRevision === sourceRevision/);
   assert.match(publisher, /dataset\.renderState === "ready"/);
   assert.match(publisher, /preview\.width = 900/);
@@ -452,8 +459,10 @@ test("publishes changed forecast canvases on the issuance-aware schedule", async
   // A release is ~320 objects. One at a time, the phase is round-trip latency rather
   // than bandwidth, so uploads run through a pool — per day, so it holds one day's PNGs
   // rather than a whole release's.
+  // The pool itself lives in lib/pooled.mjs, shared with the pre-build probe gate so
+  // both bound their upstream pressure the same way.
   assert.match(publisher, /const UPLOAD_CONCURRENCY = 8/);
-  assert.match(publisher, /async function pooled/);
+  assert.match(poolModule, /export async function pooled/);
   assert.match(publisher, /await pooled\(uploads, UPLOAD_CONCURRENCY/);
   // Each office's forecast fans out to hundreds of gridpoints; fetched together the
   // phase costs the slowest office rather than the sum of all four.
@@ -463,15 +472,14 @@ test("publishes changed forecast canvases on the issuance-aware schedule", async
   assert.match(publisher, /PLOT_FETCH_BUDGET_MS/);
   // Render-tier offices are fetched first, so a budget cut can never leave nothing to render.
   assert.match(publisher, /\[\.\.\.new Set\(\[\.\.\.RENDER_OFFICES, \.\.\.staleOffices\]\)\]/);
-  assert.match(workflow, /cron: "27 \* \* \* \*"/);
-  assert.match(workflow, /cron: "5,25,45 3,15 \* \* \*"/);
+  assert.match(workflow, /cron: "\*\/15 \* \* \* \*"/);
   assert.match(workflow, /timezone: "America\/New_York"/);
   assert.match(workflow, /workflow_dispatch/);
   assert.match(workflow, /R2_PUBLIC_BASE_URL/);
   assert.match(workflow, /cancel-in-progress: false/);
   // The measured pipeline is minutes, so the ceiling is there to kill a stalled run
   // rather than to accommodate a slow one.
-  assert.match(workflow, /timeout-minutes: 45/);
+  assert.match(workflow, /timeout-minutes: 60/);
   // The publisher drives the production build, not the Vite dev server: dev renders
   // through unminified modules and a development React, at less than half the speed.
   assert.match(workflow, /npm run build/);
@@ -480,10 +488,11 @@ test("publishes changed forecast canvases on the issuance-aware schedule", async
 });
 
 test("publishes every office and prunes aged-out releases", async () => {
-  const [publisher, component, assetRoute] = await Promise.all([
+  const [publisher, component, assetRoute, probeModule] = await Promise.all([
     readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
     readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/forecast-assets/[...path]/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/office-probe.mjs", import.meta.url), "utf8"),
   ]);
   // Two tiers, both derived from the generated registry rather than a list in the script.
   // Every drawable office gets forecast data — that object is *how* it renders — while
@@ -500,8 +509,12 @@ test("publishes every office and prunes aged-out releases", async () => {
   assert.match(publisher, /for \(const pinned of \["PHI", "US"\]\)/);
   // A HEAD probe carries `last-modified` with a zero-byte body, so an unchanged office
   // costs one request instead of ~290. Refreshing all 121 blindly is ~35,000 requests.
-  assert.match(publisher, /method: "HEAD"/);
-  assert.match(publisher, /last-modified/);
+  // The mechanics live in lib/office-probe.mjs now, shared with the pre-build gate and
+  // the freshness route; the publisher is asserted to use that module rather than to
+  // carry its own copy of the request.
+  assert.match(probeModule, /method: "HEAD"/);
+  assert.match(probeModule, /last-modified/);
+  assert.match(publisher, /probeAnchor\(anchorFor\(cities\), fetch\)/);
   assert.match(publisher, /forecast\/index\.json/);
   // Forecast data publishes before the imagery decision: an office with no PNGs still
   // needs its forecast refreshed, so an unchanged-imagery run must not exit first.
@@ -510,7 +523,7 @@ test("publishes every office and prunes aged-out releases", async () => {
     "forecast data must publish before the render change-check",
   );
   assert.match(publisher, /schemaVersion: 2/);
-  assert.match(publisher, /manifest\.offices\[office\] = \{ days: await captureOffice\(office\) \}/);
+  assert.match(publisher, /manifest\.offices\[office\] = \{ updatedAt: forecasts\[office\]\.updatedAt, days: await captureOffice\(office\) \}/);
   assert.match(publisher, /\?office=\$\{office\}/);
   // Each office navigates afresh so the readiness wait can't latch onto stale canvases.
   assert.match(publisher, /canvas\.dataset\.office === selectedOffice/);
@@ -801,6 +814,97 @@ test("an unset workflow variable falls back to the default, not to zero", async 
   assert.match(publisher, /fetchBudgetSetting \? Number\(fetchBudgetSetting\) : 12 \* 60 \* 1000/);
   assert.match(publisher, /const captureBudgetSetting = process\.env\.PLOT_CAPTURE_BUDGET_MS\?\.trim\(\)/);
   assert.match(publisher, /captureBudgetSetting \? Number\(captureBudgetSetting\) : 15 \* 60 \* 1000/);
+});
+
+test("an unchanged run exits before it fetches anything", async () => {
+  const publisher = await readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8");
+  // The probe is the cheap part (one zero-byte HEAD per office); the fetch is the
+  // expensive part (~290 gridpoint requests per office, and every render-tier office is
+  // fetched unconditionally). Exiting between them is the entire point of this check, so
+  // pin the ordering — a refactor that moves the exit back below the fetch would leave
+  // every other assertion here passing.
+  const shortCircuit = publisher.indexOf("nothing to publish");
+  const fetchPhase = publisher.indexOf("const forecasts = {}");
+  assert.ok(shortCircuit > 0, "no probe-level short-circuit found");
+  assert.ok(fetchPhase > 0, "fetch phase marker not found");
+  assert.ok(shortCircuit < fetchPhase, "the short-circuit must come before the fetch phase");
+
+  // A new deploy must re-render even when NWS has not moved — that is how a newly added
+  // product reaches an already-published office. Asserted against the early exit's own
+  // condition, not a bare regex: `previous?.sourceRevision === sourceRevision` also
+  // appears in the late renderUnchanged check, so a plain match would pass even if the
+  // early exit dropped the clause entirely.
+  assert.match(
+    publisher,
+    /!forcePublish && !staleOffices\.length && previous\?\.sourceRevision === sourceRevision/,
+  );
+  // One probe implementation, shared with the pre-build gate.
+  assert.match(publisher, /from "\.\.\/lib\/office-probe\.mjs"/);
+  assert.match(publisher, /from "\.\.\/lib\/pooled\.mjs"/);
+});
+
+test("an idle run is gated before the build, and the schedule is dense", async () => {
+  const [workflow, probe] = await Promise.all([
+    readFile(new URL("../.github/workflows/publish-forecast-plots.yml", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/probe-offices.mjs", import.meta.url), "utf8"),
+  ]);
+  // The gate must run before the expensive setup, or it saves nothing: the publisher's
+  // own short-circuit sits behind npm ci, a Chromium download and a production build.
+  const gateStep = workflow.indexOf("scripts/probe-offices.mjs");
+  const install = workflow.indexOf("run: npm ci");
+  const build = workflow.indexOf("run: npm run build");
+  assert.ok(gateStep > 0, "no pre-build probe step");
+  assert.ok(gateStep < install, "the probe gate must run before npm ci");
+  assert.ok(gateStep < build, "the probe gate must run before the build");
+  // Every step after the gate is conditional on it — count them rather than matching
+  // once, so adding a step without gating it fails here.
+  const gated = [...workflow.matchAll(/steps\.probe\.outputs\.changed != 'false'/g)].length;
+  const stepCount = [...workflow.matchAll(/^ {6}- name: /gm)].length;
+  assert.equal(gated, stepCount - 4, "every step after the probe gate must be conditional on it");
+
+  // A probe that crashes must fall through to a full run, not skip the job. That needs
+  // both halves: continue-on-error so the step failing doesn't fail the job, and a
+  // `!= 'false'` gate so a missing output still runs. `== 'true'` would skip.
+  assert.match(workflow, /continue-on-error: true/);
+  assert.doesNotMatch(workflow, /steps\.probe\.outputs\.changed == 'true'/);
+
+  // Quarter-hourly all day, filled to five-minute spacing in the issuance windows using
+  // only the offsets the first cron does not already cover — GitHub queues one run per
+  // matching cron, so an overlap is duplicate runs, not denser checking.
+  assert.match(workflow, /cron: "\*\/15 \* \* \* \*"/);
+  assert.match(workflow, /cron: "5,10,20,25,35,40,50,55 3,4,15,16 \* \* \*"/);
+  const windowMinutes = /cron: "([\d,]+) 3,4,15,16 \* \* \*"/.exec(workflow)[1].split(",").map(Number);
+  assert.ok(windowMinutes.every((m) => m % 15 !== 0), "window cron must not repeat quarter-hour slots");
+
+  // The gate shares the publisher's probe rather than reimplementing it.
+  assert.match(probe, /from "\.\.\/lib\/office-probe\.mjs"/);
+  // An unreadable manifest or index must not be read as "nothing changed".
+  assert.match(probe, /let changed = true/);
+  // And it must not hang: this step's value is that an idle run ends in ~20s.
+  assert.match(probe, /AbortSignal\.timeout/);
+});
+
+test("imagery is re-rendered per office, not on the default office's clock", async () => {
+  const [publisher, component] = await Promise.all([
+    readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+  ]);
+  // `forecast` is PHI's payload (or the first renderable office's). Comparing the whole
+  // release against that one timestamp meant an office could reissue, have its data
+  // refreshed, and keep serving yesterday's PNGs because PHI happened not to move —
+  // which is most of the render tier, most of the time.
+  assert.doesNotMatch(publisher, /previous\?\.updatedAt === forecast\.updatedAt/);
+  assert.match(publisher, /const staleRenderOffices = renderable\.filter/);
+  assert.match(publisher, /!staleRenderOffices\.length/);
+
+  // Which requires the manifest to record each office's own issuance, not just the
+  // release-level one. That is also what lets the page date what it is showing.
+  assert.match(publisher, /manifest\.offices\[office\] = \{ updatedAt: forecasts\[office\]\.updatedAt/);
+
+  // The client must read that per-office field. The top-level `updatedAt` is the
+  // representative office's, so using it labels every published office with PHI's time.
+  assert.match(component, /function publishedUpdatedAtFor/);
+  assert.doesNotMatch(component, /hasPublishedOffice \? publishedForecast\?\.updatedAt/);
 });
 
 test("resolves both published key shapes and rejects anything else", async () => {

@@ -16,15 +16,18 @@ on:
   # So this stays dense. To publish less (which is a real lever on the R2 object budget),
   # gate the publisher on a minimum interval; don't thin the schedule.
   schedule:
-    # Normal monitoring: once per hour, away from the busiest top-of-hour window.
-    - cron: "27 * * * *"
+    # Every fifteen minutes all day. An idle run is ~122 zero-byte HEADs and ends before
+    # `npm ci`, so density costs Actions time rather than R2 quota or NWS load — and this
+    # repo is public, so Actions minutes are unmetered. This is what takes worst-case
+    # reissue-to-visible from ~60 minutes to ~15.
+    - cron: "*/15 * * * *"
       timezone: "America/New_York"
-    # Higher-frequency checks around the normal 03–04 and 15–16 issuance windows.
-    - cron: "45,55 2,14 * * *"
-      timezone: "America/New_York"
-    - cron: "5,15,25,35,45,55 3,15 * * *"
-      timezone: "America/New_York"
-    - cron: "5,15,25 4,16 * * *"
+    # Fills the gaps to five-minute spacing across the 03–04 and 15–16 ET issuance
+    # windows. Deliberately the eight offsets the quarter-hourly cron above does *not*
+    # already cover: GitHub queues a separate run per matching cron, and the concurrency
+    # group does not cancel, so listing :00/:15/:30/:45 twice would serialise duplicate
+    # runs against each other rather than checking more often.
+    - cron: "5,10,20,25,35,40,50,55 3,4,15,16 * * *"
       timezone: "America/New_York"
 
 concurrency:
@@ -88,16 +91,29 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install dependencies
+      # No dependencies, so this runs before `npm ci` and a Chromium download. An idle
+      # run ends here in ~20s instead of spending ~2 minutes on setup to learn the same
+      # thing — which is what lets the schedule above be dense.
+      # continue-on-error, and the gates below test `!= 'false'` rather than `== 'true'`,
+      # so a probe that crashes before writing its output falls through to a full run.
+      # An unknown answer must mean "publish", never "skip": the cost of being wrong the
+      # other way is serving a stale forecast until the next run.
+      - name: Probe for changes
+        id: probe
         if: steps.publication.outputs.enabled == 'true'
+        continue-on-error: true
+        run: node scripts/probe-offices.mjs
+
+      - name: Install dependencies
+        if: steps.publication.outputs.enabled == 'true' && steps.probe.outputs.changed != 'false'
         run: npm ci
 
       - name: Install Chromium
-        if: steps.publication.outputs.enabled == 'true'
+        if: steps.publication.outputs.enabled == 'true' && steps.probe.outputs.changed != 'false'
         run: npx playwright install --with-deps chromium
 
       - name: Build forecast site
-        if: steps.publication.outputs.enabled == 'true'
+        if: steps.publication.outputs.enabled == 'true' && steps.probe.outputs.changed != 'false'
         run: npm run build
 
       # The publisher used to drive the Vite dev server, which renders through
@@ -105,7 +121,7 @@ jobs:
       # build instead renders an office in 11.6s where dev took 25.1s — better than
       # twice over, for one build step.
       - name: Start forecast site
-        if: steps.publication.outputs.enabled == 'true'
+        if: steps.publication.outputs.enabled == 'true' && steps.probe.outputs.changed != 'false'
         run: |
           npm run start -- --port 3000 > /tmp/phi-forecast-site.log 2>&1 &
           for attempt in {1..90}; do
@@ -118,5 +134,5 @@ jobs:
           exit 1
 
       - name: Publish changed forecast plots
-        if: steps.publication.outputs.enabled == 'true'
+        if: steps.publication.outputs.enabled == 'true' && steps.probe.outputs.changed != 'false'
         run: npm run plots:publish

@@ -209,9 +209,14 @@ affordable and must not be undone casually:
   bilinearly upsampled. The `Math.ceil((size - 1) / FIELD_STRIDE) + 1` sample
   counts are deliberate; drop the `+ 1` and the last stride of pixels has no
   upper neighbour and the raster ends in a visible seam.
-- `colorRamp()` — a 1024-entry LUT per product, since `colorFor` re-parses hex
+- `colorRamp()` — a 4096-entry LUT per product, since `colorFor` re-parses hex
   strings and can't run 684,000 times per plot. Entries must be produced *by*
-  `colorFor`; the stops aren't evenly spaced (QPF runs 0, 0.01, 0.1, 0.25 …).
+  `colorFor`; the stops aren't evenly spaced (QPF runs 0, 0.01, 0.1, 0.25 … 12).
+  **The LUT is uniform in value while the stops are not, so its size is set by the
+  worst ratio, not by a round number.** QPF tops out at 12" but crowds five stops
+  below 0.5", so widening its scale silently starved the low end: at 1024 the
+  0.01–0.1 band — most of the coloured area on a typical map — got 8 steps for a
+  68-unit RGB traverse and banded visibly. Raise the size along with the top stop.
 
 ## Publishing pipeline
 

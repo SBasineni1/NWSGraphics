@@ -53,7 +53,12 @@ type PublishedForecastManifestV1 = PublishedForecastManifestBase & {
 };
 type PublishedForecastManifestV2 = PublishedForecastManifestBase & {
   schemaVersion: 2;
-  offices: Partial<Record<OfficeId, { days: PublishedForecastDay[] }>>;
+  // `updatedAt` is per office because the manifest's top-level one is the *representative*
+  // office's issuance (PHI's, or the first rendered office's). Dating New York's maps with
+  // Philadelphia's issuance time is exactly the kind of quietly-wrong number this whole
+  // freshness indicator exists to catch. Optional: manifests published before the field
+  // existed are still served until the next run replaces them.
+  offices: Partial<Record<OfficeId, { updatedAt?: string; days: PublishedForecastDay[] }>>;
 };
 type PublishedForecastManifest = PublishedForecastManifestV1 | PublishedForecastManifestV2;
 
@@ -61,6 +66,20 @@ function publishedDaysFor(manifest: PublishedForecastManifest | null, office: Of
   if (!manifest) return undefined;
   if (manifest.schemaVersion === 2) return manifest.offices?.[office]?.days;
   return office === "PHI" ? manifest.days : undefined;
+}
+
+/**
+ * When NWS issued the forecast behind *this office's* published imagery.
+ *
+ * Falls back to the release-level `updatedAt`, which is the representative office's
+ * issuance — right for PHI, and for a v1 manifest which only ever described PHI, but
+ * merely approximate for anyone else. It is the fallback rather than the answer because
+ * a manifest published before the per-office field existed still has to render.
+ */
+function publishedUpdatedAtFor(manifest: PublishedForecastManifest | null, office: OfficeId) {
+  if (!manifest) return undefined;
+  if (manifest.schemaVersion === 2) return manifest.offices?.[office]?.updatedAt ?? manifest.updatedAt;
+  return office === "PHI" ? manifest.updatedAt : undefined;
 }
 type AreaGeometry =
   | { type: "Polygon"; coordinates: number[][][] }
@@ -229,7 +248,12 @@ const FORECAST_DAYS = [0, 1, 2];
 // interpolating between samples is visually identical to a per-pixel solve, for a
 // sixteenth of the work. Without this the regional point count makes rendering crawl.
 const FIELD_STRIDE = 4;
-const COLOR_LUT_SIZE = 1024;
+// 4096, not 1024, because the ramp is uniform in *value* while QPF's stops are not: the
+// scale runs to 12" but crowds five stops below 0.5". At 1024 entries the 0.01–0.1 band —
+// which covers most of a typical map — gets 8 steps for a 68-unit RGB traverse and bands
+// visibly. Sized off the widest span, so the table stays 12 KB and is built once per
+// product (WeakMap-cached); per-pixel indexing cost is unchanged.
+const COLOR_LUT_SIZE = 4096;
 const PUBLISHED_ASSET_BASE_URL = (process.env.NEXT_PUBLIC_FORECAST_ASSET_BASE_URL ?? "").replace(/\/+$/, "");
 
 /**
@@ -299,7 +323,7 @@ const PRODUCTS: ProductSpec[] = [
   },
   {
     kind: "field", id: "quantitativePrecipitation", title: "Total Precipitation Forecast", nav: "Rainfall", group: "precipitation", legend: "LIQUID PRECIPITATION (INCHES)", unit: " in", file: "total-precipitation", decimals: 2, fillAlpha: 235, verticalLegend: true,
-    stops: [{ value: 0, color: "#ffffff" }, { value: 0.01, color: "#e5f5e0" }, { value: 0.1, color: "#a1d99b" }, { value: 0.25, color: "#41ab5d" }, { value: 0.5, color: "#ffffb2" }, { value: 1, color: "#fe9929" }, { value: 2, color: "#de2d26" }, { value: 3, color: "#756bb1" }],
+    stops: [{ value: 0, color: "#ffffff" }, { value: 0.01, color: "#e5f5e0" }, { value: 0.1, color: "#a1d99b" }, { value: 0.25, color: "#41ab5d" }, { value: 0.5, color: "#ffffb2" }, { value: 1, color: "#fe9929" }, { value: 2, color: "#de2d26" }, { value: 3, color: "#756bb1" }, { value: 4, color: "#5a4b9c" }, { value: 5, color: "#3f2d80" }, { value: 6, color: "#8c2d8c" }, { value: 8, color: "#c51b8a" }, { value: 10, color: "#f768a1" }, { value: 12, color: "#fbb4d0" }],
   },
   {
     kind: "outlook", id: "excessiveRainfallOutlook", title: "WPC Excessive Rainfall Outlook", nav: "Flash Flood Risk", group: "precipitation", legend: "EXCESSIVE RAINFALL RISK",
@@ -450,8 +474,8 @@ function colorFor(value: number, stops: ColorStop[]) {
 
 // `colorFor` re-parses hex strings on every call, which is far too slow to run once per
 // pixel. Bake it into a ramp instead. The stops are not evenly spaced (QPF runs 0, 0.01,
-// 0.1, 0.25, 0.5, 1, 2, 3), so each entry has to come from `colorFor` itself rather than
-// from walking between stops at uniform intervals.
+// 0.1, 0.25, 0.5, 1, 2, 3, 4, 5, 6, 8, 10, 12), so each entry has to come from `colorFor`
+// itself rather than from walking between stops at uniform intervals.
 const colorRamps = new WeakMap<ColorStop[], { table: Uint8ClampedArray; min: number; span: number }>();
 
 function colorRamp(stops: ColorStop[]) {
