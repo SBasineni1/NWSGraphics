@@ -176,15 +176,30 @@ population inside incorporated places and CDPs, so it is a ranking input, not a 
 The frontend (`app/components/ForecastGraphic.tsx`, a large `"use client"`
 component) chooses at runtime:
 
-1. **Published assets (preferred in prod).** If
-   `NEXT_PUBLIC_FORECAST_ASSET_BASE_URL` is set, it loads pre-generated PNGs.
+1. **Published assets — now opt-in, and off by default.** Requires *both*
+   `NEXT_PUBLIC_FORECAST_ASSET_BASE_URL` and `NEXT_PUBLIC_PUBLISHED_PLOTS=true`.
    `/api/published-forecast` fetches `latest.json` from R2;
    `/api/forecast-assets/[...path]` proxies the versioned `releases/*.png`
-   (path is validated against a strict regex — keep that guard).
-2. **Live canvas fallback.** Otherwise it renders maps in the browser: fetches
-   `/api/forecast?office=…`, samples the forecast field with inverse-distance
-   weighting (`fieldSolveFor`), and paints geojson overlays (`public/*.geojson`)
-   plus city labels onto a `<canvas>` at 900×760 (`RENDER_SCALE = 2`).
+   (path is validated against a strict regex — keep that guard). A published office
+   serves pixels baked at render time, so a palette or scale change can't reach it until
+   the next publish run; the canvas is fast enough that this mostly bought staleness.
+2. **Live canvas — the normal path now.** Renders maps in the browser: samples the
+   forecast field with inverse-distance weighting (`fieldSolveFor`) and paints geojson
+   overlays plus city labels onto a `<canvas>` at 900×760 (`RENDER_SCALE = 2`).
+
+**The two R2 tiers are on separate switches, and only one is optional.** Turning the PNGs
+off does *not* turn off `forecast/{OFFICE}.json` — `loadForecast` gates that on the base
+URL alone, deliberately, because `/api/forecast` cannot serve an office in production at
+all (see below). Collapsing them onto one flag, or reaching for
+`NEXT_PUBLIC_FORECAST_ASSET_BASE_URL` to disable imagery, drops production onto a route
+that breaks two Workers limits. A test pins this.
+
+**There is no publisher-side kill switch for imagery, despite appearances.**
+`RENDER_OFFICE_COUNT=0` does not disable rendering: PHI and US are force-pinned back into
+the render tier right after the slice, an empty `renderable` throws, and an empty manifest
+throws again on purpose. And `latest.json` is only overwritten by a *successful* render
+run, so a publisher that stops rendering leaves the last manifest live and clients keep
+being served the old release. Imagery is switched off at the client, not the publisher.
 
 `app/api/forecast/route.ts` (`runtime = "edge"`) is the data source: it fans out
 batched requests to `api.weather.gov/gridpoints/{wfo}/{x},{y}` for the selected

@@ -255,6 +255,21 @@ const FIELD_STRIDE = 4;
 // product (WeakMap-cached); per-pixel indexing cost is unchanged.
 const COLOR_LUT_SIZE = 4096;
 const PUBLISHED_ASSET_BASE_URL = (process.env.NEXT_PUBLIC_FORECAST_ASSET_BASE_URL ?? "").replace(/\/+$/, "");
+/**
+ * Whether to serve the publisher's pre-rendered PNGs. Opt-in, and off by default.
+ *
+ * A published office serves pixels baked at render time, so anything the renderer decides
+ * — a colour scale, a palette, a label — is frozen until the next publish run, while the
+ * live canvas re-derives all of it on every visit. With the canvas fast enough, the
+ * imagery tier mostly buys staleness.
+ *
+ * This gates the *imagery only*. `loadForecast` still prefers the publisher's
+ * `forecast/{OFFICE}.json`, and that half is not optional: `/api/forecast` cannot serve an
+ * office on the free plan (see its comment below). Do not collapse the two onto
+ * NEXT_PUBLIC_FORECAST_ASSET_BASE_URL — unsetting that to turn off the PNGs would take the
+ * data tier with it and leave production with no forecast source at all.
+ */
+const PUBLISHED_PLOTS_ENABLED = process.env.NEXT_PUBLIC_PUBLISHED_PLOTS === "true";
 
 /**
  * The gridpoint forecast for one office.
@@ -1961,7 +1976,7 @@ export function ForecastGraphic() {
   }, []);
 
   useEffect(() => {
-    if (!PUBLISHED_ASSET_BASE_URL) return;
+    if (!PUBLISHED_ASSET_BASE_URL || !PUBLISHED_PLOTS_ENABLED) return;
     let active = true;
     const load = async () => {
       try {

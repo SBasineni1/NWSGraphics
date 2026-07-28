@@ -930,6 +930,24 @@ test("resolves both published key shapes and rejects anything else", async () =>
   }
 });
 
+test("turning off the published imagery does not turn off the forecast data", async () => {
+  const component = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
+  // Two tiers ride on R2 and they are not interchangeable. The PNGs are optional — the
+  // live canvas re-renders them and is never stale. `forecast/{OFFICE}.json` is not:
+  // /api/forecast blows both the 50-subrequest ceiling and the 10 ms CPU budget, so
+  // production has no other source. They must stay on separate switches.
+  assert.match(component, /const PUBLISHED_PLOTS_ENABLED = process\.env\.NEXT_PUBLIC_PUBLISHED_PLOTS === "true"/);
+  // The imagery is gated on both flags…
+  assert.match(component, /if \(!PUBLISHED_ASSET_BASE_URL \|\| !PUBLISHED_PLOTS_ENABLED\) return;/);
+  // …while the data fetch is gated on the base URL alone. If this ever picks up
+  // PUBLISHED_PLOTS_ENABLED, switching the PNGs off drops production onto /api/forecast.
+  const loader = component.slice(component.indexOf("async function loadForecast"));
+  const body = loader.slice(0, loader.indexOf("\n}"));
+  assert.match(body, /if \(PUBLISHED_ASSET_BASE_URL\) \{/);
+  assert.ok(!body.includes("PUBLISHED_PLOTS_ENABLED"), "the forecast data must not depend on the imagery switch");
+  assert.match(body, /forecast-assets\/forecast\/\$\{office\}\.json/);
+});
+
 test("ships one self-contained map bundle per forecast office", async () => {
   const dir = new URL("../public/offices/", import.meta.url);
   const names = (await readdir(dir)).filter((name) => name.endsWith(".json"));
