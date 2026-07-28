@@ -6,7 +6,10 @@ async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
-  return worker.fetch(
+  // vinext 1.x exports the fetch handler itself; 0.0.50 exported `{ fetch }`. Accept
+  // either, so this doesn't break again on the next major.
+  const handler = typeof worker === "function" ? worker : worker.fetch;
+  return handler(
     new Request("http://localhost/", { headers: { accept: "text/html" } }),
     { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
     { waitUntil() {}, passThroughOnException() {} },
@@ -190,6 +193,13 @@ test("fills the whole frame without re-solving the field per pixel", async () =>
   assert.match(component, /if \(fieldSolveFrame !== frame\)/);
   // float64, or the reused sum can land a pixel in the neighbouring colour band.
   assert.match(component, /new Float64Array\(cells \* NEIGHBOR_COUNT\)/);
+  // Field products blend; the categorical ones don't, and they are a separate code path.
+  // Banding the field was tried and reverted — the temperature stops are 10° apart, so a
+  // real 78–90°F day collapsed to two flat blocks and lost every readable gradient. The
+  // legend's flat swatches key the scale; they don't claim the field is quantised.
+  const colorFor = /function colorFor[\s\S]*?\n\}/.exec(component);
+  assert.ok(colorFor, "could not find colorFor");
+  assert.match(colorFor[0], /const amount = \(value - lower\.value\) \/ \(upper\.value - lower\.value\);/);
   assert.match(component, /function colorRamp/);
   assert.match(component, /new Uint8ClampedArray\(COLOR_LUT_SIZE \* 3\)/);
   // Entries must come from colorFor itself — the stops are not evenly spaced.
@@ -662,13 +672,33 @@ test("splits conditional intensity out of the probability areas", async () => {
 
   assert.match(component, /function hatchPattern/);
   assert.match(component, /HATCH_GROUPS/);
-  for (const style of ["backward", "forward", "cross"]) {
-    assert.match(component, new RegExp(`style: "${style}"`), `expected the ${style} hatch`);
-  }
+  // The three tiers separate by weight and density in one direction, the way SPC's own
+  // key draws them — 1 fine and tight, 2 heavier and wider, and only 3 a crosshatch.
+  // Leaning 1 and 2 opposite ways (which this used to do) reads as two unrelated
+  // categories rather than a scale, and matches no legend SPC publishes.
+  const groups = /const HATCH_GROUPS[\s\S]*?\n\];/.exec(component);
+  assert.ok(groups, "could not find HATCH_GROUPS");
+  const tiers = [...groups[0].matchAll(/group: (\d), .*?lines: ([\d.]+), lineWidth: ([\d.]+), cross: (true|false)/g)]
+    .map(([, group, lines, lineWidth, cross]) => ({ group: +group, lines: +lines, lineWidth: +lineWidth, cross: cross === "true" }));
+  assert.equal(tiers.length, 3);
+  assert.ok(tiers[0].lines > tiers[1].lines, "tier 1 must be the denser hatch");
+  assert.ok(tiers[0].lineWidth < tiers[1].lineWidth, "tier 1 must be the finer stroke");
+  assert.deepEqual(tiers.map((t) => t.cross), [false, false, true], "only tier 3 crosshatches");
+  // Tier 1 is dashed, which is what separates it from tier 2 at a glance in SPC's key —
+  // thinner-but-solid reads as the same hatch drawn lighter, not as a different tier.
+  const dashes = [...groups[0].matchAll(/dash: \[([^\]]*)\]/g)].map(([, inner]) => inner.trim());
+  assert.equal(dashes.length, 3);
+  assert.ok(dashes[0].length > 0, "tier 1 must be dashed");
+  assert.equal(dashes[1], "", "tier 2 must be solid");
+  assert.equal(dashes[2], "", "tier 3 must be solid");
+  assert.match(component, /tileContext\.setLineDash\(spec\.dash\);/);
+  // Hail's published key has no third box; the map still draws a group above it.
+  assert.match(component, /maxIntensity: 2,/);
+  assert.match(component, /HATCH_GROUPS\.filter\(\(entry\) => entry\.group <= \(spec\.maxIntensity \?\? 3\)\)/);
   // Hatching qualifies the probability underneath it rather than ranking against it, so
   // it is painted over the fills, never blended into them.
   assert.match(component, /for \(const hatch of outlook\.hatches\)/);
-  assert.match(component, /CONDITIONAL INTENSITY/);
+  assert.match(component, /"INTENSITY"/);
   // Patterns are laid out in the context's transform, which is already 2×.
   assert.match(component, /setTransform\(new DOMMatrix\(\[1 \/ RENDER_SCALE/);
 });
@@ -930,6 +960,27 @@ test("resolves both published key shapes and rejects anything else", async () =>
   }
 });
 
+test("a wide-frame view stops the field at the land it covers", async () => {
+  const component = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
+  // Only views with no CWA to outline — national, and regions built the same way. A single
+  // office must stay unclipped: its lattice legitimately covers the whole frame with real
+  // data from its neighbours, and clipping it would carve the field back to the CWA.
+  assert.match(component, /const clipToLand = !bundle\.cwa && bundle\.states\.length > 0;/);
+  // Accumulated into one path so the nonzero fill rule unions the states; a per-state
+  // clip() would intersect them and leave nothing.
+  assert.match(component, /for \(const area of bundle\.states\) addAreaToPath\(context, area, projectPoint\);/);
+  assert.match(component, /function addAreaToPath/);
+  const render = component.slice(component.indexOf("async function renderPlot"));
+  const clip = render.slice(render.indexOf("const clipToLand"), render.indexOf("releaseCanvas(raster)"));
+  assert.ok(clip.indexOf("context.clip()") < clip.indexOf("context.drawImage(raster"), "the clip must be set before the raster is composited");
+  assert.match(clip, /if \(clipToLand\) context\.restore\(\);/);
+  // The national bundle carries the states this clips to; without them it would silently
+  // fall through to an unclipped raster.
+  const us = JSON.parse(await readFile(new URL("../public/offices/US.json", import.meta.url), "utf8"));
+  assert.equal(us.cwa, null, "the national view must have no CWA");
+  assert.ok(us.states.length >= 48, `national bundle carries only ${us.states.length} states`);
+});
+
 test("turning off the published imagery does not turn off the forecast data", async () => {
   const component = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
   // Two tiers ride on R2 and they are not interchangeable. The PNGs are optional — the
@@ -946,6 +997,113 @@ test("turning off the published imagery does not turn off the forecast data", as
   assert.match(body, /if \(PUBLISHED_ASSET_BASE_URL\) \{/);
   assert.ok(!body.includes("PUBLISHED_PLOTS_ENABLED"), "the forecast data must not depend on the imagery switch");
   assert.match(body, /forecast-assets\/forecast\/\$\{office\}\.json/);
+});
+
+test("asks for alerts in the one zone-parameter form that actually unions", async () => {
+  const route = await readFile(new URL("../app/api/alerts/route.ts", import.meta.url), "utf8");
+  // The upstream does NOT treat repeated `zone=` parameters as a union — it returns fewer
+  // alerts as you add more, and at 66 zones it returns none at all, which is
+  // indistinguishable from a quiet day. Measured: repeated form 1→5, 5→1, 20→2, 66→0;
+  // comma form 1→5, 5→8, 20→11, 66→16. Only the comma form is monotonic.
+  assert.match(route, /new URLSearchParams\(\{ zone: zones\.join\(","\) \}\)/);
+  assert.ok(!/append\(\s*"zone"/.test(route), "repeated zone= parameters silently return almost nothing");
+  // One upstream request regardless of zone count is what makes this route affordable
+  // where /api/forecast is not; a per-zone fetch would be the same fan-out that keeps
+  // /api/forecast off the production path.
+  assert.equal((route.match(/await fetch\(/g) ?? []).length, 1);
+});
+
+test("validates zone codes before they reach an outbound URL", async () => {
+  const route = await readFile(new URL("../app/api/alerts/route.ts", import.meta.url), "utf8");
+  const pattern = /^[A-Z]{2}[CZ]\d{3}$/;
+  assert.ok(route.includes(pattern.source), "route regex no longer matches the tested pattern");
+  for (const code of ["NYC105", "NYZ072", "ANZ335", "PHZ113", "GMZ155"]) {
+    assert.ok(pattern.test(code), `expected ${code} to be accepted`);
+  }
+  for (const code of ["../../etc/passwd", "NYZ72", "nyz072", "NY0072", "NYZ072&area=XX", ""]) {
+    assert.ok(!pattern.test(code), `expected ${code} to be rejected`);
+  }
+});
+
+test("draws every office's alerts from a zone bundle it actually carries", async () => {
+  const registry = JSON.parse(await readFile(new URL("../scripts/data/offices.json", import.meta.url), "utf8"));
+  const drawable = registry.filter((office) => office.ready && office.id !== "US").map((office) => office.id);
+  const files = new Set((await readdir(new URL("../public/zones/", import.meta.url))).filter((n) => n.endsWith(".json")));
+  for (const id of drawable) {
+    assert.ok(files.has(`${id}.json`), `no zone bundle for ${id}`);
+  }
+
+  // Both zone families have to be present. Alerts are issued against county zones
+  // (NYC105) and forecast zones (NYZ072) interchangeably — a Flash Flood Warning uses the
+  // first, a Flood Watch the second — so carrying only one silently loses half of them.
+  const okx = JSON.parse(await readFile(new URL("../public/zones/OKX.json", import.meta.url), "utf8"));
+  const codes = Object.keys(okx.zones);
+  // Zones are claimed by frame overlap, not just by the CWA that issues them, so the map
+  // fills the plot instead of stopping at the office border. OKX issues for 66 zones and
+  // its frame reaches well over twice that; a file back down at the owned count means the
+  // build reverted to ownership-only and the map will mask to the CWA again.
+  assert.ok(codes.length > 100, `OKX carries only ${codes.length} zones — expected its whole frame`);
+  assert.ok(codes.some((code) => code.startsWith("CT") || code.startsWith("NJ")), "expected neighbouring states in frame");
+  assert.ok(codes.some((code) => code[2] === "C"), "expected county zones");
+  assert.ok(codes.some((code) => /^[A-Z]{2}Z/.test(code) && !code.startsWith("AN")), "expected forecast zones");
+  // Marine, or a coastal office loses its Small Craft Advisories entirely.
+  assert.ok(codes.some((code) => code.startsWith("ANZ")), "expected marine zones for a coastal office");
+  for (const geometry of Object.values(okx.zones)) {
+    assert.ok(geometry.type === "Polygon" || geometry.type === "MultiPolygon", "zone geometry must be drawable");
+  }
+});
+
+test("the alerts map is not mistaken for a publishable product", async () => {
+  const component = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
+  const plot = component.slice(component.indexOf("function AlertsPlot"), component.indexOf("function AlertsPanel"));
+  // The publisher discovers what to capture by querying canvas[data-product-id]. This is a
+  // live map with no PRODUCTS entry and no day, so tagging it would put an un-renderable
+  // product into every release.
+  // Matched as a JSX attribute, not as a bare string: the comment above the canvas names
+  // the selector the publisher uses, and it should stay there.
+  assert.ok(!/data-product-id=/.test(plot), "the alerts canvas must not advertise a product id");
+  assert.ok(!/data-day-index=/.test(plot), "the alerts canvas belongs to no forecast day");
+  // Warnings must paint over watches, which paint over advisories — they overlap for hours
+  // at a time, and CAP severity cannot express the tier (a Flood Watch and a Tornado
+  // Warning are both "Severe").
+  // Alerts composite on their own layer at full opacity, and the layer goes down once.
+  // Painting each at 0.55 straight onto the map blended every overlap — a Severe
+  // Thunderstorm Watch over a Flood Watch came out olive, a colour in neither the legend
+  // nor NWS's palette, and the same hazard changed colour depending on what sat under it.
+  // Alerts overlap almost everywhere, so this is the normal case, not an edge case.
+  const alertPlot = component.slice(component.indexOf("async function renderAlertPlot"), component.indexOf("function AlertsPlot"));
+  assert.match(alertPlot, /const layerContext = layer\.getContext\("2d"\)!;/);
+  assert.match(alertPlot, /layerContext\.fill\("evenodd"\);/);
+  // No per-alert alpha anywhere in the paint loop.
+  const paintLoop = alertPlot.slice(alertPlot.indexOf("for (const { alert, geometries } of drawable)"), alertPlot.indexOf("drawReferenceLayers"));
+  assert.doesNotMatch(paintLoop, /layerContext\.globalAlpha/, "alerts must be opaque within the layer");
+  assert.match(alertPlot, /context\.globalAlpha = ALERT_LAYER_ALPHA;\s*\n\s*context\.drawImage\(layer/);
+  // Ascending rank, so the highest-priority alert is painted last and wins the pixel.
+  assert.match(component, /\.sort\(\(a, b\) => alertRank\(a\.alert\.event\) - alertRank\(b\.alert\.event\)\)/);
+  assert.match(component, /function alertRank/);
+  assert.match(component, /\.sort\(\(a, b\) => alertRank\(a\.alert\.event\) - alertRank\(b\.alert\.event\)\)/);
+
+  // Rebuild alertRank from the source so the ordering itself is tested, not just its
+  // shape. Tier is multiplied out so a hazard score can never overturn it.
+  const table = /const ALERT_HAZARDS[\s\S]*?\n\];/.exec(component);
+  assert.ok(table, "could not find ALERT_HAZARDS");
+  const hazards = [...table[0].matchAll(/\[(\/[^\]]+?\/i), (\d+)\]/g)]
+    .map(([, source, score]) => [new RegExp(source.slice(1, -2), "i"), Number(score)]);
+  assert.ok(hazards.length >= 10, `only parsed ${hazards.length} hazard rules`);
+  assert.match(component, /return tier \* 1000 \+ hazard;/);
+  const rank = (event) => {
+    const tier = /\bwarning\b/i.test(event) ? 3 : /\bwatch\b/i.test(event) ? 2 : /\badvisory\b/i.test(event) ? 1 : 0;
+    return tier * 1000 + (hazards.find(([pattern]) => pattern.test(event))?.[1] ?? 10);
+  };
+  // Within a tier the hazard decides — this is the case tier-only ranking got wrong, and
+  // CAP severity cannot fix it because both of these report "Severe".
+  assert.ok(rank("Severe Thunderstorm Watch") > rank("Flood Watch"));
+  assert.ok(rank("Tornado Watch") > rank("Severe Thunderstorm Watch"));
+  assert.ok(rank("Flash Flood Warning") > rank("Flood Warning"), "specific hazard must outrank the general one");
+  // …but tier still dominates: a Flood Warning outranks any watch.
+  assert.ok(rank("Flood Warning") > rank("Tornado Watch"));
+  assert.ok(rank("Flood Watch") > rank("Flood Advisory"));
+  assert.ok(rank("Flood Advisory") > rank("Special Weather Statement"));
 });
 
 test("ships one self-contained map bundle per forecast office", async () => {

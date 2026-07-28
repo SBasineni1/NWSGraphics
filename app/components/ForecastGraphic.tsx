@@ -5,6 +5,7 @@ import { PLOT_FONT_FAMILY } from "../fonts";
 import { DEFAULT_OFFICE, findOffice, findRegion, NATIONAL, OFFICES, REGIONS, regionOf, type Office, type OfficeId } from "../offices";
 import { MAP_HEIGHT, PLOT_WIDTH, frameBounds, inverseWorld, plotExtent, project } from "../../lib/map-frame.mjs";
 import { parsePlaceIndex, searchPlaces } from "../../lib/place-search.mjs";
+import { ALERT_COLORS, DEFAULT_ALERT_COLOR } from "../alert-colors";
 
 type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "dewpoint" | "windGust" | "windSpeed" | "skyCover" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
 type ForecastPoint = {
@@ -158,6 +159,12 @@ type OutlookProductSpec = ProductCommon & {
   categories: OutlookLegendEntry[];
   /** Probability products carry conditional-intensity hatching; categorical ones don't. */
   hatched?: boolean;
+  /**
+   * Highest conditional-intensity tier SPC issues for this hazard, for the legend key.
+   * Hail tops out at 2 — its published key has no third box — while tornado and wind run
+   * to 3. Only the key is trimmed; the map still draws whatever arrives.
+   */
+  maxIntensity?: number;
 };
 type ProductSpec = FieldProductSpec | OutlookProductSpec;
 
@@ -191,6 +198,35 @@ type OutlookRecord = {
 };
 type OutlookPayload = { generatedAt: string; outlooks: OutlookRecord[]; failures: number };
 type OutlookPayloads = { spc: OutlookPayload | null; wpc: OutlookPayload | null };
+
+/** One active watch, warning or advisory, as normalised by /api/alerts. */
+type AlertRecord = {
+  id: string;
+  event: string;
+  severity: string | null;
+  headline: string | null;
+  areaDesc: string | null;
+  description: string | null;
+  instruction: string | null;
+  senderName: string | null;
+  sent: string | null;
+  onset: string | null;
+  ends: string | null;
+  expires: string | null;
+  /** UGC codes to look up in the office's zone bundle. */
+  zones: string[];
+  /** Set only for storm-based warnings, which carry their own polygon. */
+  geometry: AreaGeometry | null;
+};
+type AlertPayload = { generatedAt: string; alerts: AlertRecord[]; zones: number };
+/**
+ * UGC zone code to polygon, from public/zones/{OFFICE}.json.
+ *
+ * Kept out of the office map bundle on purpose: it is ~180 KB per office against the
+ * bundle's ~114 KB, and only a visitor who opens the alerts tab ever needs it — the same
+ * reason the place index is fetched on first search rather than with the page.
+ */
+type ZoneIndex = Record<string, AreaGeometry>;
 
 // Every legend lists its product's whole scale, not just the tiers on today's map, so a
 // graphic can't look comparable to yesterday's while meaning something different. All
@@ -232,13 +268,31 @@ const WPC_ERO_CATEGORIES: OutlookLegendEntry[] = [
   { label: "HIGH", name: "High 70%", fill: "#ff69c5", stroke: "#ff00ff" },
 ];
 
-// SPC draws each group with its own hatch, so the three read apart in greyscale and in
-// print. Group 2 is the lighter stroke, matching SPC's renderer.
-const HATCH_GROUPS: Array<{ group: number; label: string; name: string; style: "backward" | "forward" | "cross"; color: string }> = [
-  { group: 1, label: "CIG1", name: "Intensity 1", style: "backward", color: "#000000" },
-  { group: 2, label: "CIG2", name: "Intensity 2", style: "forward", color: "#333333" },
-  { group: 3, label: "CIG3", name: "Intensity 3", style: "cross", color: "#000000" },
+/**
+ * The three conditional-intensity groups, drawn the way SPC's own key draws them.
+ *
+ * **The tiers are separated by weight and density, not by direction.** 1 and 2 both lean
+ * the same way — 1 fine and tightly spaced, 2 heavier and further apart — and only 3 is
+ * a crosshatch. Leaning 1 and 2 opposite ways (which is what this did before) makes them
+ * look like two unrelated categories rather than a scale, and neither one matches the
+ * legend a reader has seen on spc.noaa.gov.
+ *
+ * `lines` is how many strokes cross one tile, so a bigger number is a denser hatch.
+ */
+const HATCH_GROUPS: Array<{ group: number; label: string; name: string; lines: number; lineWidth: number; cross: boolean; dash: number[]; color: string }> = [
+  // Tier 1 is drawn as *dashed* diagonals, which is what separates it from tier 2 at a
+  // glance in SPC's key — solid-but-thinner reads as the same hatch rendered lighter.
+  { group: 1, label: "CIG1", name: "1", lines: 3, lineWidth: 0.9, cross: false, dash: [2.2, 2.2], color: "#000000" },
+  { group: 2, label: "CIG2", name: "2", lines: 1, lineWidth: 1.7, cross: false, dash: [], color: "#000000" },
+  { group: 3, label: "CIG3", name: "3", lines: 1, lineWidth: 1.7, cross: true, dash: [], color: "#000000" },
 ];
+
+/**
+ * Opacity of the whole alert layer over the basemap — applied once to the composited
+ * layer, never per alert, so overlapping alerts can't blend into a colour that is in
+ * nobody's palette. See renderAlertPlot.
+ */
+const ALERT_LAYER_ALPHA = 0.62;
 
 const RENDER_SCALE = 2;
 const HEADER_HEIGHT = 96;
@@ -354,7 +408,7 @@ const PRODUCTS: ProductSpec[] = [
   },
   {
     kind: "outlook", id: "hailOutlook", title: "SPC Hail Probability", nav: "Hail", group: "severe", legend: "HAIL PROBABILITY", days: [1, 2],
-    file: "spc-hail-probability", source: "spc", outlookKey: "hail", issuer: "SPC", emptyNotice: "NO HAIL RISK AREA", categories: SPC_HAIL_PROBABILITIES, hatched: true,
+    file: "spc-hail-probability", source: "spc", outlookKey: "hail", issuer: "SPC", emptyNotice: "NO HAIL RISK AREA", categories: SPC_HAIL_PROBABILITIES, hatched: true, maxIntensity: 2,
   },
   {
     kind: "outlook", id: "windOutlook", title: "SPC Damaging Wind Probability", nav: "Damaging Wind", group: "severe", legend: "WIND PROBABILITY", days: [1, 2],
@@ -475,6 +529,20 @@ function hexToRgb(hex: string) {
   return [Number.parseInt(hex.slice(1, 3), 16), Number.parseInt(hex.slice(3, 5), 16), Number.parseInt(hex.slice(5, 7), 16)];
 }
 
+/**
+ * The colour for a value on a **field** product — interpolated between the two stops it
+ * falls between.
+ *
+ * Field products are continuous measurements and blend; the categorical products do not,
+ * and they are a different code path entirely (SPC/WPC outlooks carry the issuing centre's
+ * own discrete fills, and alerts paint flat `ALERT_COLORS` on their own layer). Don't
+ * unify the two.
+ *
+ * Banding the field was tried and reverted: the stops are 10° apart on the temperature
+ * scales, so a real day spanning 78–90°F collapsed into two flat blocks and the map lost
+ * every gradient that made it readable. The legend's flat per-stop swatches are a key to
+ * the scale, not a claim that the field is quantised.
+ */
 function colorFor(value: number, stops: ColorStop[]) {
   if (value <= stops[0].value) return hexToRgb(stops[0].color);
   if (value >= stops.at(-1)!.value) return hexToRgb(stops.at(-1)!.color);
@@ -1007,9 +1075,26 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     }
   }
   rasterContext.putImageData(image, 0, 0);
-  // Deliberately unclipped: the field covers the whole frame using real data from the
-  // neighbouring offices, and the CWA outline below is what marks the forecast area.
+  // For a single office the raster is deliberately unclipped: its lattice covers the whole
+  // frame using real data from the neighbouring offices, and the CWA outline marks the
+  // forecast area.
+  //
+  // A wide-frame view has no CWA to outline and extends far past the nearest gridpoint, so
+  // the distance fade trailed colour hundreds of miles into the Gulf, the Atlantic and
+  // Mexico — a soft gradient implying a forecast where NWS publishes none. Those views clip
+  // to the land they cover instead, giving a hard edge on the coastline and the national
+  // borders. The state polygons are already in the bundle, and canvas fills a multi-subpath
+  // with the nonzero rule, so this unions them for free — carrying the exact CWA union
+  // instead measured at ~6 MB against a 187 KB bundle, for a coastal strip's difference.
+  const clipToLand = !bundle.cwa && bundle.states.length > 0;
+  if (clipToLand) {
+    context.save();
+    context.beginPath();
+    for (const area of bundle.states) addAreaToPath(context, area, projectPoint);
+    context.clip();
+  }
   context.drawImage(raster, plot.x, plot.y, plot.width, plot.height);
+  if (clipToLand) context.restore();
   releaseCanvas(raster);
 
   drawReferenceLayers(context, bundle, projectPoint);
@@ -1092,9 +1177,13 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
   commitPlot(canvas, mapCanvas, spec.title, forecastHeaderLines(forecast, dayIndex, office), await loadHeaderMark());
 }
 
-function traceOutlookArea(context: CanvasRenderingContext2D, geometry: OutlookGeometry, projectPoint: (lon: number, lat: number) => [number, number]) {
+/**
+ * Adds one area's rings to the current path without starting a new one, so several
+ * features can be accumulated into a single path — which is how the land clip unions 50
+ * state polygons without any polygon-union code.
+ */
+function addAreaToPath(context: CanvasRenderingContext2D, geometry: AreaGeometry | OutlookGeometry, projectPoint: (lon: number, lat: number) => [number, number]) {
   const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
-  context.beginPath();
   for (const polygon of polygons) {
     for (const ring of polygon) {
       ring.forEach((position, index) => {
@@ -1104,6 +1193,11 @@ function traceOutlookArea(context: CanvasRenderingContext2D, geometry: OutlookGe
       context.closePath();
     }
   }
+}
+
+function traceOutlookArea(context: CanvasRenderingContext2D, geometry: OutlookGeometry, projectPoint: (lon: number, lat: number) => [number, number]) {
+  context.beginPath();
+  addAreaToPath(context, geometry, projectPoint);
 }
 
 /**
@@ -1151,18 +1245,21 @@ function hatchPattern(context: CanvasRenderingContext2D, group: number) {
   // Drawn at 2× and scaled back down below, so the hatching is as crisp as the map.
   tileContext.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
   tileContext.strokeStyle = spec.color;
-  tileContext.lineWidth = 1.2;
+  tileContext.lineWidth = spec.lineWidth;
+  // The dash pattern has to divide the tile diagonal evenly or the dashes shift at every
+  // repeat and the hatch shimmers; HATCH_TILE is 9, whose diagonal is ~12.7, so a 4.4 unit
+  // period lands close enough that the seam is invisible at plot scale.
+  tileContext.setLineDash(spec.dash);
   tileContext.beginPath();
-  // Each line is drawn a tile past both edges so the diagonals meet across repeats
-  // instead of breaking at every tile seam.
-  if (spec.style !== "forward") {
-    for (const offset of [-HATCH_TILE, 0, HATCH_TILE]) {
-      tileContext.moveTo(offset, 0);
-      tileContext.lineTo(offset + HATCH_TILE, HATCH_TILE);
-    }
-  }
-  if (spec.style !== "backward") {
-    for (const offset of [0, HATCH_TILE, HATCH_TILE * 2]) {
+  // `lines` strokes per tile, evenly spaced, each drawn a full tile past both edges so the
+  // diagonals meet across repeats instead of breaking at every tile seam. The step has to
+  // divide the tile exactly or the seam reappears as a visible stripe.
+  const step = HATCH_TILE / spec.lines;
+  for (let index = -spec.lines; index < spec.lines * 2; index += 1) {
+    const offset = index * step;
+    tileContext.moveTo(offset, 0);
+    tileContext.lineTo(offset + HATCH_TILE, HATCH_TILE);
+    if (spec.cross) {
       tileContext.moveTo(offset, 0);
       tileContext.lineTo(offset - HATCH_TILE, HATCH_TILE);
     }
@@ -1269,8 +1366,11 @@ async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookReco
   if (spec.hatched) {
     const keyTop = swatchTop + spec.categories.length * rowHeight + 16;
     context.font = `600 12px ${PLOT_FONT_FAMILY}`;
-    outlinedText(context, "CONDITIONAL INTENSITY", swatchX, keyTop, 3);
-    HATCH_GROUPS.forEach((entry, index) => {
+    outlinedText(context, "INTENSITY", swatchX, keyTop, 3);
+    // Only the tiers this product is actually issued with — SPC's own hail key stops at 2
+    // — but the *rendering* below never filters, so a group above this still draws rather
+    // than silently vanishing if SPC starts issuing one.
+    HATCH_GROUPS.filter((entry) => entry.group <= (spec.maxIntensity ?? 3)).forEach((entry, index) => {
       const y = keyTop + 10 + index * rowHeight;
       const pattern = patterns.get(entry.group) ?? hatchPattern(context, entry.group);
       context.fillStyle = "rgba(255, 255, 255, 0.85)";
@@ -1288,6 +1388,159 @@ async function renderOutlookPlot(canvas: HTMLCanvasElement, outlook: OutlookReco
 
   drawSignature(context, width, height);
   commitPlot(canvas, mapCanvas, spec.title, outlookHeaderLines(outlook, spec), await loadHeaderMark());
+}
+
+/**
+ * How dangerous the hazard is, independent of its tier. First match wins, so the more
+ * specific pattern has to come first — `flash flood` above `flood`, `severe thunderstorm`
+ * above the bare `storm` in the marine group.
+ *
+ * Tier alone is not enough to order alerts: a Severe Thunderstorm Watch and a Flood Watch
+ * are both watches and both report CAP severity "Severe", so without this they tie and
+ * paint in whatever order the upstream happened to list them.
+ */
+const ALERT_HAZARDS: Array<[RegExp, number]> = [
+  [/tornado/i, 95],
+  [/hurricane|typhoon|storm surge/i, 90],
+  [/severe thunderstorm/i, 85],
+  [/tropical storm/i, 80],
+  [/flash flood/i, 75],
+  [/flood/i, 65],
+  [/blizzard|ice storm|winter storm/i, 60],
+  [/winter weather|snow|freezing|sleet/i, 55],
+  [/fire weather|red flag/i, 50],
+  [/extreme heat|heat|wind chill|extreme cold|cold|freeze|frost/i, 45],
+  [/dust|high wind|wind advisory/i, 40],
+  [/gale|small craft|marine|waterspout/i, 30],
+  [/rip current|beach|high surf|surf/i, 25],
+];
+
+/**
+ * Paint and sort order for one alert: tier first, hazard second.
+ *
+ * Warnings sit above watches above advisories above statements, because that is the
+ * distinction the public reads first — a Flood Warning genuinely outranks a Severe
+ * Thunderstorm Watch. Within a tier the hazard breaks the tie, so a Severe Thunderstorm
+ * Watch lands above a Flood Watch and a Tornado Warning above a Flash Flood Warning.
+ *
+ * Tier is multiplied out so it can never be overcome by the hazard score, and both come
+ * off the event name — CAP `severity` carries neither (a Flood Watch and a Tornado
+ * Warning are both "Severe").
+ */
+function alertRank(event: string) {
+  const tier = /\bwarning\b/i.test(event) ? 3
+    : /\bwatch\b/i.test(event) ? 2
+    : /\badvisory\b/i.test(event) ? 1
+    : 0;
+  const hazard = ALERT_HAZARDS.find(([pattern]) => pattern.test(event))?.[1] ?? 10;
+  return tier * 1000 + hazard;
+}
+
+/**
+ * The shapes one alert covers.
+ *
+ * Prefers the alert's own polygon when it has one — a storm-based warning is a hand-drawn
+ * box far tighter than the counties it clips — and otherwise resolves `affectedZones`
+ * against the office's zone bundle. A zone the bundle doesn't carry is skipped rather than
+ * failing the alert: it means the alert reaches into a neighbouring office, and drawing it
+ * would need geometry this office's file has no reason to hold.
+ */
+function alertGeometries(alert: AlertRecord, zones: ZoneIndex): AreaGeometry[] {
+  if (alert.geometry) return [alert.geometry];
+  return alert.zones.map((code) => zones[code]).filter((geometry): geometry is AreaGeometry => Boolean(geometry));
+}
+
+async function renderAlertPlot(canvas: HTMLCanvasElement, alerts: AlertRecord[], zones: ZoneIndex, bundle: OfficeBundle, office: OfficeId, generatedAt: string | null) {
+  const { mapCanvas, context, projectPoint, width, height } = await beginMapCanvas(bundle);
+
+  const drawable = alerts
+    .map((alert) => ({ alert, geometries: alertGeometries(alert, zones) }))
+    .filter((entry) => entry.geometries.length > 0)
+    .sort((a, b) => alertRank(a.alert.event) - alertRank(b.alert.event));
+
+  // Alerts are composited on their own layer at full opacity, and that whole layer is
+  // then laid over the map once.
+  //
+  // Painting them straight onto the map at 0.55 each meant every overlap *blended*: a
+  // Severe Thunderstorm Watch over a Flood Watch came out olive, a colour in neither the
+  // legend nor NWS's palette, and the same watch read as a different colour depending on
+  // what happened to be underneath it. Alerts overlap almost everywhere — that is the
+  // normal case, not an edge case. Opaque within the layer means the highest-ranked alert
+  // covering a pixel is the only one you see there, so a given hazard is always exactly
+  // its own colour; `drawable` is sorted ascending, so the last one painted wins.
+  const layer = document.createElement("canvas");
+  layer.width = mapCanvas.width;
+  layer.height = mapCanvas.height;
+  const layerContext = layer.getContext("2d")!;
+  layerContext.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
+  layerContext.lineJoin = "round";
+  for (const { alert, geometries } of drawable) {
+    const color = ALERT_COLORS[alert.event] ?? DEFAULT_ALERT_COLOR;
+    for (const geometry of geometries) {
+      traceOutlookArea(layerContext, geometry, projectPoint);
+      layerContext.fillStyle = color.fill;
+      layerContext.fill("evenodd");
+      layerContext.strokeStyle = color.stroke;
+      layerContext.lineWidth = 1.6;
+      layerContext.stroke();
+    }
+  }
+  context.globalAlpha = ALERT_LAYER_ALPHA;
+  context.drawImage(layer, 0, 0, width, height);
+  context.globalAlpha = 1;
+  releaseCanvas(layer);
+
+  drawReferenceLayers(context, bundle, projectPoint);
+  context.restore();
+
+  if (!drawable.length) {
+    context.textAlign = "center";
+    context.font = `600 19px ${PLOT_FONT_FAMILY}`;
+    outlinedText(context, "NO ACTIVE WATCHES OR WARNINGS", width / 2, height / 2 - 6, 4);
+    context.font = `600 13px ${PLOT_FONT_FAMILY}`;
+    outlinedText(context, `for the ${office} forecast area`, width / 2, height / 2 + 15, 3);
+    context.textAlign = "left";
+  } else {
+    // Unlike an outlook, the legend lists only what is actually in force. The full NWS
+    // catalogue is 111 event types, so a fixed legend would be a wall of colours with two
+    // of them used — and here there is no cross-day comparability to preserve.
+    const events = [...new Set(drawable.map((entry) => entry.alert.event))]
+      .sort((a, b) => alertRank(b) - alertRank(a) || a.localeCompare(b));
+    const shown = events.slice(0, 9);
+    const swatchX = 26;
+    const swatchTop = 54;
+    const rowHeight = 26;
+    context.textAlign = "left";
+    context.font = `600 12px ${PLOT_FONT_FAMILY}`;
+    outlinedText(context, "ACTIVE HAZARDS", swatchX, swatchTop - 10, 3);
+    shown.forEach((event, index) => {
+      const color = ALERT_COLORS[event] ?? DEFAULT_ALERT_COLOR;
+      const y = swatchTop + index * rowHeight;
+      // White backing, then the fill at the layer's own alpha: the swatch then reads as
+      // the exact colour the hazard takes over light terrain, so the key can be matched
+      // against the map rather than merely resembling it.
+      context.fillStyle = "#ffffff";
+      context.fillRect(swatchX, y, 34, 18);
+      context.fillStyle = color.fill;
+      context.globalAlpha = ALERT_LAYER_ALPHA;
+      context.fillRect(swatchX, y, 34, 18);
+      context.globalAlpha = 1;
+      context.strokeStyle = color.stroke;
+      context.lineWidth = 1.4;
+      context.strokeRect(swatchX, y, 34, 18);
+      context.font = `600 12px ${PLOT_FONT_FAMILY}`;
+      outlinedText(context, event.toUpperCase(), swatchX + 42, y + 13, 3);
+    });
+    if (events.length > shown.length) {
+      outlinedText(context, `+${events.length - shown.length} MORE`, swatchX, swatchTop + shown.length * rowHeight + 13, 3);
+    }
+  }
+
+  drawSignature(context, width, height);
+  commitPlot(canvas, mapCanvas, "Active Watches & Warnings", {
+    valid: drawable.length ? `${drawable.length} ACTIVE ${drawable.length === 1 ? "ALERT" : "ALERTS"}` : "NO ACTIVE ALERTS",
+    issued: `${office === "US" ? "NWS" : `NWS ${office}`}${generatedAt ? `  CHECKED  ${stampLabel(generatedAt)}` : ""}`,
+  }, await loadHeaderMark());
 }
 
 function ForecastPlot({ spec, forecast, outlook, outlookPending, bundle, dayIndex, office }: { spec: ProductSpec; forecast: ForecastPayload; outlook: OutlookRecord | null; outlookPending: boolean; bundle: OfficeBundle; dayIndex: number; office: Office }) {
@@ -1341,6 +1594,97 @@ function ForecastPlot({ spec, forecast, outlook, outlookPending, bundle, dayInde
         data-render-state={ready ? "ready" : "rendering"}
       />
     </article>
+  );
+}
+
+function alertWindow(alert: AlertRecord) {
+  const start = alert.onset ?? alert.sent;
+  const end = alert.ends ?? alert.expires;
+  if (start && end) return `${stampLabel(start)} → ${stampLabel(end)}`;
+  if (end) return `UNTIL ${stampLabel(end)}`;
+  return start ? `FROM ${stampLabel(start)}` : "";
+}
+
+function AlertsPlot({ alerts, zones, bundle, office, generatedAt }: { alerts: AlertRecord[]; zones: ZoneIndex; bundle: OfficeBundle; office: Office; generatedAt: string | null }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (!canvas.current) return;
+    let active = true;
+    setReady(false);
+    const target = canvas.current;
+    void enqueueRender(() => renderAlertPlot(target, alerts, zones, bundle, office.id, generatedAt))
+      .then(() => { if (active) setReady(true); });
+    return () => { active = false; };
+  }, [alerts, zones, bundle, office, generatedAt]);
+
+  const download = useCallback(() => {
+    if (!canvas.current || !ready) return;
+    canvas.current.toBlob((blob) => {
+      if (!blob) return;
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `${office.id.toLowerCase()}-active-alerts.png`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }, "image/png");
+  }, [ready, office]);
+
+  return (
+    <article className="forecast-product">
+      <div className="product-bar">
+        <h3>Active Watches &amp; Warnings</h3>
+        <button onClick={download} disabled={!ready}>{ready ? "Download PNG ↓" : "Rendering…"}</button>
+      </div>
+      {/* No data-product-id here on purpose: the publisher discovers what to capture by
+          querying canvas[data-product-id], and this is a live map with no product entry
+          and no day, so it must not be picked up as one. */}
+      <canvas
+        ref={canvas}
+        className="forecast-canvas"
+        role="img"
+        aria-label={`Active watches and warnings for the ${office.id} forecast area`}
+        data-office={office.id}
+        data-render-state={ready ? "ready" : "rendering"}
+      />
+    </article>
+  );
+}
+
+function AlertsPanel({ alerts, zones, bundle, office, generatedAt, pending, error }: { alerts: AlertRecord[] | null; zones: ZoneIndex | null; bundle: OfficeBundle | null; office: Office; generatedAt: string | null; pending: boolean; error: boolean }) {
+  // The national view is not a CWA, so no zone declares it and there is no zone file to
+  // join against. Say so rather than rendering an empty map that looks broken.
+  if (office.id === NATIONAL.id) {
+    return <div className="gallery-message">Watches and warnings are issued per forecast office — pick an office to see them.</div>;
+  }
+  if (error) return <div className="gallery-message">Active alerts are temporarily unavailable.</div>;
+  if (pending || !alerts || !zones || !bundle) return <div className="gallery-message">Loading active watches and warnings…</div>;
+
+  const sorted = [...alerts].sort((a, b) => alertRank(b.event) - alertRank(a.event) || a.event.localeCompare(b.event));
+  return (
+    <>
+      <section className="forecast-gallery" aria-label="Active watches and warnings" data-office={office.id}>
+        <AlertsPlot alerts={alerts} zones={zones} bundle={bundle} office={office} generatedAt={generatedAt} />
+      </section>
+      {sorted.length > 0 && (
+        <ul className="alert-list">
+          {sorted.map((alert) => {
+            const color = ALERT_COLORS[alert.event] ?? DEFAULT_ALERT_COLOR;
+            return (
+              <li key={alert.id} className="alert-item">
+                <span className="alert-swatch" style={{ background: color.fill, borderColor: color.stroke }} aria-hidden />
+                <div className="alert-body">
+                  <h4>{alert.event}</h4>
+                  <p className="alert-area">{alert.areaDesc}</p>
+                  <p className="alert-window">{alertWindow(alert)}</p>
+                  {alert.headline && <p className="alert-headline">{alert.headline}</p>}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
   );
 }
 
@@ -1909,6 +2253,18 @@ export function ForecastGraphic() {
   // Distinct from "no outlook": tracks whether the outlook fetches have settled at all.
   const [outlookPending, setOutlookPending] = useState(true);
   const [dayIndex, setDayIndex] = useState(0);
+  // Alerts are a view, not a fourth day: they describe what is in force right now, so they
+  // sit alongside the day tabs rather than inside one. Kept as its own flag so `dayIndex`
+  // stays a real day index everywhere else and nothing has to decode a sentinel value.
+  const [showAlerts, setShowAlerts] = useState(false);
+  // All three are stamped with the office they describe rather than cleared when it
+  // changes. Clearing meant a synchronous setState at the top of the effect — which React
+  // rightly objects to — and stamping also closes the window it was there to cover: a
+  // stale payload can never be paired with the new office's zone geometry, because the
+  // office has to match before either is read.
+  const [zoneIndex, setZoneIndex] = useState<{ office: OfficeId; zones: ZoneIndex } | null>(null);
+  const [alerts, setAlerts] = useState<{ office: OfficeId; payload: AlertPayload } | null>(null);
+  const [alertsError, setAlertsError] = useState<OfficeId | null>(null);
   // Tracked separately per source. A single boolean could never be cleared correctly:
   // whichever loader succeeded last would wipe the other's failure, and the bundle loader
   // never cleared it at all — so one transient miss pinned the page on "temporarily
@@ -1993,6 +2349,53 @@ export function ForecastGraphic() {
     const refresh = window.setInterval(load, 15 * 60 * 1000);
     return () => { active = false; window.clearInterval(refresh); };
   }, [manifestNonce]);
+
+  // The polygons alerts are drawn on. Fetched only once the alerts view is opened, and
+  // only per office — ~180 KB that most visits never need, the same reason the place index
+  // waits for the first search. Zone boundaries change on the order of years, so this is
+  // never re-fetched on the alert refresh timer.
+  useEffect(() => {
+    if (!showAlerts || office.id === NATIONAL.id) return;
+    let active = true;
+    void (async () => {
+      try {
+        const response = await fetch(`/zones/${office.id}.json`);
+        if (!response.ok) throw new Error(String(response.status));
+        const bundle = await response.json() as { zones: ZoneIndex };
+        if (active) setZoneIndex({ office: office.id, zones: bundle.zones });
+      } catch {
+        if (active) setAlertsError(office.id);
+      }
+    })();
+    return () => { active = false; };
+  }, [showAlerts, office.id]);
+
+  const officeZones = zoneIndex?.office === office.id ? zoneIndex.zones : null;
+  const officeAlerts = alerts?.office === office.id ? alerts.payload : null;
+
+  // Active alerts. Refreshed far more often than anything else on the page: a warning's
+  // lifetime is measured in tens of minutes, so the 15-minute manifest cadence would show
+  // expired warnings and miss new ones for most of their duration.
+  useEffect(() => {
+    if (!showAlerts || !officeZones) return;
+    let active = true;
+    const codes = Object.keys(officeZones).join(",");
+    const load = async () => {
+      try {
+        const response = await fetch(`/api/alerts?zones=${codes}`);
+        if (!response.ok) throw new Error(String(response.status));
+        const payload = await response.json() as AlertPayload;
+        if (!active) return;
+        setAlerts({ office: office.id, payload });
+        setAlertsError(null);
+      } catch {
+        if (active) setAlertsError(office.id);
+      }
+    };
+    void load();
+    const refresh = window.setInterval(load, 2 * 60 * 1000);
+    return () => { active = false; window.clearInterval(refresh); };
+  }, [showAlerts, officeZones, office.id]);
 
   // SPC and WPC outlooks are national, so they load once and are shared by every office.
   // Only the live-canvas path needs them; published offices ship a baked PNG. The two
@@ -2102,8 +2505,13 @@ export function ForecastGraphic() {
             <span>Forecast catalogue</span>
             <i>/</i>
             <nav className="day-switcher" aria-label="Forecast day">
+              {/* Ahead of Day 1, because it is the only thing here describing right now
+                  rather than a forecast day — and the first thing worth knowing. */}
+              <button type="button" data-view="alerts" className={showAlerts ? "is-active" : ""} aria-pressed={showAlerts} onClick={() => setShowAlerts(true)}>
+                Alerts
+              </button>
               {FORECAST_DAYS.map((index) => (
-                <button key={index} type="button" data-day-index={index} className={dayIndex === index ? "is-active" : ""} aria-pressed={dayIndex === index} onClick={() => setDayIndex(index)}>
+                <button key={index} type="button" data-day-index={index} className={!showAlerts && dayIndex === index ? "is-active" : ""} aria-pressed={!showAlerts && dayIndex === index} onClick={() => { setShowAlerts(false); setDayIndex(index); }}>
                   Day {index + 1}
                 </button>
               ))}
@@ -2114,12 +2522,24 @@ export function ForecastGraphic() {
 
         <div className="workspace-content" id="overview">
           <header className="catalog-heading">
-            <h1>Day {dayIndex + 1} Forecast Graphics</h1>
+            <h1>{showAlerts ? "Active Watches & Warnings" : `Day ${dayIndex + 1} Forecast Graphics`}</h1>
           </header>
 
-          {!hasPublishedOffice && !officeForecast && !error && <div className="gallery-message">Loading the latest NWS forecast plots…</div>}
-          {!hasPublishedOffice && error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
-          {publishedDay && (
+          {showAlerts && (
+            <AlertsPanel
+              alerts={officeAlerts?.alerts ?? null}
+              zones={officeZones}
+              bundle={officeBundle}
+              office={office}
+              generatedAt={officeAlerts?.generatedAt ?? null}
+              pending={!officeAlerts || !officeZones || !officeBundle}
+              error={alertsError === office.id}
+            />
+          )}
+
+          {!showAlerts && !hasPublishedOffice && !officeForecast && !error && <div className="gallery-message">Loading the latest NWS forecast plots…</div>}
+          {!showAlerts && !hasPublishedOffice && error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
+          {!showAlerts && publishedDay && (
             <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} published forecast plots`} data-forecast-source="published" data-office={office.id}>
               {availableProducts.map((spec, index) => {
                 const asset = publishedDay.products[spec.id];
@@ -2127,7 +2547,7 @@ export function ForecastGraphic() {
               })}
             </section>
           )}
-          {!hasPublishedOffice && officeForecast && officeBundle && (
+          {!showAlerts && !hasPublishedOffice && officeForecast && officeBundle && (
             <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} forecast plots`} data-office={office.id}>
               {availableProducts.map((spec) => (
                 <ForecastPlot key={spec.id} spec={spec} forecast={officeForecast} outlook={spec.kind === "outlook" ? findOutlook(outlooks, spec, dayIndex + 1) : null} outlookPending={outlookPending} bundle={officeBundle} dayIndex={dayIndex} office={office} />

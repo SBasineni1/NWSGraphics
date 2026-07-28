@@ -78,6 +78,12 @@ fallback. Don't "fix" it by widening the batch size — batching cannot buy back
   `build-counties.mjs`, `build-overlays.mjs` are the **superseded four-office chain**.
   They still write `public/cwa.geojson` and friends, which nothing in the client reads
   any more. Keep them only until the last reference goes.
+- `node scripts/build-office-zones.mjs` — regenerate `public/zones/{OFFICE}.json`, the
+  alert zone geometry (~58 MB across 125 files, seconds once cached). Depends on
+  `public/offices/` already existing: it reads each bundle's frame and zoom so the zone
+  simplification matches the counties drawn under it.
+- `node scripts/build-alert-colors.mjs` — regenerate `app/alert-colors.ts` from the NWS
+  watch/warning renderer. Generated, like `app/offices.ts` — don't hand-edit.
 - `node scripts/build-places.mjs` — regenerate the search index. Independent of the
   chain above: it fetches all 125 CWA polygons itself and doesn't read `public/`.
   Re-run when the Census ships a new gazetteer, not when an office becomes ready.
@@ -144,6 +150,62 @@ Labelled cities and the interpolation lattice are generated, not authored:
   file). Label ranking falls back to land area, which is why HFO and SJU are sensible
   rather than alphabetical. The gazetteer is decoded as **UTF-8**, not latin1, or Spanish
   names arrive as "BayamÃ³n".
+
+## Active watches & warnings
+
+An **Alerts** tab sits before Day 1 in the day switcher. It is a view, not a fourth day —
+alerts describe what is in force right now — so `dayIndex` stays a real day index and the
+view rides its own `showAlerts` flag rather than a sentinel value.
+
+- **Most alerts carry no geometry.** 12 of 14 sampled NY alerts had `geometry: null` and
+  described themselves only through `affectedZones`, a list of zone URLs. Drawing one is a
+  join against zone shapes, not a fetch of its outline. Storm-based warnings *do* carry a
+  polygon, and it is preferred when present — it is far tighter than the counties it clips.
+- **`public/zones/{OFFICE}.json`** is that join table, built by `build-office-zones.mjs`:
+  UGC code → polygon, ~474 KB per office (~58 MB total, AKQ the largest at 1.9 MB raw /
+  469 KB gzipped). **Zones are claimed by frame overlap, not by the `cwa` that issues
+  them**, so the map fills the plot the way the forecast field does rather than stopping at
+  the office border — PHI draws 318 zones and pulls alerts from nine offices. The owning
+  office is unioned in regardless, so a zone marginally outside its own frame is not lost.
+  That is what took this from 22 MB to 58 MB; ownership-only is the lever if it needs to
+  shrink, at the cost of masking back to the CWA. Fetched only when the tab is opened, like the
+  place index, because most visits never need it. All three zone families are required —
+  county (`NYC105`) and forecast (`NYZ072`) are different shapes over the same land and
+  alerts use both interchangeably, while marine (`ANZ335`) carries everything over water,
+  so dropping it costs a coastal office every Small Craft Advisory.
+- **Zone geometry comes from the ArcGIS reference map, not `api.weather.gov/zones`.** That
+  endpoint ignores `include_geometry=true` and returns `geometry: null` for all 8,747
+  zones. The reference map is the same service the CWA outlines come from, so the shapes
+  agree by construction. The UGC code is assembled per layer — counties from state+FIPS,
+  public zones from state+zone, marine straight off the feature — and getting it wrong
+  doesn't error, it just matches no alert.
+- **`/api/alerts` must send one comma-joined `zone` value, never repeated `zone=`
+  parameters.** Repeating them does not union: results *fall* as zones are added, and at 66
+  zones the upstream returns nothing at all — indistinguishable from a quiet day. Measured
+  side by side: repeated 1→5, 5→1, 20→2, 66→0; comma 1→5, 5→8, 20→11, 66→16. A test pins
+  this. The route makes exactly one upstream request regardless of zone count, which is why
+  it is affordable where `/api/forecast` is not.
+- Colours are the NWS renderer's own, generated into `app/alert-colors.ts` by
+  `build-alert-colors.mjs` (111 event types, keyed by the alerts API's `event` string).
+  CAP `severity` cannot substitute — a Flood Watch and a Tornado Warning are both "Severe".
+- **Alerts composite on their own layer at full opacity, then that layer goes over the map
+  once** (`ALERT_LAYER_ALPHA`). Painting each alert at 0.55 straight onto the map blended
+  every overlap: a Severe Thunderstorm Watch over a Flood Watch came out olive — a colour
+  in neither the legend nor NWS's palette — and a hazard changed colour depending on what
+  happened to sit under it. Alerts overlap almost everywhere, so this is the normal case.
+  Opaque within the layer means the highest-ranked alert covering a pixel is the only one
+  seen there. Measured after the change, every alert fill on the map is within 4–10 RGB of
+  its legend swatch. The legend swatch is drawn on a white backing at the same alpha so the
+  key can be matched against the map rather than merely resembling it.
+  Paint and sort order is **tier first, hazard second** (`alertRank`): warnings above
+  watches above advisories above statements, then the hazard breaks ties inside a tier so a
+  Severe Thunderstorm Watch lands above a Flood Watch. Tier alone is not enough — those two
+  are both watches and both report CAP severity "Severe" — and tier is multiplied out so a
+  hazard score can never overturn it. Ordering is tested, not just its shape.
+- The alerts canvas deliberately carries **no `data-product-id`**: the publisher discovers
+  what to capture with `canvas[data-product-id]`, and this is a live map with no `PRODUCTS`
+  entry and no day. The refresh interval is 2 minutes, far shorter than anything else on
+  the page, because a warning's lifetime is measured in tens of minutes.
 
 ## Finding an office (ZIP / town search)
 
@@ -213,6 +275,17 @@ slice covers its full render frame using real gridpoint data from neighbouring
 offices, and the CWA is marked by its outline alone. Two things make that
 affordable and must not be undone casually:
 
+**…but a wide-frame view clips the field to land.** A view with no CWA (`bundle.cwa ===
+null` — national, and regions built the same way) reaches far past the nearest gridpoint,
+so the distance fade trailed colour hundreds of miles into the Gulf, the Atlantic and
+Mexico, implying a forecast where NWS publishes none. `renderPlot` clips the raster to the
+bundle's own state polygons, accumulated into **one** path so the nonzero fill rule unions
+them — clipping per state would intersect them and leave nothing. This is land, not the
+exact CWA union: carrying all 125 CWA outlines measured **~6 MB against a 187 KB bundle**,
+and simplifying them harder makes it *worse*, because `simplify` returns the original ring
+whenever a closed ring drops under four points. A single office stays unclipped — its
+lattice legitimately covers the frame with neighbours' data.
+
 - `solveFieldWeights` / `fieldSolveFor` — which eight gridpoints are nearest a lattice
   cell, and their weights, depend only on geometry, so an office solves that once and
   all forty of its plots reuse it. This was the largest single cost in a render
@@ -224,14 +297,21 @@ affordable and must not be undone casually:
   bilinearly upsampled. The `Math.ceil((size - 1) / FIELD_STRIDE) + 1` sample
   counts are deliberate; drop the `+ 1` and the last stride of pixels has no
   upper neighbour and the raster ends in a visible seam.
+- **Field products blend; categorical ones don't — and they are separate code paths.**
+  `colorFor` interpolates between stops for the interpolated rasters. Banding it was tried
+  and reverted: the temperature stops are 10° apart, so a real 78–90°F day collapsed into
+  two flat blocks and the map lost every gradient that made it readable. The legend's flat
+  per-stop swatches key the scale; they are not a claim that the field is quantised. The
+  discrete look belongs to the alerts layer and the SPC/WPC outlooks, which never touch
+  `colorFor`.
 - `colorRamp()` — a 4096-entry LUT per product, since `colorFor` re-parses hex
   strings and can't run 684,000 times per plot. Entries must be produced *by*
   `colorFor`; the stops aren't evenly spaced (QPF runs 0, 0.01, 0.1, 0.25 … 12).
   **The LUT is uniform in value while the stops are not, so its size is set by the
-  worst ratio, not by a round number.** QPF tops out at 12" but crowds five stops
-  below 0.5", so widening its scale silently starved the low end: at 1024 the
-  0.01–0.1 band — most of the coloured area on a typical map — got 8 steps for a
-  68-unit RGB traverse and banded visibly. Raise the size along with the top stop.
+  worst ratio, not by a round number.** QPF tops out at 12" but crowds five stops below
+  0.5", so widening its scale silently starved the low end: at 1024 the 0.01–0.1 band —
+  most of the coloured area on a typical map — got 8 steps for a 68-unit RGB traverse and
+  banded visibly. Raise the size along with the top stop.
 
 ## Publishing pipeline
 
@@ -407,6 +487,10 @@ the schedule against Actions and the *published office count* against R2.
   error, but expect a newly added product to be missing from published offices
   until the job runs again — which it will, since a changed `GITHUB_SHA` defeats
   the unchanged-check.
+- `lib/geo-simplify.mjs` holds the Douglas-Peucker simplification, longitude shifting and
+  rounding shared by `build-office-bundles` and `build-office-zones`, for the same reason
+  `map-frame.mjs` exists: both must agree exactly, or an alert polygon stops sitting on the
+  county it covers. Extracting it was verified byte-identical across all 126 bundles.
 - `lib/map-frame.mjs` holds the Web Mercator math shared by the renderer and
   the build scripts. Both must agree exactly: `build-grid-points.mjs` lattices
   the frames `ForecastGraphic.tsx` draws, so drift here shows up as missing
