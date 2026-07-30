@@ -116,6 +116,13 @@ console.log("loading office frames…");
 const offices = new Map();
 for (const name of (await readdir(officeDir)).filter((n) => n.endsWith(".json"))) {
   const bundle = JSON.parse(await readFile(new URL(name, officeDir), "utf8"));
+  // Wide views are built like any other. They were skipped here on the grounds that the
+  // national frame claims every zone in the country and would cost "megabytes apiece" —
+  // which measured the wrong number. Raw, US is 8.3 MB; **gzipped, which is what a browser
+  // actually transfers, it is 110 KB — under a third of PHI's 344 KB** — because the
+  // tolerance is derived from the frame's zoom and zoom 4 is ~16x coarser than zoom 8, so
+  // each of those 7,451 polygons is a handful of points. A wide view's zone bundle is
+  // cheaper than an office's, not dearer.
   offices.set(bundle.office, {
     zoom: bundle.zoom,
     frame: frameBounds(bundle.bounds),
@@ -160,9 +167,6 @@ for (const spec of ZONE_LAYERS) {
         ? { west: plain.west + offset, east: plain.east + offset, south: plain.south, north: plain.north }
         : plain;
       if (officeId !== owner && !overlaps(box, office.frame)) continue;
-      // The national view would take all 7,933 zones — far too many to draw or to name in
-      // an alerts query — and it is not a CWA, so it has no alerts view at all.
-      if (officeId === "US") continue;
       office.zones[id] = {
         type: feature.geometry.type,
         coordinates: prepare(
@@ -171,6 +175,10 @@ for (const spec of ZONE_LAYERS) {
           toleranceFor(office.zoom),
           true,
           1e4,
+          // Collapse a sub-pixel ring to its bounding quad rather than keeping it whole.
+          // Only the zone build asks for this: build-office-bundles must keep producing
+          // byte-identical output, and a CWA outline is never sub-pixel on its own map.
+          true,
         ),
       };
       office.counts[spec.kind] += 1;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
+import { AREAS, isWideView } from "../lib/areas.mjs";
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -336,7 +337,8 @@ test("browses offices by NWS region, with the national map staked out", async ()
   assert.match(component, /disabled=\{!ready\}/);
   assert.match(component, /office-national/);
   assert.match(component, /data-region="national"/);
-  assert.match(component, /National map/);
+  // Case-insensitive: this pins that the row exists, not how the label is capitalised.
+  assert.match(component, /National Map/i);
   assert.match(component, /office-back/);
   // Escape unwinds a level before it closes the whole menu.
   assert.match(component, /if \(expanded && openRegion\) \{\s*\n\s*setOpenRegion\(null\);/);
@@ -350,6 +352,48 @@ test("browses offices by NWS region, with the national map staked out", async ()
   assert.match(component, /const enterRegion = useCallback/);
   // Disabled regions are skipped rather than trapping the keyboard on a dead row.
   assert.match(component, /querySelectorAll<HTMLButtonElement>\("button:not\(\[disabled\]\)"\)/);
+});
+
+test("the areas are one row that opens a level, not seven rows inline", async () => {
+  const [component, offices] = await Promise.all([
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/offices.ts", import.meta.url), "utf8"),
+  ]);
+
+  // The sentinel rides `openRegion`, so everything already hung off that level — the back
+  // button, Escape, ArrowLeft, the focus restore — covers the areas without a second
+  // mechanism. It is only safe because RegionId is a closed set of six full words, so
+  // findRegion can never resolve it to a real region and shadow the areas branch.
+  assert.match(component, /const AREAS_LEVEL = "areas"/);
+  for (const region of ["eastern", "central", "southern", "western", "alaska", "pacific"]) {
+    assert.notEqual(region, "areas");
+  }
+  assert.doesNotMatch(offices, /id: "areas"/, "the areas sentinel must not collide with a region id");
+
+  // One row at the top level that drills in, marked like the home region when an area is
+  // showing. If this ever renders the areas inline again, the top of the menu goes from
+  // nine rows to sixteen and stops fitting without a scroll.
+  assert.match(component, /data-region=\{AREAS_LEVEL\}/);
+  assert.match(component, /onClick=\{\(\) => enterRegion\(AREAS_LEVEL\)\}/);
+  assert.match(component, /className=\{`office-areas\$\{browsingArea \? " is-current" : ""\}`\}/);
+  // The top-level list must not enumerate the areas — that is the whole point of the row.
+  const regionList = component.slice(component.indexOf('key="regions"'), component.indexOf("</div>", component.indexOf('key="regions"')));
+  // Anchor the slice, or the doesNotMatch below passes on an empty string forever.
+  assert.match(regionList, /National Map/i, "expected to have found the top-level list");
+  assert.doesNotMatch(regionList, /AREAS\.map/, "the top level must not list the areas inline");
+
+  // …and the level itself mirrors a region's office list: back out, heading, then options.
+  const level = component.slice(component.indexOf("browsingAreas ? ("), component.indexOf(") : region ? ("));
+  assert.match(level, /className="office-back"/);
+  assert.match(level, /AREAS\.map\(\(area, index\) => \(/);
+  assert.match(level, /aria-selected=\{area\.id === office\.id\}/);
+  assert.match(level, /data-office=\{area\.id\}/);
+  // An area with no assets is listed and disabled, exactly as an unbuilt office is.
+  assert.match(level, /disabled=\{!area\.ready\}/);
+
+  // Entering the level focuses its first option, which the existing selector already does
+  // because an area row carries data-office like any office row.
+  assert.match(component, /\? "button\[data-office\]"/);
 });
 
 test("offers the visitor's own office without ever prompting unbidden", async () => {
@@ -562,8 +606,10 @@ test("publishes every office and prunes aged-out releases", async () => {
   assert.match(component, /manifest\.schemaVersion === 2/);
   assert.match(component, /office === "PHI" \? manifest\.days : undefined/);
   assert.match(component, /schemaVersion !== 1 && manifest\.schemaVersion !== 2/);
-  // The asset path guard admits both key shapes and nothing else.
-  assert.match(assetRoute, /\(\?:\[A-Z\]\{3\}\\\/\)\?day-\[1-3\]/);
+  // The asset path guard admits both key shapes and nothing else. Two or three letters:
+  // three is a CWA, two is a wide view (`US` and the areas), which the three-letter form
+  // rejected outright — see "resolves both published key shapes" for the full matrix.
+  assert.match(assetRoute, /\(\?:\[A-Z\]\{2,3\}\\\/\)\?day-\[1-3\]/);
 });
 
 test("publisher discovers products from the page, so adding one needs no job change", async () => {
@@ -939,13 +985,23 @@ test("imagery is re-rendered per office, not on the default office's clock", asy
 
 test("resolves both published key shapes and rejects anything else", async () => {
   const source = await readFile(new URL("../app/api/forecast-assets/[...path]/route.ts", import.meta.url), "utf8");
-  const pattern = new RegExp(/^releases\/\d{8}T\d{6}Z\/(?:[A-Z]{3}\/)?day-[1-3]\/[a-z][a-z-]*\.png$/);
-  // Guard against the literal in the route drifting from what this test asserts.
-  assert.ok(source.includes(pattern.source), "route regex no longer matches the tested pattern");
+  // An id is two *or three* uppercase letters. Three is a CWA; two is a wide view — `US`
+  // and every area id, which are two letters by construction so they cannot collide with
+  // an office. Pinned as a literal because `[A-Z]{3}` here used to 400 `forecast/US.json`
+  // before any network call, leaving the national view with no data source in production.
+  const pattern = /^releases\/\d{8}T\d{6}Z\/(?:[A-Z]{2,3}\/)?day-[1-3]\/[a-z][a-z-]*\.png$/;
+  const forecastPattern = /^forecast\/[A-Z]{2,3}\.json$/;
+  // Guard against the literals in the route drifting from what this test asserts.
+  assert.ok(source.includes(pattern.source), "route release regex no longer matches the tested pattern");
+  assert.ok(source.includes(forecastPattern.source), "route forecast regex no longer matches the tested pattern");
+
   for (const key of [
     "releases/20260724T205317Z/PHI/day-1/max-apparent-temperature.png",
     "releases/20260724T205317Z/OKX/day-3/total-precipitation-preview.png",
     "releases/20260724T205317Z/day-1/max-apparent-temperature.png",
+    // The wide views, which are exactly the case the three-letter form dropped.
+    "releases/20260724T205317Z/US/day-1/max-temperature.png",
+    "releases/20260724T205317Z/MA/day-2/max-temperature.png",
   ]) {
     assert.ok(pattern.test(key), `expected ${key} to be served`);
   }
@@ -955,8 +1011,20 @@ test("resolves both published key shapes and rejects anything else", async () =>
     "releases/20260724T205317Z/PHI/day-9/max-temperature.png",
     "releases/20260724T205317Z/PHI/day-1/../../secret.png",
     "latest.json",
+    // Still bounded on both sides — widening to {2,3} must not admit any length.
+    "releases/20260724T205317Z/T/day-1/max-temperature.png",
+    "releases/20260724T205317Z/TOOLONG/day-1/max-temperature.png",
   ]) {
     assert.ok(!pattern.test(key), `expected ${key} to be rejected`);
+  }
+
+  // The data tier is the half production cannot do without: /api/forecast 504s there, so a
+  // key this guard rejects is a view that cannot render at all.
+  for (const key of ["forecast/PHI.json", "forecast/US.json", "forecast/MA.json", "forecast/NW.json"]) {
+    assert.ok(forecastPattern.test(key), `expected ${key} to be served`);
+  }
+  for (const key of ["forecast/phi.json", "forecast/A.json", "forecast/TOOLONG.json", "forecast/PHI.txt", "forecast/../secret.json"]) {
+    assert.ok(!forecastPattern.test(key), `expected ${key} to be rejected`);
   }
 });
 
@@ -1005,8 +1073,13 @@ test("asks for alerts in the one zone-parameter form that actually unions", asyn
   // alerts as you add more, and at 66 zones it returns none at all, which is
   // indistinguishable from a quiet day. Measured: repeated form 1→5, 5→1, 20→2, 66→0;
   // comma form 1→5, 5→8, 20→11, 66→16. Only the comma form is monotonic.
-  assert.match(route, /new URLSearchParams\(\{ zone: zones\.join\(","\) \}\)/);
+  assert.match(route, /new URLSearchParams\(nationwide \? \{\} : \{ zone: zones\.join\(","\) \}\)/);
   assert.ok(!/append\(\s*"zone"/.test(route), "repeated zone= parameters silently return almost nothing");
+  // A wide view can't use the comma form either — the national frame reaches 7,451 zones,
+  // far past the ~8 KB outbound URL the upstream accepts — so it asks unfiltered and
+  // narrows client-side against the zones it carries. Still exactly one upstream request.
+  assert.match(route, /const nationwide = parameters\.get\("scope"\) === "all"/);
+  assert.match(route, /if \(!zones\.length && !nationwide\)/);
   // One upstream request regardless of zone count is what makes this route affordable
   // where /api/forecast is not; a per-zone fetch would be the same fan-out that keeps
   // /api/forecast off the production path.
@@ -1027,7 +1100,10 @@ test("validates zone codes before they reach an outbound URL", async () => {
 
 test("draws every office's alerts from a zone bundle it actually carries", async () => {
   const registry = JSON.parse(await readFile(new URL("../scripts/data/offices.json", import.meta.url), "utf8"));
-  const drawable = registry.filter((office) => office.ready && office.id !== "US").map((office) => office.id);
+  // Wide views are excluded, not just the national one: an area is no more a CWA than the
+  // nation is, so no zone declares it and there is nothing to join against. The renderer
+  // makes the same test before it fetches, and says so rather than erroring.
+  const drawable = registry.filter((office) => office.ready && !isWideView(office.id)).map((office) => office.id);
   const files = new Set((await readdir(new URL("../public/zones/", import.meta.url))).filter((n) => n.endsWith(".json")));
   for (const id of drawable) {
     assert.ok(files.has(`${id}.json`), `no zone bundle for ${id}`);
@@ -1051,6 +1127,153 @@ test("draws every office's alerts from a zone bundle it actually carries", async
   for (const geometry of Object.values(okx.zones)) {
     assert.ok(geometry.type === "Polygon" || geometry.type === "MultiPolygon", "zone geometry must be drawable");
   }
+});
+
+test("a wide view draws alerts, scoped to the zones it actually carries", async () => {
+  const [component, zoneBuild] = await Promise.all([
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/build-office-zones.mjs", import.meta.url), "utf8"),
+  ]);
+
+  // Every view gets a zone bundle, wide ones included. They were excluded on the grounds
+  // that a national bundle would cost "megabytes apiece" — raw it is 5.4 MB, but gzipped,
+  // which is what a browser transfers, it is ~1.1 MB against PHI's ~326 KB, for 7,451 zones
+  // against 318. Affordable for a tab that is only ever opened deliberately.
+  assert.doesNotMatch(zoneBuild, /if \(isWideView\(bundle\.office\)\) continue;/);
+  const zoneFiles = new Set(await readdir(new URL("../public/zones/", import.meta.url)));
+  for (const id of ["US", ...AREAS.map((area) => area.id)]) {
+    assert.ok(zoneFiles.has(`${id}.json`), `expected a zone bundle for the ${id} view`);
+  }
+
+  // A wide view cannot ask by zone: the comma-joined form would run the outbound URL past
+  // the ~8 KB the upstream accepts long before 7,451 zones. It asks for everything in
+  // force instead, and one cached response then serves the nation and all seven areas.
+  assert.match(component, /isWideView\(office\.id\) \? "scope=all"/);
+
+  // Membership is decided by the zones an alert names, never by whether it is drawable.
+  // `alertGeometries` returns an alert's *own* polygon without asking where that polygon
+  // is, so once wide views started receiving every alert in force, a storm-based warning
+  // in Texas would have counted as drawable on the Mid-Atlantic map.
+  assert.match(component, /function alertInView/);
+  assert.match(component, /alert\.zones\.some\(\(code\) => zones\[code\] !== undefined\)/);
+  // …and the filter runs before anything counts, draws or lists it, so the header total,
+  // the map and the strip cannot disagree.
+  const panel = component.slice(component.indexOf("function AlertsPanel"), component.indexOf("function publishedAssetUrl"));
+  assert.ok(panel.length > 0, "expected to find the AlertsPanel body");
+  assert.match(panel, /\.filter\(\(alert\) => alertInView\(alert, zones\)\)/);
+  assert.match(panel, /<AlertsPlot alerts=\{sorted\}/);
+  // The old "pick an office" bail-out must be gone, or wide views never render at all.
+  assert.doesNotMatch(panel, /Watches and warnings are issued per forecast office/);
+});
+
+test("a sub-pixel ring collapses to a quad instead of keeping every vertex", async () => {
+  const { simplify, toleranceFor } = await import("../lib/geo-simplify.mjs");
+
+  // Douglas-Peucker's closed-ring fallback returns the *original* when simplification drops
+  // under four points — correct, but it means the hardest-simplified rings keep every
+  // vertex. At a wide zoom that is exactly backwards: a zone smaller than a pixel is the
+  // one that collapses, and it came back at full resolution. That put 88% of US.json's
+  // 689,078 points into 10% of its zones, one of them 14,243 points for a pixel-sized
+  // shape. Collapsing to a bounding quad cut the file from 2,971 KB gzipped to 1,163 KB.
+  const tolerance = toleranceFor(4);
+  // A crinkly ring far smaller than the tolerance — sub-pixel at this zoom.
+  const tiny = Array.from({ length: 200 }, (_, i) => {
+    const angle = (i / 200) * Math.PI * 2;
+    return [Math.cos(angle) * 0.004, Math.sin(angle) * 0.004];
+  });
+  tiny.push(tiny[0]);
+  // Default: the whole ring survives, which is the behaviour every other caller relies on.
+  assert.equal(simplify(tiny, tolerance, true).length, tiny.length);
+  // With collapse: a closed five-point quad.
+  const collapsed = simplify(tiny, tolerance, true, true);
+  assert.equal(collapsed.length, 5, "expected a closed bounding quad");
+  assert.deepEqual(collapsed[0], collapsed[4], "the quad must close");
+  // …and it must still cover the ring it replaced, or an alert would paint off its zone.
+  const lons = tiny.map(([lon]) => lon);
+  const lats = tiny.map(([, lat]) => lat);
+  const quadLons = collapsed.map(([lon]) => lon);
+  const quadLats = collapsed.map(([, lat]) => lat);
+  assert.ok(Math.min(...quadLons) <= Math.min(...lons) + 1e-9);
+  assert.ok(Math.max(...quadLons) >= Math.max(...lons) - 1e-9);
+  assert.ok(Math.min(...quadLats) <= Math.min(...lats) + 1e-9);
+  assert.ok(Math.max(...quadLats) >= Math.max(...lats) - 1e-9);
+
+  // A ring with real structure at this tolerance is untouched either way — collapse must
+  // not be a licence to flatten anything that merely looks simple. A rectangle reduces to
+  // its four corners legitimately (Colorado and Texas counties really are rectangles).
+  const rectangle = [[0, 0], [2, 0], [2, 1], [0, 1], [0, 0]];
+  assert.deepEqual(simplify(rectangle, tolerance, true, true), simplify(rectangle, tolerance, true));
+
+  // Only the zone build opts in; bundles must keep producing byte-identical output.
+  const zoneBuild = await readFile(new URL("../scripts/build-office-zones.mjs", import.meta.url), "utf8");
+  const bundleBuild = await readFile(new URL("../scripts/build-office-bundles.mjs", import.meta.url), "utf8");
+  assert.match(zoneBuild, /1e4,\s*\n\s*\/\/[^\n]*\n(\s*\/\/[^\n]*\n)*\s*true,/);
+  assert.doesNotMatch(bundleBuild, /toleranceFor\([^)]*\),\s*\n?[^)]*true,\s*\n?\s*true/);
+});
+
+test("active alerts flow past, and a long location list never takes the strip over", async () => {
+  const component = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
+
+  // The budget is in *characters*, not entries, and that distinction is the whole point:
+  // land alerts fail by listing a dozen counties, marine alerts fail at two, because their
+  // zone names are prose ("Chesapeake Bay from Drum Point MD to Smith Point VA" is 50 on
+  // its own). An entry-count rule waves the marine case straight through at 118 characters.
+  assert.match(component, /const ALERT_PLACES_MAX = \d+/);
+  const places = component.slice(component.indexOf("function alertPlaces"), component.indexOf("const TICKER_PX_PER_SECOND"));
+  assert.ok(places.length > 0, "expected to find alertPlaces");
+  assert.match(places, /whole\.length <= ALERT_PLACES_MAX/);
+  assert.match(places, /clampWords\(parts\[0\], ALERT_PLACES_MAX - rest\.length\)/);
+
+  // Re-implemented here from the same rules, so the budget is checked against real payload
+  // shapes rather than merely asserted to exist in the source.
+  const max = Number(/const ALERT_PLACES_MAX = (\d+)/.exec(component)[1]);
+  const clampWords = (text, limit) => {
+    if (text.length <= limit) return text;
+    const cut = text.slice(0, limit);
+    const boundary = cut.lastIndexOf(" ");
+    return `${(boundary > limit * 0.6 ? cut.slice(0, boundary) : cut).trimEnd()}…`;
+  };
+  const alertPlaces = (areaDesc) => {
+    const parts = (areaDesc ?? "").split(";").map((part) => part.trim()).filter(Boolean);
+    if (!parts.length) return "";
+    const whole = parts.join(" · ");
+    if (whole.length <= max) return whole;
+    if (parts.length === 1) return clampWords(parts[0], max);
+    const rest = ` +${parts.length - 1}`;
+    return clampWords(parts[0], max - rest.length) + rest;
+  };
+
+  // Real shapes seen on api.weather.gov, longest first.
+  const samples = [
+    "Northern Litchfield; " + Array.from({ length: 26 }, (_, i) => `Zone ${i}`).join("; "),
+    "Chesapeake Bay from Drum Point MD to Smith Point VA; Tangier Sound and the inland waters surrounding Bloodsworth Island",
+    "Albany, NY; Greene, NY; Rensselaer, NY; Saratoga, NY; Schenectady, NY; Ulster, NY",
+    "Coastal waters from Fenwick Island DE to Chincoteague VA out 20 nm",
+  ];
+  for (const sample of samples) {
+    const out = alertPlaces(sample);
+    assert.ok(out.length <= max + 1, `"${out}" is ${out.length} characters, over the ${max} budget`);
+    assert.ok(out.length < sample.length, "a long list must actually be shortened");
+  }
+  // Short ones are left whole — hiding one county behind "+1" buys nothing.
+  assert.equal(alertPlaces("Ulster, NY"), "Ulster, NY");
+  assert.equal(alertPlaces(""), "");
+  assert.equal(alertPlaces(null), "");
+
+  // The loop is only seamless because half the track is a whole number of copies, so the
+  // copy count must be even, and there must be enough copies to cover the viewport — two
+  // copies of one short alert would drag a gap of empty space across the panel each cycle.
+  const ticker = component.slice(component.indexOf("function AlertsTicker"), component.indexOf("function AlertsPlot"));
+  assert.ok(ticker.length > 0, "expected to find AlertsTicker");
+  assert.match(ticker, /needed % 2 === 0 \? needed : needed \+ 1/);
+  assert.match(ticker, /Math\.max\(2, Math\.ceil\(\(host\.clientWidth \* 2\) \/ width\)\)/);
+  // Duration from measured width, so the strip travels at one speed at any alert count.
+  assert.match(ticker, /\(width \* \(copies \/ 2\)\) \/ TICKER_PX_PER_SECOND/);
+  // Only the first copy is the list; the rest would otherwise be read out again and again.
+  assert.match(ticker, /aria-hidden=\{copy > 0 \|\| undefined\}/);
+  // Measured off the effect's synchronous path — a setState in an effect body cascades.
+  assert.match(ticker, /queueMicrotask\(apply\)/);
+  assert.match(ticker, /prefers-reduced-motion: reduce/);
 });
 
 test("the alerts map is not mistaken for a publishable product", async () => {
@@ -1109,9 +1332,15 @@ test("the alerts map is not mistaken for a publishable product", async () => {
 test("ships one self-contained map bundle per forecast office", async () => {
   const dir = new URL("../public/offices/", import.meta.url);
   const names = (await readdir(dir)).filter((name) => name.endsWith(".json"));
-  // 125 CWAs plus the national view, which rides the same pipeline as a synthetic office.
-  assert.equal(names.length, 126, "expected a bundle per office plus the national view");
+  // 125 CWAs plus the synthetic wide views — the national map and the unofficial areas —
+  // which ride the same pipeline as an office. Counted off AREAS rather than restated as
+  // a number, so adding an area to lib/areas.mjs doesn't fail a test that has no opinion
+  // about how many there are.
+  assert.equal(names.length, 126 + AREAS.length, "expected a bundle per office plus every wide view");
   assert.ok(names.includes("US.json"), "expected a national bundle");
+  for (const area of AREAS) {
+    assert.ok(names.includes(`${area.id}.json`), `expected a bundle for the ${area.id} area`);
+  }
 
   for (const office of ["PHI", "OKX", "CTP", "LWX"]) {
     const bundle = JSON.parse(await readFile(new URL(`${office}.json`, dir), "utf8"));

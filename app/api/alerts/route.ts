@@ -69,7 +69,15 @@ function isDrawable(geometry: unknown): geometry is AlertGeometry {
 }
 
 export async function GET(request: Request) {
-  const requested = (new URL(request.url).searchParams.get("zones") ?? "")
+  const parameters = new URL(request.url).searchParams;
+  // A wide view — the nation or one of the multi-state areas — asks for everything in
+  // force and narrows it itself, because it *cannot* ask by zone: the national frame
+  // reaches 7,451 of them, and even the comma form runs the outbound URL past the ~8 KB
+  // the upstream accepts long before that. Unfiltered is one request and ~250 alerts,
+  // and the same response then serves the national view and all seven areas — each
+  // keeps the alerts naming a zone it actually carries. Cheaper than asking per view.
+  const nationwide = parameters.get("scope") === "all";
+  const requested = (parameters.get("zones") ?? "")
     .split(",")
     .map((zone) => zone.trim().toUpperCase())
     .filter((zone) => ZONE_CODE.test(zone));
@@ -77,7 +85,7 @@ export async function GET(request: Request) {
 
   // No valid zone means nothing to ask about. Answering with an empty list rather than an
   // error keeps the panel's "no active alerts" state and a bad request on the same path.
-  if (!zones.length) {
+  if (!zones.length && !nationwide) {
     return NextResponse.json(
       { generatedAt: new Date().toISOString(), alerts: [], zones: 0 },
       { headers: { "Cache-Control": "no-store" } },
@@ -89,7 +97,7 @@ export async function GET(request: Request) {
   // 66 zones it returns nothing at all, which reads exactly like a quiet weather day. The
   // comma form is monotonic: 1 zone → 5 alerts, 5 → 8, 20 → 11, 66 → 16, matching what
   // the office actually has in force.
-  const query = new URLSearchParams({ zone: zones.join(",") });
+  const query = new URLSearchParams(nationwide ? {} : { zone: zones.join(",") });
 
   let response: Response;
   try {

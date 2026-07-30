@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
+import { targetsFor } from "../lib/areas.mjs";
 import { frameBounds } from "../lib/map-frame.mjs";
 
 // Resolves each office's interpolation lattice to the NWS gridpoints that feed it, and
@@ -45,11 +46,11 @@ const RETRIES = 3;
 // The points are then thinned onto a uniform grid: even coverage is what the
 // interpolation wants, and it bounds the per-office fetch cost, which is one
 // api.weather.gov request per point on every publish.
-const TARGET_POINTS = 340;
-// The national view gets more, because it is one map covering the whole country: at 340
-// the spacing is ~95 miles and the field reads as blobs. It costs one office's worth of
-// extra fetches on a publish, not 121.
-const NATIONAL_TARGET_POINTS = 1800;
+// Per-view targets live in lib/areas.mjs, so the office / area / national densities are
+// declared once and read the same way by the lattice and the city labels. The national
+// view gets far more than an office because it is one map covering the whole country: at
+// 340 the spacing is ~95 miles and the field reads as blobs. That costs one view's worth
+// of extra fetches on a publish, not 121.
 // `--rebalance` redoes just that last step from the files already on disk, with no
 // network at all — the resolving pass above is 30k lookups and ~18 minutes.
 const args = process.argv.slice(2);
@@ -139,8 +140,16 @@ for (const name of names) {
 perOffice.sort((a, b) => b.count - a.count);
 const total = perOffice.reduce((sum, entry) => sum + entry.count, 0);
 console.log(`${perOffice.length} offices, ${total} samples before dedup, ${samples.size} unique lookups`);
-console.log(`  per office: max ${perOffice[0].count} (${perOffice[0].office}), min ${perOffice.at(-1).count} (${perOffice.at(-1).office}), mean ${Math.round(total / perOffice.length)}`);
-console.log(`  widest frame ${perOffice.reduce((a, b) => (a.span > b.span ? a : b)).span}°, narrowest ${perOffice.reduce((a, b) => (a.span < b.span ? a : b)).span}°`);
+// Sampling only ever covers offices with a CWA to sample inside. A run scoped to wide
+// views — `--only US` or an area list — legitimately samples nothing and fills entirely
+// from the national pool below, so these stats have nothing to report rather than being
+// an error to dereference off the end of an empty list.
+if (perOffice.length) {
+  console.log(`  per office: max ${perOffice[0].count} (${perOffice[0].office}), min ${perOffice.at(-1).count} (${perOffice.at(-1).office}), mean ${Math.round(total / perOffice.length)}`);
+  console.log(`  widest frame ${perOffice.reduce((a, b) => (a.span > b.span ? a : b)).span}°, narrowest ${perOffice.reduce((a, b) => (a.span < b.span ? a : b)).span}°`);
+} else {
+  console.log("  no CWA sampling needed — every selected view fills from the national pool");
+}
 if (dryRun) {
   console.log("\n--dry-run: no requests issued.");
   process.exit(0);
@@ -294,7 +303,7 @@ for (const name of names) {
   }
   if (!candidates.length) continue;
 
-  const list = thin(candidates, frame, office === "US" ? NATIONAL_TARGET_POINTS : TARGET_POINTS)
+  const list = thin(candidates, frame, targetsFor(office).points)
     // Written back in the office's own coordinate space so the client never has to shift.
     .map((point) => ({ id: point.id, wfo: point.wfo, x: point.x, y: point.y, lat: point.lat, lon: point.lon }))
     .sort((a, b) => a.id.localeCompare(b.id));

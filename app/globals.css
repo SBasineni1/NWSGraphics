@@ -385,6 +385,9 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
 .office-group button.is-current { box-shadow: inset 0 0 0 1px #4a4a4a; }
 /* The national map is a peer of the regions, not one of them, so it sits apart. */
 .office-national { margin-top: 6px; }
+/* Sits directly under the national row as the other non-NWS entry, so no extra gap — but
+   unlike it this one opens a level rather than picking a map. */
+.office-areas { margin-top: 0; }
 /* Back is chrome, not a destination: quieter than a pill, and clearly not an option. */
 .office-back {
   align-self: flex-start;
@@ -592,14 +595,75 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
 /* The alerts view shows one map, not a two-up gallery, so it spans the full column. */
 .forecast-gallery:has(> .forecast-product:only-child) { grid-template-columns: minmax(0, 1fr); }
 
-.alert-list { list-style: none; margin: 32px 0 0; padding: 0; display: grid; gap: 1px; background: var(--line-strong); border: 1px solid var(--line-strong); }
-.alert-item { display: flex; gap: 14px; padding: 16px 18px; background: var(--surface); }
-.alert-swatch { flex: 0 0 auto; width: 16px; height: 16px; margin-top: 3px; border: 1.5px solid; }
-.alert-body { min-width: 0; }
-.alert-body h4 { margin: 0; font: 650 14px var(--font-geist-sans), Arial, sans-serif; letter-spacing: -.02em; }
-.alert-area { margin: 4px 0 0; font: 500 13px var(--font-geist-sans), Arial, sans-serif; color: var(--muted); }
-.alert-window { margin: 6px 0 0; font: 550 11px var(--font-geist-mono), ui-monospace, monospace; letter-spacing: .02em; color: var(--faint); }
-.alert-headline { margin: 8px 0 0; font: 500 13px var(--font-geist-sans), Arial, sans-serif; }
+/* Active alerts flow past as one strip instead of stacking into a list. The panel is the
+   same height whether two hazards are in force or forty, which is the point — this is the
+   only view describing right now, and it refreshes every two minutes. */
+.alert-ticker {
+  position: relative;
+  margin-top: 32px;
+  overflow: hidden;
+  /* The topbar's own dimensions, so it reads as the same kind of object: a full-width bar
+     of one line, not a card. Light rather than black — the topbar can be black because it
+     is chrome at the edge of the page; this sits in the content column under a white map. */
+  height: 52px;
+  display: flex;
+  align-items: center;
+  border-block: 1px solid var(--line);
+  background: var(--surface);
+  /* Items enter and leave rather than being guillotined at a hard edge — the same soft
+     ends the reference strip has. Both ends, so neither side is the "real" one. */
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent);
+}
+/* `width: max-content` so the track is as wide as its copies rather than the column —
+   without it every copy is squeezed to the viewport and nothing moves. */
+.alert-ticker-track { display: flex; width: max-content; animation: alert-ticker-flow linear infinite; }
+/* Exactly half. The track always holds an even number of whole copies, so half of it is a
+   whole number of copies and the wrap frame is identical to the one before it. */
+@keyframes alert-ticker-flow {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(-50%, 0, 0); }
+}
+/* Stop it to actually read one — a moving target is not something you can point at. */
+.alert-ticker:hover .alert-ticker-track,
+.alert-ticker:focus-within .alert-ticker-track { animation-play-state: paused; }
+.alert-ticker-set { display: flex; align-items: center; list-style: none; margin: 0; padding: 0; }
+.alert-chip { display: inline-flex; align-items: center; gap: 9px; padding: 0 17px; white-space: nowrap; }
+.alert-swatch { flex: 0 0 auto; width: 10px; height: 10px; border: 1.5px solid; }
+
+/* Typed exactly like the topbar: one size, one weight, one tracking — and now one colour —
+   for every part of every chip. The bar reads as one line because nothing in it competes.
+   What was here before did the opposite (13/12/11px at 650/500/550 across two families,
+   including a monospace nothing else on the page uses) and read as three unrelated labels
+   jammed together.
+   `.alert-until` is classed rather than selected as `.alert-chip time`: the bare element
+   selector is silently dropped from the built stylesheet — it survives neither dev nor a
+   clean rebuild, while the `b` and `i` rules beside it come through. */
+.alert-chip b,
+.alert-chip i,
+.alert-until {
+  font-size: 13px;
+  font-weight: 570;
+  font-style: normal;
+  letter-spacing: -.025em;
+  color: var(--ink);
+}
+
+/* The breadcrumb's own separator, for the same job. Every chip carries a trailing one, so
+   the rhythm is identical across the wrap where two copies meet. */
+.alert-chip::after {
+  content: "/";
+  margin-left: 17px;
+  color: var(--line-strong);
+  font-size: 13px;
+  font-weight: 570;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* One static copy (the component drops the duplicates too), scrollable by hand. */
+  .alert-ticker { overflow-x: auto; -webkit-mask-image: none; mask-image: none; }
+  .alert-ticker-track { animation: none; }
+}
 
 @media (max-width: 1120px) {
   .forecast-gallery { grid-template-columns: 1fr; }

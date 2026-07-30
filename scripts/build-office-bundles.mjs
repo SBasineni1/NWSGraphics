@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { coordinateBounds, fitZoom, frameBounds } from "../lib/map-frame.mjs";
 import { bboxOf, offsetFor, overlaps, prepare, toleranceFor } from "../lib/geo-simplify.mjs";
+import { AREAS, AREA_PADDING } from "../lib/areas.mjs";
 
 // One self-contained map bundle per NWS forecast office: its CWA outline plus the
 // counties, state lines and interstates that fall inside the frame the renderer draws,
@@ -71,7 +72,7 @@ for (let index = 0; index < ids.length; index += CHUNK) {
     const id = feature.properties.CWA ?? feature.properties.cwa;
     const bounds = coordinateBounds(feature.geometry.coordinates);
     const zoom = fitZoom(bounds);
-    offices.push({ id, geometry: feature.geometry, bounds, zoom, frame: frameBounds(bounds), counties: [], states: [], interstates: [] });
+    offices.push({ id, geometry: feature.geometry, bounds, zoom, frame: frameBounds(bounds), counties: [], states: [], interstates: [], omit: [] });
   }
   process.stdout.write(`\r  ${offices.length}/${ids.length}`);
 }
@@ -104,7 +105,7 @@ offices.push({
   interstates: [],
   // Counties and interstates are skipped for this one: at zoom 4 a county is a couple of
   // pixels, so all 3,143 of them would be unreadable mush and a multi-megabyte download.
-  nationalScale: true,
+  omit: ["counties", "interstates"],
 });
 
 console.log("loading overlay sources…");
@@ -113,6 +114,59 @@ const sources = {
   states: await cached("states", SOURCES.states),
   roads: await cached("roads", SOURCES.roads),
 };
+
+/* ------------------------------------------------------------------ area views */
+
+// The multi-state areas, as synthetic offices so they travel the same pipeline as every
+// real one — same bundle shape, same lattice, same renderer. Their frames are *derived*
+// from the member states rather than hand-written, so adding a state to an area in
+// lib/areas.mjs reframes its map with no numbers to update by hand.
+//
+// Built here rather than beside the national view because the frame needs the state
+// geometry, which only exists once the sources are loaded.
+const statesByPostal = new Map();
+for (const feature of sources.states.features) {
+  if (feature.properties?.admin !== "United States of America") continue;
+  const postal = feature.properties?.postal;
+  if (postal) statesByPostal.set(postal, feature);
+}
+
+for (const area of AREAS) {
+  const missing = area.states.filter((postal) => !statesByPostal.has(postal));
+  // A typo'd postal code would otherwise just shrink the frame quietly, which is exactly
+  // the kind of wrong-but-plausible map that is hard to notice.
+  if (missing.length) throw new Error(`area ${area.id}: no state geometry for ${missing.join(", ")}`);
+  let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity;
+  for (const postal of area.states) {
+    const box = bboxOf(statesByPostal.get(postal).geometry.coordinates);
+    west = Math.min(west, box.west);
+    south = Math.min(south, box.south);
+    east = Math.max(east, box.east);
+    north = Math.max(north, box.north);
+  }
+  const bounds = {
+    west: west - AREA_PADDING,
+    south: south - AREA_PADDING,
+    east: east + AREA_PADDING,
+    north: north + AREA_PADDING,
+  };
+  offices.push({
+    id: area.id,
+    geometry: null,
+    bounds,
+    zoom: fitZoom(bounds),
+    frame: frameBounds(bounds),
+    counties: [],
+    states: [],
+    interstates: [],
+    // Counties go, interstates stay. An area frame spans several states, where a county is
+    // a few pixels of unreadable mush — the same reason the national view drops them — but
+    // the interstate network is the geography that makes a regional map legible, and it is
+    // two orders of magnitude fewer features.
+    omit: ["counties"],
+  });
+}
+console.log(`  areas: ${AREAS.map((area) => area.id).join(", ")}`);
 
 /**
  * Each source is walked once and offered to every office, rather than re-scanning the
@@ -125,8 +179,7 @@ function distribute(features, key, { closed, factor, filter }) {
     if (filter && !filter(feature)) continue;
     const plain = bboxOf(feature.geometry.coordinates);
     for (const office of offices) {
-      // County and interstate detail is meaningless at national scale; states only.
-      if (office.nationalScale && key !== "states") continue;
+      if (office.omit.includes(key)) continue;
       const offset = offsetFor(office.frame, plain);
       const box = offset
         ? { west: plain.west + offset, east: plain.east + offset, south: plain.south, north: plain.north }

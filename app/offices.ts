@@ -140,7 +140,14 @@ export type OfficeId =
   | "PPG"
   | "PQE"
   | "PQW"
-  | "US";
+  | "US"
+  | "NW"
+  | "WE"
+  | "SW"
+  | "MW"
+  | "SE"
+  | "MA"
+  | "NE";
 
 export type RegionId = "eastern" | "central" | "southern" | "western" | "alaska" | "pacific";
 
@@ -344,7 +351,23 @@ export const REGIONS: Region[] = [
 /** The national view, which sits above the regions rather than inside one. */
 export const NATIONAL: Office = {"id":"US","city":"United States","state":"US","label":"National","ready":true};
 
-export const OFFICES: Office[] = [...REGIONS.flatMap((region) => region.offices), NATIONAL];
+/**
+ * The unofficial multi-state areas, defined in lib/areas.mjs.
+ *
+ * Not `REGIONS` — that is the six *official* NWS regions, which group offices
+ * administratively. These cut across them and exist for regional forecasts.
+ */
+export const AREAS: Office[] = [
+  {"id":"NW","city":"North West","state":"US","label":"North West","ready":true},
+  {"id":"WE","city":"West","state":"US","label":"West","ready":true},
+  {"id":"SW","city":"South West","state":"US","label":"South West","ready":true},
+  {"id":"MW","city":"Mid-West","state":"US","label":"Mid-West","ready":true},
+  {"id":"SE","city":"South East","state":"US","label":"South East","ready":true},
+  {"id":"MA","city":"Mid-Atlantic","state":"US","label":"Mid-Atlantic","ready":true},
+  {"id":"NE","city":"North East","state":"US","label":"North East","ready":true},
+];
+
+export const OFFICES: Office[] = [...REGIONS.flatMap((region) => region.offices), NATIONAL, ...AREAS];
 export const OFFICE_IDS: OfficeId[] = OFFICES.map((office) => office.id);
 /** The offices the site can actually draw today. */
 export const READY_OFFICES: Office[] = OFFICES.filter((office) => office.ready);
@@ -377,4 +400,22 @@ export function regionOf(office: OfficeId) {
 /** The national view spans every region, so it is never "in" one. */
 export function isNational(office: OfficeId) {
   return office === NATIONAL.id;
+}
+
+const AREA_IDS = AREAS.map((area) => area.id);
+/** An area spans several offices and several regions, so it is never "in" one either. */
+export function isArea(office: OfficeId) {
+  return (AREA_IDS as string[]).includes(office);
+}
+
+/**
+ * A synthetic view — the nation or an area — rather than a real forecast office.
+ *
+ * The distinction anything asking this actually cares about is "does a CWA back this id",
+ * not which flavour of wide view it is: a wide view has no zone file to join alerts
+ * against and no single office to verify a city's ownership against. Mirrors
+ * `isWideView` in lib/areas.mjs, which the build scripts use for the same test.
+ */
+export function isWideView(office: OfficeId) {
+  return isNational(office) || isArea(office);
 }

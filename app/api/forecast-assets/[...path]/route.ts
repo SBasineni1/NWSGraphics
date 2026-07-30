@@ -20,12 +20,18 @@ export async function GET(
   // resolving until they age out of the retention window.
   // v2: releases/{releaseId}/{OFFICE}/day-{n}/{product}[-preview].png
   // v1: releases/{releaseId}/day-{n}/{product}[-preview].png
-  const ASSET_KEY = /^releases\/\d{8}T\d{6}Z\/(?:[A-Z]{3}\/)?day-[1-3]\/[a-z][a-z-]*\.png$/;
-  // Precomputed gridpoint forecasts, one per office. These are what let an office render
-  // live on Cloudflare's free plan at all: fanning out to ~250 api.weather.gov gridpoints
-  // from the Worker breaks both the 50-subrequest and the 10 ms CPU limits, so the fan-out
-  // happens once an hour in the publisher instead and the Worker only relays the result.
-  const FORECAST_KEY = /^forecast\/[A-Z]{3}\.json$/;
+  //
+  // An id is **two or three** uppercase letters. Three is a CWA; two is a wide view — `US`
+  // and every area id, which lib/areas.mjs keeps at two letters precisely so they can never
+  // collide with an office. This is not a loosened guard: `[A-Z]{3}` 400'd `forecast/US.json`
+  // before any network call, and since /api/forecast 504s in production, that left the
+  // national view with no data source there at all. The areas inherited the same fault.
+  const ASSET_KEY = /^releases\/\d{8}T\d{6}Z\/(?:[A-Z]{2,3}\/)?day-[1-3]\/[a-z][a-z-]*\.png$/;
+  // Precomputed gridpoint forecasts, one per view. These are what let a view render live
+  // at all: /api/forecast fans out to ~250 api.weather.gov gridpoints per request and 504s
+  // in production, so the fan-out happens once an hour in the publisher instead and this
+  // route only relays the result.
+  const FORECAST_KEY = /^forecast\/[A-Z]{2,3}\.json$/;
 
   const { path } = await context.params;
   const assetKey = path.join("/");

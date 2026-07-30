@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { PLOT_FONT_FAMILY } from "../fonts";
-import { DEFAULT_OFFICE, findOffice, findRegion, NATIONAL, OFFICES, REGIONS, regionOf, type Office, type OfficeId } from "../offices";
+import { AREAS, DEFAULT_OFFICE, findOffice, findRegion, isWideView, NATIONAL, OFFICES, REGIONS, regionOf, type Office, type OfficeId } from "../offices";
 import { MAP_HEIGHT, PLOT_WIDTH, frameBounds, inverseWorld, plotExtent, project } from "../../lib/map-frame.mjs";
 import { parsePlaceIndex, searchPlaces } from "../../lib/place-search.mjs";
 import { ALERT_COLORS, DEFAULT_ALERT_COLOR } from "../alert-colors";
@@ -1450,6 +1450,25 @@ function alertGeometries(alert: AlertRecord, zones: ZoneIndex): AreaGeometry[] {
   return alert.zones.map((code) => zones[code]).filter((geometry): geometry is AreaGeometry => Boolean(geometry));
 }
 
+/**
+ * Whether an alert belongs on this view at all.
+ *
+ * Membership is decided by the zones it names, never by whether it happens to be drawable:
+ * `alertGeometries` hands back an alert's *own* polygon whenever it has one, without asking
+ * where that polygon is, so a storm-based warning in Texas would count as drawable on the
+ * Mid-Atlantic map. That only became reachable when the wide views started asking for every
+ * alert in force rather than for a list of their own zones.
+ *
+ * The zone index is exactly the set of zones whose shapes reach this frame, so "names a
+ * zone we carry" is the frame test, already computed. Every one of the 251 alerts active
+ * when this was written lists `affectedZones` — including all 27 that also carry a polygon
+ * — so nothing is lost by deciding on zones alone. For a single office it changes nothing:
+ * the route already only returns alerts matching that office's zones.
+ */
+function alertInView(alert: AlertRecord, zones: ZoneIndex) {
+  return alert.zones.some((code) => zones[code] !== undefined);
+}
+
 async function renderAlertPlot(canvas: HTMLCanvasElement, alerts: AlertRecord[], zones: ZoneIndex, bundle: OfficeBundle, office: OfficeId, generatedAt: string | null) {
   const { mapCanvas, context, projectPoint, width, height } = await beginMapCanvas(bundle);
 
@@ -1597,12 +1616,179 @@ function ForecastPlot({ spec, forecast, outlook, outlookPending, bundle, dayInde
   );
 }
 
-function alertWindow(alert: AlertRecord) {
-  const start = alert.onset ?? alert.sent;
+/**
+ * When an alert lifts, short enough to ride the strip.
+ *
+ * This replaced a full `stampLabel` range — "JUL 29, 2026, 10:58 AM EDT → JUL 29, 2026,
+ * 5:00 PM EDT" — which is wider than the rest of the chip put together. Sliding past, the
+ * question is when it ends, not when it was issued, and the date is only worth its width
+ * when the answer is not today. Anchored to Eastern like every other time on the page.
+ */
+function alertUntil(alert: AlertRecord) {
   const end = alert.ends ?? alert.expires;
-  if (start && end) return `${stampLabel(start)} → ${stampLabel(end)}`;
-  if (end) return `UNTIL ${stampLabel(end)}`;
-  return start ? `FROM ${stampLabel(start)}` : "";
+  if (!end) return "";
+  const at = new Date(end);
+  if (Number.isNaN(at.getTime())) return "";
+  const zone = "America/New_York";
+  // en-CA gives YYYY-MM-DD, so two Eastern calendar days compare as strings.
+  const day = (value: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
+  const time = new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "numeric", minute: "2-digit" }).format(at).toUpperCase();
+  if (day(at) === day(new Date())) return `UNTIL ${time}`;
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "short" }).format(at).toUpperCase();
+  return `UNTIL ${weekday} ${time}`;
+}
+
+/** Roughly how much of a chip the places may take before they crowd out every other alert. */
+const ALERT_PLACES_MAX = 42;
+
+/** Trim to a word boundary inside `max`, marking that something was cut. */
+function clampWords(text: string, max: number) {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const boundary = cut.lastIndexOf(" ");
+  // Only honour the boundary if it isn't so early that the result says nothing; otherwise
+  // a single long word would collapse the label to almost an ellipsis on its own.
+  return `${(boundary > max * 0.6 ? cut.slice(0, boundary) : cut).trimEnd()}…`;
+}
+
+/**
+ * The places an alert covers, cut down to something readable in passing.
+ *
+ * Budgeted by **characters, not entries**, because the two failure modes are different
+ * shapes and only one is a long list. Land alerts are semicolon-separated counties that run
+ * to a dozen entries ("Albany, NY; Greene, NY; Rensselaer, NY; …" — 81 characters for one
+ * Flood Warning); marine alerts are *prose* and blow the budget at **two**: "Chesapeake Bay
+ * from Drum Point MD to Smith Point VA; Tangier Sound and the inland waters surrounding
+ * Bloodsworth Island" is 118 characters, and an entry-count rule waves it straight through.
+ *
+ * On a strip that slides past, either one is unreadable *and* unfair — a single verbose
+ * alert pushes every other one off the screen. A first name plus a count says what matters:
+ * where it is, and that there is more of it. Short lists still pass through whole, since
+ * "A · B" is one glance and nothing is gained by hiding B behind a "+1".
+ */
+function alertPlaces(areaDesc: string | null | undefined) {
+  const parts = (areaDesc ?? "").split(";").map((part) => part.trim()).filter(Boolean);
+  if (!parts.length) return "";
+  const whole = parts.join(" · ");
+  if (whole.length <= ALERT_PLACES_MAX) return whole;
+  if (parts.length === 1) return clampWords(parts[0], ALERT_PLACES_MAX);
+  const rest = ` +${parts.length - 1}`;
+  return clampWords(parts[0], ALERT_PLACES_MAX - rest.length) + rest;
+}
+
+/** How fast the strip travels, in CSS pixels per second. Slow enough to read in passing. */
+const TICKER_PX_PER_SECOND = 60;
+
+/**
+ * Active alerts as one continuously flowing strip.
+ *
+ * A marquee rather than a list because this is the one panel describing *now*: it refreshes
+ * every two minutes, and a quiet office has two rows where a busy one has forty. The strip
+ * is the same height either way and never becomes a wall of text.
+ *
+ * Two things make the loop invisible, and both are load-bearing:
+ *
+ * - **The track holds an even number of whole copies**, and the animation translates it by
+ *   exactly half. Half a track is therefore a whole number of copies, so the frame after
+ *   the wrap is identical to the frame before it. An odd count would land mid-copy and
+ *   visibly jump.
+ * - **Copies are counted from measured width, not guessed.** Two copies of a single short
+ *   alert are narrower than the viewport, and the strip would drag a gap of empty space
+ *   across the panel once per cycle.
+ *
+ * Duration comes from that same measurement, so the strip moves at one speed whether one
+ * warning is in force or forty — item count alone would crawl on a quiet day and blur on a
+ * busy one.
+ */
+function AlertsTicker({ alerts }: { alerts: AlertRecord[] }) {
+  const viewport = useRef<HTMLDivElement>(null);
+  const firstSet = useRef<HTMLUListElement>(null);
+  const [layout, setLayout] = useState<{ copies: number; seconds: number } | null>(null);
+  // The alerts themselves, not the array holding them: the parent re-sorts on every render,
+  // so depending on the array would re-run this on every render for identical content.
+  const signature = alerts.map((alert) => alert.id).join(",");
+
+  useEffect(() => {
+    const strip = firstSet.current;
+    const host = viewport.current;
+    if (!strip || !host) return;
+    let live = true;
+    const apply = () => {
+      if (!live) return;
+      // Someone who has asked for less motion gets one static copy, so the duplicates that
+      // only exist to make the wrap seamless don't become a list repeated at them.
+      if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+        setLayout((current) => (current?.copies === 1 ? current : { copies: 1, seconds: 0 }));
+        return;
+      }
+      const width = strip.scrollWidth;
+      if (!width) return;
+      const needed = Math.max(2, Math.ceil((host.clientWidth * 2) / width));
+      const copies = needed % 2 === 0 ? needed : needed + 1;
+      const seconds = (width * (copies / 2)) / TICKER_PX_PER_SECOND;
+      // Same object back when nothing moved, so React bails out instead of re-rendering —
+      // and re-rendering is what would schedule this again, forever.
+      setLayout((current) =>
+        current && current.copies === copies && Math.abs(current.seconds - seconds) < 0.5
+          ? current
+          : { copies, seconds },
+      );
+    };
+    // Measured in a microtask, not inline: a synchronous setState in an effect body is a
+    // cascading render. Not left to the observer's own initial callback either — that is
+    // delivered on a frame, so a strip rendered in a background tab would sit unmeasured
+    // and motionless until the tab was looked at.
+    queueMicrotask(apply);
+    // The strip is as wide as the column, so a resize changes how many copies it takes to
+    // cover it — without this, widening the window opens a gap that never closes.
+    const observer = new ResizeObserver(apply);
+    observer.observe(host);
+    return () => {
+      live = false;
+      observer.disconnect();
+    };
+  }, [signature]);
+
+  const copies = layout?.copies ?? 2;
+  const seconds = layout?.seconds ?? 0;
+
+  return (
+    <div className="alert-ticker" ref={viewport}>
+      <div
+        className="alert-ticker-track"
+        // Paused until measured, so the first frame isn't a strip sliding at the wrong speed.
+        style={seconds ? { animationDuration: `${seconds}s` } : { animationPlayState: "paused" }}
+      >
+        {Array.from({ length: copies }, (_, copy) => (
+          <ul
+            key={copy}
+            className="alert-ticker-set"
+            ref={copy === 0 ? firstSet : undefined}
+            // Only the first copy is the list. The rest exist to make the wrap seamless and
+            // would otherwise be read out two, four, six times over.
+            aria-hidden={copy > 0 || undefined}
+            aria-label={copy === 0 ? "Active watches and warnings" : undefined}
+          >
+            {alerts.map((alert) => {
+              const color = ALERT_COLORS[alert.event] ?? DEFAULT_ALERT_COLOR;
+              const places = alertPlaces(alert.areaDesc);
+              const until = alertUntil(alert);
+              return (
+                <li key={alert.id} className="alert-chip">
+                  <span className="alert-swatch" style={{ background: color.fill, borderColor: color.stroke }} aria-hidden />
+                  <b>{alert.event}</b>
+                  {places && <i>{places}</i>}
+                  {/* Kept, unlike the headline, which only restates the event and the times
+                      already shown here and beside it. */}
+                  {until && <time className="alert-until" dateTime={alert.ends ?? alert.expires ?? undefined}>{until}</time>}
+                </li>
+              );
+            })}
+          </ul>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function AlertsPlot({ alerts, zones, bundle, office, generatedAt }: { alerts: AlertRecord[]; zones: ZoneIndex; bundle: OfficeBundle; office: Office; generatedAt: string | null }) {
@@ -1652,38 +1838,23 @@ function AlertsPlot({ alerts, zones, bundle, office, generatedAt }: { alerts: Al
 }
 
 function AlertsPanel({ alerts, zones, bundle, office, generatedAt, pending, error }: { alerts: AlertRecord[] | null; zones: ZoneIndex | null; bundle: OfficeBundle | null; office: Office; generatedAt: string | null; pending: boolean; error: boolean }) {
-  // The national view is not a CWA, so no zone declares it and there is no zone file to
-  // join against. Say so rather than rendering an empty map that looks broken.
-  if (office.id === NATIONAL.id) {
-    return <div className="gallery-message">Watches and warnings are issued per forecast office — pick an office to see them.</div>;
-  }
   if (error) return <div className="gallery-message">Active alerts are temporarily unavailable.</div>;
   if (pending || !alerts || !zones || !bundle) return <div className="gallery-message">Loading active watches and warnings…</div>;
 
-  const sorted = [...alerts].sort((a, b) => alertRank(b.event) - alertRank(a.event) || a.event.localeCompare(b.event));
+  // Narrowed to this view before anything counts, draws or lists it. A wide view is served
+  // every alert in force, so this is what makes its map, its header count and its strip
+  // agree; for an office the route has already narrowed it and this changes nothing.
+  const sorted = alerts
+    .filter((alert) => alertInView(alert, zones))
+    .sort((a, b) => alertRank(b.event) - alertRank(a.event) || a.event.localeCompare(b.event));
   return (
     <>
       <section className="forecast-gallery" aria-label="Active watches and warnings" data-office={office.id}>
-        <AlertsPlot alerts={alerts} zones={zones} bundle={bundle} office={office} generatedAt={generatedAt} />
+        <AlertsPlot alerts={sorted} zones={zones} bundle={bundle} office={office} generatedAt={generatedAt} />
       </section>
-      {sorted.length > 0 && (
-        <ul className="alert-list">
-          {sorted.map((alert) => {
-            const color = ALERT_COLORS[alert.event] ?? DEFAULT_ALERT_COLOR;
-            return (
-              <li key={alert.id} className="alert-item">
-                <span className="alert-swatch" style={{ background: color.fill, borderColor: color.stroke }} aria-hidden />
-                <div className="alert-body">
-                  <h4>{alert.event}</h4>
-                  <p className="alert-area">{alert.areaDesc}</p>
-                  <p className="alert-window">{alertWindow(alert)}</p>
-                  {alert.headline && <p className="alert-headline">{alert.headline}</p>}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      {/* Ranked hardest-hazard-first, so the strip leads with what matters rather than
+          whatever the API happened to return first. */}
+      {sorted.length > 0 && <AlertsTicker alerts={sorted} />}
     </>
   );
 }
@@ -1874,6 +2045,15 @@ function usePlaceIndex() {
   return { index, state, load };
 }
 
+/**
+ * The areas' own level in the picker, reusing the region drill-down rather than adding a
+ * second mechanism: `openRegion` already means "which sub-list is showing", and everything
+ * hung off it — the back button, Escape, ArrowLeft, the focus restore — then works here for
+ * free. Safe as a sentinel because `RegionId` is a closed set of six full words, so
+ * `findRegion("areas")` can only ever return null. A test pins that.
+ */
+const AREAS_LEVEL = "areas";
+
 function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office: Office) => void }) {
   const [open, setOpen] = useState(false);
   // The menu stays mounted through its exit animation, so "closing" is its own state.
@@ -1894,6 +2074,11 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
   // from event handlers — the React Compiler forbids mutating it inside an effect.
   const lastRegion = useRef<string | null>(null);
   const region = findRegion(openRegion);
+  const browsingAreas = openRegion === AREAS_LEVEL;
+  // Whether the office being shown is one of the areas, which is what marks the row the
+  // areas live behind. `regionOf` cannot answer this — an area is in no region by design.
+  const browsingArea = useMemo(() => AREAS.some((area) => area.id === office.id), [office]);
+  const readyAreas = useMemo(() => AREAS.filter((area) => area.ready).length, []);
   const homeRegion = useMemo(() => regionOf(office.id), [office]);
   const places = usePlaceIndex();
   const local = useLocalOffice(onSelect);
@@ -2154,6 +2339,40 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
                 ))
               )}
             </div>
+          ) : browsingAreas ? (
+            <div className="office-group" key={AREAS_LEVEL} role="listbox" aria-label="Regional maps">
+              <button
+                type="button"
+                className="office-back"
+                style={{ "--row": 0 } as React.CSSProperties}
+                onClick={() => setOpenRegion(null)}
+              >
+                <b aria-hidden="true">←</b>
+                <span>All NWS regions</span>
+              </button>
+              <p style={{ "--row": 1 } as React.CSSProperties}>Regional maps</p>
+              {AREAS.map((area, index) => (
+                <button
+                  key={area.id}
+                  type="button"
+                  role="option"
+                  aria-selected={area.id === office.id}
+                  data-office={area.id}
+                  data-area={area.id}
+                  disabled={!area.ready}
+                  className={area.id === office.id ? "is-active" : ""}
+                  style={{ "--row": index + 2 } as React.CSSProperties}
+                  onClick={() => {
+                    onSelect(area);
+                    close(true);
+                  }}
+                >
+                  <b aria-hidden="true">{area.id}</b>
+                  <span>{area.label}</span>
+                  {!area.ready && <em>Soon</em>}
+                </button>
+              ))}
+            </div>
           ) : region ? (
             <div className="office-group" key={region.id} role="listbox" aria-label={`${region.name} forecast offices`}>
               <button
@@ -2234,8 +2453,37 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
                 }}
               >
                 <b aria-hidden="true">US</b>
-                <span>National map</span>
+                <span>National Map</span>
                 {!NATIONAL.ready && <em>Soon</em>}
+              </button>
+              {/* The unofficial multi-state areas, as one row that opens into them rather
+                  than seven rows inline. They are a *level*, like an NWS region: the top of
+                  this menu stays a short list of places to go, and the seven areas do not
+                  crowd out the six regions above them. Listed last and drilled into the
+                  same way, but deliberately not called a region — they are not an NWS
+                  grouping and they cut straight across the ones above. */}
+              <button
+                type="button"
+                className={`office-areas${browsingArea ? " is-current" : ""}`}
+                data-region={AREAS_LEVEL}
+                // Marked the way the home region is — same class, so the same outline —
+                // so opening the menu while an area is showing points at the row it lives
+                // behind instead of looking unrelated to what is on screen.
+                aria-current={browsingArea ? "true" : undefined}
+                aria-expanded={false}
+                disabled={!readyAreas}
+                style={{ "--row": REGIONS.length + 2 } as React.CSSProperties}
+                onClick={() => enterRegion(AREAS_LEVEL)}
+              >
+                {/* A mark, not a code. Every other badge in this column is a real id — the
+                    region shorts, `US`, a CWA — and a group of seven areas has none; a
+                    letterform here would read as one and invite a search for it. Compared
+                    in place against ▦, ■, › and a count: the first two wash out at this
+                    size, the chevron is too light beside the bold ids, and a count would be
+                    wrong the moment an area is not ready. */}
+                <b aria-hidden="true">◆</b>
+                <span>Regional Maps</span>
+                {!readyAreas && <em>Soon</em>}
               </button>
             </div>
           )}
@@ -2355,7 +2603,7 @@ export function ForecastGraphic() {
   // waits for the first search. Zone boundaries change on the order of years, so this is
   // never re-fetched on the alert refresh timer.
   useEffect(() => {
-    if (!showAlerts || office.id === NATIONAL.id) return;
+    if (!showAlerts) return;
     let active = true;
     void (async () => {
       try {
@@ -2379,10 +2627,13 @@ export function ForecastGraphic() {
   useEffect(() => {
     if (!showAlerts || !officeZones) return;
     let active = true;
-    const codes = Object.keys(officeZones).join(",");
+    // A wide view cannot ask by zone — it carries thousands, past the outbound URL the
+    // upstream accepts — so it asks for everything in force and keeps what lands on it.
+    // One cached response then serves the national map and all seven areas.
+    const query = isWideView(office.id) ? "scope=all" : `zones=${Object.keys(officeZones).join(",")}`;
     const load = async () => {
       try {
-        const response = await fetch(`/api/alerts?zones=${codes}`);
+        const response = await fetch(`/api/alerts?${query}`);
         if (!response.ok) throw new Error(String(response.status));
         const payload = await response.json() as AlertPayload;
         if (!active) return;

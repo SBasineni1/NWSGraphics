@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
+import { AREAS, targetsFor, isWideView } from "../lib/areas.mjs";
 import { plotExtent, project, PLOT_WIDTH, MAP_HEIGHT } from "../lib/map-frame.mjs";
 
 // Picks the cities labelled on each office's map and resolves them to NWS gridpoints,
@@ -19,9 +20,8 @@ import { plotExtent, project, PLOT_WIDTH, MAP_HEIGHT } from "../lib/map-frame.mj
 // — a city is never labelled on a map that does not forecast it — without hand-filing.
 
 const USER_AGENT = "NWS Forecast Graphics (github.com/suchitbasineni/NWSGraphics)";
-const TARGET = 14;
-// The national frame is far larger, so it carries more labels without crowding.
-const NATIONAL_TARGET = 26;
+// Per-view label counts live in lib/areas.mjs alongside the lattice densities. A wider
+// frame carries more labels without crowding.
 // Bar at x=30 (17 wide) plus its value labels; 104 clears the widest of them.
 const LEGEND_GUTTER_PX = 104;
 // Labels are drawn as a value above a dot with the city name below, roughly 90×34 px on
@@ -41,11 +41,45 @@ const onlyArg = args.indexOf("--only");
 const only = onlyArg === -1 ? null : new Set(args[onlyArg + 1].split(","));
 
 const candidates = JSON.parse(await readFile(new URL("../scripts/data/office-cities.json", import.meta.url), "utf8"));
+
+/**
+ * An area's candidate labels, assembled from the per-office pools by state.
+ *
+ * office-cities.json is keyed by CWA, and an area is not a CWA, so it has no pool of its
+ * own. Its member states do: every candidate carries the state it is in, so the union of
+ * the offices' pools filtered to those states *is* the area's pool. Deduped because
+ * offices overlap at their borders and a city near one lands in both lists.
+ *
+ * Not taken from the "US" pool — that is already thinned to 120 nationally-ranked cities,
+ * which leaves a small area like the North East with almost nothing to choose from.
+ *
+ * Ranked population-first with land area as the tiebreak, matching how the per-office
+ * pools are ordered: 713 candidates carry no population at all (the Census estimates file
+ * covers neither Puerto Rico nor most of Hawaii), and ranking those alphabetically would
+ * put a hamlet above a city.
+ */
+function areaPool(area) {
+  const states = new Set(area.states);
+  const seen = new Map();
+  for (const [office, list] of Object.entries(candidates)) {
+    if (office === NATIONAL_POOL) continue;
+    for (const city of list) {
+      if (!states.has(city.state)) continue;
+      const key = `${city.name}|${city.state}`;
+      if (!seen.has(key)) seen.set(key, city);
+    }
+  }
+  return [...seen.values()].sort(
+    (a, b) => (b.population ?? 0) - (a.population ?? 0) || (b.area ?? 0) - (a.area ?? 0),
+  );
+}
+const NATIONAL_POOL = "US";
+const areaPools = new Map(AREAS.map((area) => [area.id, areaPool(area)]));
 const bundleDir = new URL("../public/offices/", import.meta.url);
 const names = (await readdir(bundleDir)).filter((name) => name.endsWith(".json")).sort();
 
 /** Greedy pick in rank order, keeping every accepted label at least `gap` pixels apart. */
-function spread(list, toPixel, gap, target = TARGET) {
+function spread(list, toPixel, gap, target) {
   const kept = [];
   for (const city of list) {
     const [x, y] = toPixel(city);
@@ -96,12 +130,12 @@ for (const name of names) {
   const office = bundle.office;
   if (only && !only.has(office)) continue;
 
-  const pool = candidates[office] ?? [];
+  const pool = areaPools.get(office) ?? candidates[office] ?? [];
   const extent = plotExtent(bundle.bounds, PLOT_WIDTH, MAP_HEIGHT, bundle.zoom);
   const shift = bundle.bounds.east > 180 ? (lon) => (lon < 0 ? lon + 360 : lon) : (lon) => lon;
   const toPixel = (city) => project(shift(city.lon), city.lat, extent, 0, 0, PLOT_WIDTH, MAP_HEIGHT);
 
-  const target = office === "US" ? NATIONAL_TARGET : TARGET;
+  const target = targetsFor(office).cities;
   let picked = spread(pool, toPixel, MIN_SEPARATION_PX, target);
   if (picked.length < MIN_LABELS) picked = spread(pool, toPixel, RELAXED_SEPARATION_PX, target);
 
@@ -116,9 +150,10 @@ for (const name of names) {
       // The API is the authority on ownership. A candidate it assigns to a neighbour is
       // dropped rather than relabelled — labelling a town on a map that does not forecast
       // it is the exact failure the hand-authored table's verification existed to prevent.
-      // The national view spans every office, so there is no single CWA to verify
-      // against — any US city is legitimately on it. Every other office still checks.
-      if (!grid || (office !== "US" && grid.cwa !== office)) return;
+      // A wide view — the nation, or a multi-state area — spans many offices, so there
+      // is no single CWA to verify against and any city inside its frame is legitimately
+      // on it. Every real office still checks.
+      if (!grid || (!isWideView(office) && grid.cwa !== office)) return;
       resolved.push({
         id: `${office}-${city.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
         name: city.name,

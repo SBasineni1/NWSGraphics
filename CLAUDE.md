@@ -15,6 +15,12 @@ probability of precipitation, quantitative precipitation) plus five outlook
 products off SPC and WPC (categorical convective risk, tornado / hail / damaging
 wind probability, any-severe probability, and excessive rainfall).
 
+Above the offices sit **eight synthetic wide views** that ride the identical pipeline: the
+national map (`US`) and **seven unofficial multi-state areas** declared in `lib/areas.mjs`
+— see "Unofficial regional views" below. They are `Office`s in every respect the code
+cares about, so most of this document applies to them unchanged; where it does not, the
+test is `isWideView`.
+
 `app/offices.ts` lists **all 125 NWS forecast offices** in their six regions and is
 **generated** by `scripts/build-offices.mjs` from the NWS reference map service —
 don't hand-edit it. **121 of the 125 are drawable.** `ready` is *derived from the assets
@@ -108,7 +114,13 @@ Treat any surviving "50 subrequests / 10 ms CPU" reasoning elsewhere in the docs
 - `node --max-old-space-size=6144 scripts/build-office-bundles.mjs` → `build-office-gridpoints.mjs`
   → `build-office-cities.mjs` → `build-offices.mjs` — the national asset chain, in that
   order. Bundles ~12s, the lattice ~18 min (31k `api.weather.gov/points` lookups; use
-  `--dry-run` to size it first), cities ~70s, registry seconds.
+  `--dry-run` to size it first), cities ~70s, registry seconds. The wide views are built by
+  this same chain — **editing `lib/areas.mjs` means re-running all four**, since an area's
+  frame, lattice, labels and registry entry are all derived. `--only NW,WE` scopes the
+  *middle two* (gridpoints and cities) to just the areas you touched; bundles and the
+  registry take no such flag and always do everything, which is cheap. A scoped lattice run
+  legitimately samples no CWA and fills entirely from the national pool — that is reported,
+  not treated as an error.
 - `scripts/build-cwa.mjs`, `build-grid-points.mjs`, `build-city-points.mjs`,
   `build-counties.mjs`, `build-overlays.mjs` are the **superseded four-office chain**.
   They still write `public/cwa.geojson` and friends, which nothing in the client reads
@@ -186,19 +198,81 @@ Labelled cities and the interpolation lattice are generated, not authored:
   rather than alphabetical. The gazetteer is decoded as **UTF-8**, not latin1, or Spanish
   names arrive as "BayamÃ³n".
 
+## Unofficial regional views ("areas")
+
+Seven multi-state views sit between one office and the whole country — North West, West,
+South West, Mid-West, South East, Mid-Atlantic, North East — declared in **`lib/areas.mjs`**.
+**NWS does not publish these groupings.** They are an editorial convenience, which is why
+they are data in this repo rather than derived from anything upstream.
+
+- **They are not `REGIONS`.** That name is taken in `app/offices.ts` by the six *official*
+  NWS regions (Eastern, Southern, Central, Western, Alaska, Pacific), which group offices
+  administratively and look nothing like these — an area cuts straight across them.
+  CLAUDE.md's word for the level above an office is "area", so that is the word used.
+- **Area ids are two letters, because every real CWA is three.** An id can therefore never
+  collide with an office id in a URL, an asset filename, or the picker. `NE` is the North
+  East *area*, not Nebraska.
+- **An area is a synthetic `Office`**, so it travels the whole existing pipeline unchanged:
+  same bundle shape, same lattice, same `?office=` parameter, same `findOffice`, and
+  `ready` is derived from assets on disk exactly as it is for a real office.
+- **Frames are derived from the member states' bounding box**, not hand-written, so adding
+  a state in `lib/areas.mjs` reframes the map with no numbers to update by hand. A postal
+  code with no state geometry **throws** rather than quietly shrinking the frame — that is
+  the wrong-but-plausible map that is hard to notice.
+- **Counties are dropped, interstates are kept** (`omit` on the bundle, which replaced the
+  national view's `nationalScale` boolean). At an area's zoom a county is a few pixels of
+  unreadable mush, but the interstate network is what makes a regional map legible and it
+  is two orders of magnitude fewer features. The national view drops both.
+- **Sampling density is per *kind* of view**, in `VIEW_TARGETS`: office 340 points / 14
+  labels, area 900 / 20, national 1800 / 26. The office numbers were tuned for a ~3° frame
+  and leave a 13-state area visibly under-resolved.
+- **An area's label pool is the union of its member states' per-office pools**, not the
+  `US` pool — that one is already thinned to 120 nationally-ranked cities, which leaves a
+  small area like the North East almost nothing to choose from.
+- **Alaska, Hawaii and the territories are deliberately absent.** Folding them into a CONUS
+  area shrinks the mainland into a corner of the canvas, the same reason the national view
+  is the lower 48.
+- **`isWideView` is the test that matters**, in both `lib/areas.mjs` (build scripts) and
+  `app/offices.ts` (client): "is there a CWA behind this id", not which flavour of wide
+  view it is. Both a city-ownership check and the alerts join need exactly that question.
+  See the alerts section below for the trap.
+
 ## Active watches & warnings
 
 An **Alerts** tab sits before Day 1 in the day switcher. It is a view, not a fourth day —
 alerts describe what is in force right now — so `dayIndex` stays a real day index and the
 view rides its own `showAlerts` flag rather than a sentinel value.
 
+- **Wide views draw alerts too, and they get there by a different route than an office.**
+  The nation and the seven areas each carry a zone bundle like any office; what changes is
+  how the alerts are *asked for*. An office sends its zone list comma-joined. A wide view
+  cannot: the national frame reaches **7,451 zones**, which blows past the ~8 KB outbound
+  URL the upstream accepts long before the list ends. So a wide view asks **unfiltered**
+  (`/api/alerts?scope=all`, ~250 alerts, one request) and narrows the result itself. One
+  cached response serves the national map *and* all seven areas — cheaper than querying
+  per view, not dearer.
+- **Membership is decided by the zones an alert names, never by whether it is drawable.**
+  `alertGeometries` hands back an alert's *own* polygon whenever it has one, without asking
+  where that polygon is, so once wide views began receiving every alert in force, a
+  storm-based warning in Texas counted as drawable on the Mid-Atlantic map. `alertInView`
+  tests `affectedZones` against the view's zone index instead — which *is* the frame test,
+  already computed. Safe because **every** active alert lists `affectedZones`, including all
+  27 of 251 that also carry a polygon. It runs before anything counts, draws or lists an
+  alert, so the header total, the map and the ticker cannot disagree. For a single office it
+  changes nothing; the route has already narrowed by zone.
+- **This was documented as impossible, on a bad measurement — don't trust the old reasoning
+  if you find it quoted elsewhere.** The claim was that a wide-view zone bundle costs
+  "megabytes apiece". Raw, US *is* 5.4 MB — but a browser transfers gzip, and the numbers
+  that matter are **US 1,163 KB gzipped against PHI's 326 KB**, for 7,451 zones against 318.
+  Heavy, not prohibitive, and only ever fetched when the Alerts tab is opened.
 - **Most alerts carry no geometry.** 12 of 14 sampled NY alerts had `geometry: null` and
   described themselves only through `affectedZones`, a list of zone URLs. Drawing one is a
   join against zone shapes, not a fetch of its outline. Storm-based warnings *do* carry a
   polygon, and it is preferred when present — it is far tighter than the counties it clips.
 - **`public/zones/{OFFICE}.json`** is that join table, built by `build-office-zones.mjs`:
-  UGC code → polygon, ~474 KB per office (~58 MB total, AKQ the largest at 1.9 MB raw /
-  469 KB gzipped). **Zones are claimed by frame overlap, not by the `cwa` that issues
+  UGC code → polygon, ~536 KB average across 133 files (~70 MB total; **US is the largest at
+  5.4 MB raw / 1,163 KB gzipped**, then SE at 2.6 MB, and AKQ leads the offices at 1.7 MB raw
+  / 425 KB gzipped). **Zones are claimed by frame overlap, not by the `cwa` that issues
   them**, so the map fills the plot the way the forecast field does rather than stopping at
   the office border — PHI draws 318 zones and pulls alerts from nine offices. The owning
   office is unioned in regardless, so a zone marginally outside its own frame is not lost.
@@ -360,6 +434,21 @@ lattice legitimately covers the frame with neighbours' data.
 - **Render tier** — only `RENDER_OFFICE_COUNT` offices (default 24) get PNGs, taken from
   `scripts/data/office-population.json`. PHI is always included, since it is the default
   office and must have imagery wherever it ranks.
+
+**The seven areas are data tier only, and that falls out of the ranking rather than being
+enforced.** `office-population.json` is scored per CWA, so no area appears in it and none
+can be sliced into the render tier — only PHI and US are pinned past the ranking. That is
+the right default: an area renders live from `forecast/{AREA}.json` like any live office,
+and imagery is switched off at the client anyway. If you ever pin an area in, re-measure
+first — an area's lattice is ~700 points against an office's ~290.
+
+**An area's freshness probe speaks for one city, so an area can lag one office's revision.**
+The probe anchors on `cities[0]` (New York for MA, Chicago for MW), which stands in for the
+whole view. For an office that is fine; for a 13-state area the lattice draws on many
+offices, so a reissue by a *different* office in the area does not mark it stale and its
+data waits for the anchor city's office to reissue. Bounded in practice — offices reissue
+several times a day and the workflow runs hourly — but it is a real weaker guarantee than
+an office gets, and the lever if it matters is probing more than one anchor per area.
 
 **A HEAD on a gridpoint returns `last-modified` and downloads zero bytes**, against ~285 KB
 for a GET. That probe is what makes 121 offices affordable: `forecast/index.json` records
@@ -527,6 +616,20 @@ the schedule against Actions and the *published office count* against R2.
   rounding shared by `build-office-bundles` and `build-office-zones`, for the same reason
   `map-frame.mjs` exists: both must agree exactly, or an alert polygon stops sitting on the
   county it covers. Extracting it was verified byte-identical across all 126 bundles.
+  **`simplify`'s closed-ring fallback is a trap worth knowing.** When simplification drops a
+  ring under four points it returns the *original* — correct, since three points are not a
+  polygon, but it means the hardest-simplified rings are the ones that keep every vertex. At
+  a wide zoom that is backwards: a zone smaller than a pixel is precisely the one that
+  collapses, and it came back at full resolution. It put **88% of `US.json`'s 689,078 points
+  into 10% of its zones**, one of them 14,243 points for a shape covering about a pixel. The
+  opt-in `collapse` argument substitutes the ring's bounding quad — five points, and it
+  fires on 72% of rings, saving 540,803 of them. Only 261 collapsed rings exceed one pixel,
+  the largest ~6 px, and a ring that reduces below four points at a given tolerance is a
+  sliver whose bounding box is a *better* representation than a degenerate triangle.
+  **Only `build-office-zones` opts in**; `build-office-bundles` must keep its byte-identical
+  output, and a CWA outline is never sub-pixel on its own map. This is the same floor
+  CLAUDE.md notes for CWA outlines under "How it renders" — simplifying harder made those
+  worse for exactly this reason.
 - `lib/map-frame.mjs` holds the Web Mercator math shared by the renderer and
   the build scripts. Both must agree exactly: `build-grid-points.mjs` lattices
   the frames `ForecastGraphic.tsx` draws, so drift here shows up as missing

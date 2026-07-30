@@ -628,5 +628,40 @@
     "id": "US",
     "label": "National",
     "ready": true
+  },
+  {
+    "id": "NW",
+    "label": "North West",
+    "ready": true
+  },
+  {
+    "id": "WE",
+    "label": "West",
+    "ready": true
+  },
+  {
+    "id": "SW",
+    "label": "South West",
+    "ready": true
+  },
+  {
+    "id": "MW",
+    "label": "Mid-West",
+    "ready": true
+  },
+  {
+    "id": "SE",
+    "label": "South East",
+    "ready": true
+  },
+  {
+    "id": "MA",
+    "label": "Mid-Atlantic",
+    "ready": true
+  },
+  {
+    "id": "NE",
+    "label": "North East",
+    "ready": true
   }
 ]
