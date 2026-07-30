@@ -389,14 +389,20 @@ makes a client ask for them. Setting only the first recreates exactly the state 
 removed. Budget it at ~80 writes per office per run: at 16 runs/day that is ~38k Class A
 per office per month.
 
-**`latest.json` is deliberately left behind, not deleted.** It is only overwritten by a
-successful render, so with imagery off it freezes at the last release that rendered. That
-is why the pre-fetch exit compares `sourceRevision` *only* when `RENDER_ENABLED` — an
-unconditional compare would see a mismatch on every run forever. The frozen manifest is
-harmless (no client reads it while the flag is unset) and keeps the published path working
-if the flag is flipped before the next render run. The `releases/` objects it points at are
-never pruned while rendering is off, since `pruneOldReleases` runs only in the render path;
-clearing the ~1.5 GB left from the last render is a one-time manual delete.
+**`latest.json` freezes when imagery is off, and that is why two things are conditional on
+`RENDER_ENABLED`:** the publisher's pre-fetch `sourceRevision` compare and the pre-build
+gate's manifest read (`scripts/probe-offices.mjs`). Both read a file that only a successful
+render rewrites, so with imagery off an unconditional compare reports a deploy on *every*
+run forever — which costs the gate its entire purpose, ~2 minutes of `npm ci` and a build
+before the publisher exits anyway.
+
+**Clearing the orphaned releases is `npm run plots:prune-releases -- --delete`**, a one-off,
+because `pruneOldReleases` runs only inside the render path and therefore never runs at all
+now. It deletes `releases/**` *and* `latest.json`, in that order and deliberately: a
+manifest that outlives its objects is worse than no manifest, because
+`PublishedForecastPlot` renders missing assets as broken images while an absent manifest
+just leaves every view on the live canvas. It never touches `forecast/`, which is the only
+prefix production reads. Dry run by default.
 
 `app/api/forecast/route.ts` (`runtime = "edge"`) is the data source: it fans out
 batched requests to `api.weather.gov/gridpoints/{wfo}/{x},{y}` for the selected
@@ -484,6 +490,21 @@ each office's last probe, so a run costs 121 HEADs plus a fan-out only for the o
 actually reissued. A cold run with no index refreshes everything — **~35,000 upstream
 requests**. `PLOT_OFFICES=PHI,OKX` narrows both tiers for testing or for re-running one
 office after a failure.
+
+**The fetch queue is ordered by how far behind a view is, and it has to be.** The budget
+(`PLOT_FETCH_BUDGET_MS`, 12 min) cuts the queue on most runs, so the *order* decides who
+gets served — and registry order is a fixed priority, which turns a cut into permanent
+starvation instead of a rotation. Measured on run #121: 43 views written between 16:02 and
+16:14, the render tier and then stale offices ABR→DVN, so everything sorting later waited
+for a next run that made the identical cut. The seven areas sort at M–W and had never been
+published at all, so three consecutive runs on the commit that added them left every
+regional view with no forecast object — the one failure the live canvas cannot render
+through, since `/api/forecast` 504s in production. `behindnessOf` sorts never-published
+first (absent draws nothing; stale still draws a map), then oldest published issuance, so
+anything a cut skips outranks everything on the next run. Use **0, not `-Infinity`**, for
+never-published: `-Infinity - -Infinity` is NaN and a NaN comparator leaves tie order to
+the engine — observed shuffling the areas among themselves. The run log prints the queue
+head, which is the only thing that distinguishes a fair cut from a starving one.
 
 **Forecast data publishes before the imagery change-check**, deliberately. A run where no
 render-tier office moved must still refresh the offices that did, so the old

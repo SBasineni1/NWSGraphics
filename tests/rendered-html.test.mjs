@@ -525,7 +525,7 @@ test("publishes changed forecast canvases on the issuance-aware schedule", async
   assert.match(publisher, /await pooled\(toFetch, 4, async \(office\)/);
   assert.match(publisher, /PLOT_FETCH_BUDGET_MS/);
   // Render-tier offices are fetched first, so a budget cut can never leave nothing to render.
-  assert.match(publisher, /\[\.\.\.new Set\(\[\.\.\.RENDER_OFFICES, \.\.\.staleOffices\]\)\]/);
+  assert.match(publisher, /\[\.\.\.new Set\(\[\.\.\.RENDER_OFFICES, \.\.\.orderedStale\]\)\]/);
   assert.match(workflow, /cron: "\*\/15 \* \* \* \*"/);
   assert.match(workflow, /timezone: "America\/New_York"/);
   assert.match(workflow, /workflow_dispatch/);
@@ -573,6 +573,29 @@ test("publishes forecast data without rendering imagery when the render tier is 
   // The data tier is never gated on the render tier: dropping imagery must not drop the
   // objects that are the only forecast source in production.
   assert.match(publisher, /await publishObject\(`forecast\/\$\{office\}\.json`/);
+});
+
+test("a budget-limited run serves the views that are furthest behind, not the alphabet", async () => {
+  const publisher = await readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8");
+  // Registry order is a *fixed* priority, and a fetch budget that cuts the queue every run
+  // turns a fixed priority into permanent starvation rather than a rotation. Measured on
+  // run #121: 43 views written inside the 12-minute budget, the render tier then stale
+  // offices ABR..DVN, so everything sorting later waited for a next run that made the
+  // identical cut — and the seven areas, which had never been published at all, were
+  // unreachable across three consecutive runs on the commit that added them.
+  assert.match(publisher, /const orderedStale = \[\.\.\.staleOffices\]\.sort\(\(a, b\) => behindnessOf\(a\) - behindnessOf\(b\)\)/);
+  // Zero, not -Infinity: `-Infinity - -Infinity` is NaN, and a comparator returning NaN
+  // leaves tie order up to the engine. Observed doing exactly that — the areas sorted to
+  // the front correctly but shuffled among themselves, so which ones a cut run reached
+  // was luck. Every real key is a positive epoch, so zero already sorts ahead of them.
+  assert.match(publisher, /if \(!entry\?\.updatedAt\) return 0;/);
+  assert.doesNotMatch(publisher, /return Number\.NEGATIVE_INFINITY/);
+  // A view with no object at all outranks a merely-old one: stale still draws a map,
+  // absent draws nothing.
+  assert.match(publisher, /const behindnessOf = \(office\) => \{/);
+  // The queue head goes in the run log, because a count alone looks the same whether the
+  // order is fair or starving something.
+  assert.match(publisher, /most-behind first/);
 });
 
 test("the pre-build gate keeps short-circuiting once imagery is off", async () => {

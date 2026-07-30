@@ -224,10 +224,47 @@ if (nothingToPublish) {
   process.exit(0);
 }
 
+/**
+ * How far behind a stale view is, as a sort key: never published first, then oldest
+ * published issuance.
+ *
+ * The stale list arrives in registry order, which is alphabetical, and that is a *fixed*
+ * priority. Combined with a fetch budget that cuts the list every run, it starves the same
+ * tail forever rather than rotating through it. Measured on run #121: 43 views written
+ * between 16:02 and 16:14 — the render tier, then stale offices from ABR to DVN — so
+ * everything sorting after D waited for a next run that made exactly the same cut. The
+ * seven areas (MA, MW, NE, NW, SE, SW, WE) had never been published at all and were
+ * unreachable by construction, not by bad luck: three runs on the commit that added them
+ * left every regional view with no forecast object, which is the one failure the live
+ * canvas cannot render through.
+ *
+ * Ordering by staleness inverts that. Anything a budget cut skips is further behind on the
+ * next run, so it rises; a view with no object at all outranks every merely-old one,
+ * because "stale" still draws a map and "absent" draws nothing.
+ */
+// Zero for "never published", not -Infinity: every real key is a positive epoch so zero
+// already sorts ahead of all of them, and subtracting two infinities gives NaN — a
+// comparator that returns NaN leaves the engine free to order those elements however it
+// likes. That is not hypothetical, it was observed: the seven areas all sorted to the
+// front (correct) but among themselves came out MW, NW, SW, WE instead of registry order,
+// so which of them a budget-limited run reached was luck.
+const behindnessOf = (office) => {
+  const entry = previousIndex[office];
+  if (!entry?.updatedAt) return 0;
+  return Date.parse(entry.updatedAt) || 0;
+};
+const orderedStale = [...staleOffices].sort((a, b) => behindnessOf(a) - behindnessOf(b));
 // Render offices are always fetched — their imagery is rebuilt from this snapshot even if
 // only one of them moved, because a release is published whole — and they go *first*, so
-// a budget cut can never leave the run with nothing to render.
-const toFetch = [...new Set([...RENDER_OFFICES, ...staleOffices])];
+// a budget cut can never leave the run with nothing to render. They are also why the
+// starvation above was so sharp: 26 unconditional fetches ate most of a 12-minute budget
+// before the first genuinely stale view was touched. With imagery off this list is empty
+// and the whole budget goes to views that actually moved.
+const toFetch = [...new Set([...RENDER_OFFICES, ...orderedStale])];
+// Logged because the queue *head* is the whole answer to "why is that view still stale" —
+// a budget-limited run only ever gets through a prefix of this, and without it the run log
+// shows a count that looks identical whether the order is fair or starving something.
+console.error(`fetching ${toFetch.length}, most-behind first: ${toFetch.slice(0, 10).join(" ")}${toFetch.length > 10 ? " …" : ""}`);
 
 // The fetch phase gets a ceiling, like the capture phase already had. Without one a cold
 // run — no index, so all 121 offices look stale — grinds through every office before
