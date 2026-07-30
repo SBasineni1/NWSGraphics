@@ -17,6 +17,11 @@ import { pooled } from "../lib/pooled.mjs";
 const publicBaseUrl = (process.env.R2_PUBLIC_BASE_URL ?? "").replace(/\/+$/, "");
 const sourceRevision = process.env.GITHUB_SHA ?? "local";
 const forcePublish = process.env.FORCE_PUBLISH === "true";
+// Mirrors the publisher's own gate, and has to: this step decides whether that one even
+// gets installed. Same reading of the setting, so the two can never disagree about which
+// tiers a run has.
+const renderCountSetting = process.env.RENDER_OFFICE_COUNT?.trim();
+const renderEnabled = (renderCountSetting ? Number(renderCountSetting) : 24) > 0;
 const officeOverride = process.env.PLOT_OFFICES?.trim();
 const overrideList = officeOverride ? officeOverride.split(",").map((id) => id.trim()).filter(Boolean) : null;
 
@@ -44,9 +49,14 @@ async function readPublished(path) {
   }
 }
 
+// The manifest is only consulted when imagery is on. With the render tier off nothing
+// rewrites latest.json, so its `sourceRevision` freezes at the last commit that rendered
+// and reading it would report a deploy on every run forever — turning this gate, whose
+// whole job is ending an idle run in ~20s, into a guaranteed two minutes of setup before
+// the publisher exits anyway.
 const [previousIndex, manifest] = await Promise.all([
   readPublished("forecast/index.json"),
-  readPublished("latest.json"),
+  renderEnabled ? readPublished("latest.json") : Promise.resolve(null),
 ]);
 
 const probes = {};
@@ -60,10 +70,13 @@ await pooled(offices, 12, async (office) => {
 });
 
 const stale = staleOfficesFrom(offices, probes, previousIndex ?? {}, forcePublish);
-// A missing index or manifest means we cannot prove anything is current, and a changed
-// revision means a deploy that must re-render even if NWS has not moved.
+// A missing index means we cannot prove anything is current. When imagery is on, a missing
+// manifest means the same, and a changed revision means a deploy that must re-render even
+// if NWS has not moved. With imagery off there is no imagery to re-render, so an office
+// that moved is the only thing that can make a run worth its setup.
+const deployNeedsRender = renderEnabled && (!manifest || manifest.sourceRevision !== sourceRevision);
 let changed = true;
-if (!forcePublish && previousIndex && manifest && !stale.length && manifest.sourceRevision === sourceRevision) {
+if (!forcePublish && previousIndex && !stale.length && !deployNeedsRender) {
   changed = false;
 }
 

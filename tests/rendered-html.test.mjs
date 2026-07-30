@@ -541,6 +541,54 @@ test("publishes changed forecast canvases on the issuance-aware schedule", async
   assert.doesNotMatch(workflow, /npm run dev/);
 });
 
+test("publishes forecast data without rendering imagery when the render tier is off", async () => {
+  const [publisher, workflow, component] = await Promise.all([
+    readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../.github/workflows/publish-forecast-plots.yml", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+  ]);
+  // Zero offices has to mean *no imagery* at every branch that used to assume some. It
+  // did not: the pins put PHI and US back after the slice and an empty render tier threw,
+  // so the count could not express "off" at any value.
+  assert.match(publisher, /const RENDER_ENABLED = renderCount > 0/);
+  assert.match(publisher, /if \(RENDER_ENABLED\) \{\s*\n\s*for \(const pinned of \["PHI", "US"\]\)/);
+  assert.match(publisher, /if \(RENDER_ENABLED && !renderable\.length\)/);
+  // The exit is *after* the data tier is written and before the browser is launched —
+  // a data-only run is still a full data run, it just stops short of pixels.
+  assert.match(publisher, /reason: "imagery disabled"/);
+  const dataPublish = publisher.indexOf('publishObject(\n  "forecast/index.json"');
+  const renderExit = publisher.indexOf('reason: "imagery disabled"');
+  const browserLaunch = publisher.indexOf("await chromium.launch(");
+  assert.ok(dataPublish > 0 && renderExit > dataPublish, "data tier must publish before the imagery-disabled exit");
+  assert.ok(browserLaunch > renderExit, "the browser must launch only past the imagery-disabled exit");
+  // Nothing serves the PNGs, which is why the tier is off: the client gates imagery on a
+  // flag that is unset in production. The two must not drift apart silently — imagery on
+  // in the publisher and off in the client is exactly the state this change removed.
+  assert.match(workflow, /RENDER_OFFICE_COUNT: \$\{\{ vars\.RENDER_OFFICE_COUNT \|\| '0' \}\}/);
+  assert.match(component, /const PUBLISHED_PLOTS_ENABLED = process\.env\.NEXT_PUBLIC_PUBLISHED_PLOTS === "true"/);
+  // No browser is reachable on a data-only run, so installing one is pure run time.
+  assert.match(workflow, /Install Chromium\n\s*if: .*env\.RENDER_OFFICE_COUNT != '0'/);
+  // The site itself is still required — it is what serves /api/forecast to the fan-out.
+  assert.match(workflow, /npm run start -- --port 3000/);
+  // The data tier is never gated on the render tier: dropping imagery must not drop the
+  // objects that are the only forecast source in production.
+  assert.match(publisher, /await publishObject\(`forecast\/\$\{office\}\.json`/);
+});
+
+test("the pre-build gate keeps short-circuiting once imagery is off", async () => {
+  const probe = await readFile(new URL("../scripts/probe-offices.mjs", import.meta.url), "utf8");
+  // latest.json is only rewritten by a successful render, so with imagery off its
+  // sourceRevision freezes at the last commit that rendered. Comparing against it
+  // unconditionally reports a deploy on *every* run forever, which costs the gate its
+  // entire purpose: ~2 minutes of npm ci and a build before the publisher exits anyway.
+  assert.match(probe, /const renderEnabled = \(renderCountSetting \? Number\(renderCountSetting\) : 24\) > 0/);
+  assert.match(probe, /renderEnabled \? readPublished\("latest\.json"\) : Promise\.resolve\(null\)/);
+  assert.match(probe, /const deployNeedsRender = renderEnabled &&/);
+  // An unreadable index still resolves towards running the job, imagery or not.
+  assert.match(probe, /if \(!forcePublish && previousIndex && !stale\.length && !deployNeedsRender\)/);
+  assert.match(probe, /let changed = true/);
+});
+
 test("publishes every office and prunes aged-out releases", async () => {
   const [publisher, component, assetRoute, probeModule] = await Promise.all([
     readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
@@ -554,7 +602,8 @@ test("publishes every office and prunes aged-out releases", async () => {
   assert.match(publisher, /data\/offices\.json/);
   assert.match(publisher, /data\/office-population\.json/);
   assert.match(publisher, /const DATA_OFFICES = registry/);
-  assert.match(publisher, /const RENDER_OFFICES = populationRank/);
+  assert.match(publisher, /const RENDER_OFFICES = RENDER_ENABLED/);
+  assert.match(publisher, /populationRank/);
   assert.match(publisher, /RENDER_OFFICE_COUNT/);
   assert.doesNotMatch(publisher, /const OFFICES = \[\s*"[A-Z]{3}"/);
   // The default office must always have imagery, wherever it lands in the ranking.
@@ -910,9 +959,14 @@ test("an unchanged run exits before it fetches anything", async () => {
   // condition, not a bare regex: `previous?.sourceRevision === sourceRevision` also
   // appears in the late renderUnchanged check, so a plain match would pass even if the
   // early exit dropped the clause entirely.
+  //
+  // The clause is conditional on the render tier because it reads latest.json, which only
+  // a successful render rewrites. With imagery off that file freezes at the last commit
+  // that rendered, so an unconditional comparison would report "changed" on every run
+  // forever and fetch nothing — a run that costs a build and publishes an unchanged index.
   assert.match(
     publisher,
-    /!forcePublish && !staleOffices\.length && previous\?\.sourceRevision === sourceRevision/,
+    /const nothingToPublish = !forcePublish && !staleOffices\.length\n\s*&& \(!RENDER_ENABLED \|\| previous\?\.sourceRevision === sourceRevision\)/,
   );
   // One probe implementation, shared with the pre-build gate.
   assert.match(publisher, /from "\.\.\/lib\/office-probe\.mjs"/);

@@ -39,15 +39,34 @@ const DATA_OFFICES = registry
   .filter((id) => !overrideList || overrideList.includes(id));
 const renderCountSetting = process.env.RENDER_OFFICE_COUNT?.trim();
 const renderCount = renderCountSetting ? Number(renderCountSetting) : 24;
-const RENDER_OFFICES = populationRank
-  .filter((id) => DATA_OFFICES.includes(id))
-  .slice(0, Math.max(0, renderCount));
+/**
+ * Whether this run renders imagery at all. Zero offices means none — and that has to hold
+ * at every later branch or it holds at none of them: the pins below put PHI and US back
+ * *after* the slice, and an empty render tier threw two lines further on, so the setting
+ * could not express "no imagery" no matter what it was set to.
+ *
+ * It is off in the workflow, because the client does not serve the PNGs: they are gated on
+ * NEXT_PUBLIC_PUBLISHED_PLOTS, which is unset in Vercel, so `PublishedForecastPlot` never
+ * mounts and nothing ever requests a release object. Rendering them anyway cost ~1,120 R2
+ * writes per run — about 94% of the account's Class A operations — and ~15 minutes of a
+ * ~28-minute run, which is what pushed runs past the 15-minute cron and left the *data*
+ * tier hours behind. The whole render path below is intact and unchanged; this only gates
+ * it, so setting RENDER_OFFICE_COUNT back to a positive number restores imagery.
+ */
+const RENDER_ENABLED = renderCount > 0;
+const RENDER_OFFICES = RENDER_ENABLED
+  ? populationRank
+    .filter((id) => DATA_OFFICES.includes(id))
+    .slice(0, renderCount)
+  : [];
 if (!DATA_OFFICES.length) throw new Error("registry lists no drawable office — run the asset chain first");
 // Two offices are pinned into the render tier regardless of the population ranking: PHI
 // because it is the site's default, and US because the national view is not in that
 // ranking at all (it is scored per CWA) yet is the single most-viewed map there is.
-for (const pinned of ["PHI", "US"]) {
-  if (!RENDER_OFFICES.includes(pinned) && DATA_OFFICES.includes(pinned)) RENDER_OFFICES.push(pinned);
+if (RENDER_ENABLED) {
+  for (const pinned of ["PHI", "US"]) {
+    if (!RENDER_OFFICES.includes(pinned) && DATA_OFFICES.includes(pinned)) RENDER_OFFICES.push(pinned);
+  }
 }
 // Releases are immutable and only the newest is ever referenced, so old ones are dead
 // weight — without pruning the bucket grows by ~174 MB per publish, forever.
@@ -187,8 +206,15 @@ console.error(`probed ${DATA_OFFICES.length} offices in ${((Date.now() - probeSt
 // office and every render-tier office is fetched unconditionally, so a run that reaches
 // the old exit at the bottom has already spent ~7,250 upstream requests discovering it
 // had nothing to do. That cost is what kept the schedule hourly.
+//
+// The source revision only gates a run that renders. With imagery off, latest.json stops
+// being rewritten, so its `sourceRevision` freezes at whatever commit last rendered and
+// every subsequent run would see a mismatch, fetch nothing, and rewrite the index for no
+// reason. "No office moved" is the whole answer when data is the whole job.
 const previous = await currentManifest();
-if (!forcePublish && !staleOffices.length && previous?.sourceRevision === sourceRevision) {
+const nothingToPublish = !forcePublish && !staleOffices.length
+  && (!RENDER_ENABLED || previous?.sourceRevision === sourceRevision);
+if (nothingToPublish) {
   console.log(JSON.stringify({
     published: false,
     reason: "nothing to publish",
@@ -262,24 +288,28 @@ if (budgetSkipped) {
 }
 
 const renderable = RENDER_OFFICES.filter((office) => forecasts[office]);
-if (!renderable.length) throw new Error(`no render-tier office returned a forecast (${fetchFailures.join(", ")})`);
-// The release is keyed off the default office's issuance when it is available, so the id
-// stays comparable with every release published before this became a national build.
-const forecast = forecasts.PHI ?? forecasts[renderable[0]];
+// An empty render tier is a failure when imagery was asked for and the expected state
+// when it was not, so the throw is conditional on the ask rather than on the result.
+if (RENDER_ENABLED && !renderable.length) {
+  throw new Error(`no render-tier office returned a forecast (${fetchFailures.join(", ")})`);
+}
 
 // Snapshot each outlook centre once and serve it to every office, so every outlook
 // canvas in the release comes from the same issuance — and so a slow upstream can't
 // stall the render. The two are independent: one centre being down costs its own
-// products, not the other's.
+// products, not the other's. Only the render path reads these, so a data-only run skips
+// both requests.
 const outlookSnapshots = {};
-await Promise.all([["spc", "/api/spc-outlook"], ["wpc", "/api/wpc-outlook"]].map(async ([name, path]) => {
-  try {
-    outlookSnapshots[name] = await fetchJson(`${siteUrl}${path}`, { cache: "no-store" });
-  } catch (error) {
-    outlookSnapshots[name] = null;
-    console.error(`${name.toUpperCase()} outlook unavailable, publishing without it: ${error.message}`);
-  }
-}));
+if (RENDER_ENABLED) {
+  await Promise.all([["spc", "/api/spc-outlook"], ["wpc", "/api/wpc-outlook"]].map(async ([name, path]) => {
+    try {
+      outlookSnapshots[name] = await fetchJson(`${siteUrl}${path}`, { cache: "no-store" });
+    } catch (error) {
+      outlookSnapshots[name] = null;
+      console.error(`${name.toUpperCase()} outlook unavailable, publishing without it: ${error.message}`);
+    }
+  }));
+}
 
 // A release is ~320 objects. Uploaded one at a time each pays a full round trip to R2,
 // so the phase is dominated by latency rather than bandwidth — a pool turns that into
@@ -316,6 +346,29 @@ await publishObject(
   "no-store, max-age=0",
 );
 console.error(`published forecast data: ${Object.keys(forecasts).length} offices, ${(forecastBytes / 1024).toFixed(0)} KB`);
+
+// The data tier *is* the run when imagery is off. Everything past this point — the
+// browser, the capture loop, the PNG uploads, the manifest and the prune — exists only to
+// produce release objects, so a data-only run ends here rather than launching Chromium to
+// render pixels no client will request. `latest.json` is deliberately left alone: it is
+// only overwritten by a successful render, and rewriting or deleting it would break the
+// published path for anyone who turns NEXT_PUBLIC_PUBLISHED_PLOTS back on before the next
+// render run.
+if (!RENDER_ENABLED) {
+  console.log(JSON.stringify({
+    published: false,
+    reason: "imagery disabled",
+    forecastsRefreshed: Object.keys(forecasts).length,
+    forecastKilobytes: Math.round(forecastBytes / 1024),
+    deferred: budgetSkipped,
+    fetchFailures,
+  }));
+  process.exit(0);
+}
+
+// The release is keyed off the default office's issuance when it is available, so the id
+// stays comparable with every release published before this became a national build.
+const forecast = forecasts.PHI ?? forecasts[renderable[0]];
 
 // Per office, not on the default office's clock. This used to compare the whole release
 // against `forecast.updatedAt` — PHI's issuance, or the first renderable office's — so an
@@ -385,7 +438,11 @@ async function openPage() {
   // so that path has to be served from the same snapshot too — otherwise the page would
   // render against whatever is already published instead of what this run just fetched.
   await page.route("**/api/forecast-assets/forecast/*.json", async (route) => {
-    const office = /forecast\/([A-Z]{3})\.json/.exec(route.request().url())?.[1];
+    // Two or three letters: three is a CWA, two is a wide view (`US` and every area id).
+    // At {3} the pinned national view missed this intercept entirely and only rendered
+    // because the /api/forecast route below happens to catch the client's fallback — the
+    // same off-by-one the asset route already carries a comment about.
+    const office = /forecast\/([A-Z]{2,3})\.json/.exec(route.request().url())?.[1];
     const payload = office ? forecasts[office] : null;
     if (!payload) {
       await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "Unknown office" }) });

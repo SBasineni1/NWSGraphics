@@ -57,9 +57,21 @@ jobs:
       R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
       RELEASE_RETENTION_COUNT: ${{ vars.RELEASE_RETENTION_COUNT }}
       # How many offices get pre-rendered PNGs, most populous first. Every drawable office
-      # gets forecast *data* regardless — that is what lets it render at all. Unset uses
-      # the script default of 24 (~110 MB and ~27 s per office when measured locally).
-      RENDER_OFFICE_COUNT: ${{ vars.RENDER_OFFICE_COUNT }}
+      # gets forecast *data* regardless — that is what lets it render at all.
+      #
+      # Zero, because nothing serves the PNGs: the client gates them on
+      # NEXT_PUBLIC_PUBLISHED_PLOTS, which is unset in Vercel, so every visitor is on the
+      # live canvas and no release object is ever requested. Rendering them anyway cost
+      # ~1,120 R2 writes a run (~94% of the account's Class A operations, ~570k/month
+      # against a 1M free tier) and ~15 minutes of a ~28-minute run — which is the reason
+      # runs serialised behind a 15-minute cron and offices sat up to 17 hours stale.
+      # Data-only runs are ~12 minutes and ~68 writes.
+      #
+      # Set the repository variable to a positive number to bring imagery back; the render
+      # path is untouched, only gated. Turning it back on also means setting
+      # NEXT_PUBLIC_PUBLISHED_PLOTS=true in Vercel and redeploying, or the PNGs will be
+      # published and still not served.
+      RENDER_OFFICE_COUNT: ${{ vars.RENDER_OFFICE_COUNT || '0' }}
       # Per-phase ceilings. A cold run defers whatever does not fit rather than failing:
       # deferred offices stay out of forecast/index.json, so the next probe still sees
       # them as stale and picks them up. Cold start converges over a few runs.
@@ -108,18 +120,24 @@ jobs:
         if: steps.publication.outputs.enabled == 'true' && steps.probe.outputs.changed != 'false'
         run: npm ci
 
+      # Only the render tier drives a browser. With RENDER_OFFICE_COUNT at 0 the publisher
+      # exits after writing forecast data and never calls chromium.launch(), so installing
+      # it would be ~30s of every run spent on a binary the run cannot reach.
       - name: Install Chromium
-        if: steps.publication.outputs.enabled == 'true' && steps.probe.outputs.changed != 'false'
+        if: steps.publication.outputs.enabled == 'true' && steps.probe.outputs.changed != 'false' && env.RENDER_OFFICE_COUNT != '0'
         run: npx playwright install --with-deps chromium
 
       - name: Build forecast site
         if: steps.publication.outputs.enabled == 'true' && steps.probe.outputs.changed != 'false'
         run: npm run build
 
-      # The publisher used to drive the Vite dev server, which renders through
-      # unminified modules and a development build of React. Serving the production
-      # build instead renders an office in 11.6s where dev took 25.1s — better than
-      # twice over, for one build step.
+      # The site is still served even on a data-only run, and is not optional there: the
+      # publisher gets each office's forecast by calling this server's /api/forecast, which
+      # is what fans out to ~290 api.weather.gov gridpoints. No site, no data tier.
+      #
+      # It is the production build rather than the Vite dev server because that server also
+      # used to be what Playwright screenshotted: dev renders through unminified modules and
+      # a development build of React, 25.1s per office against 11.6s.
       - name: Start forecast site
         if: steps.publication.outputs.enabled == 'true' && steps.probe.outputs.changed != 'false'
         run: |

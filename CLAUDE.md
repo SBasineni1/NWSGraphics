@@ -365,12 +365,38 @@ all (see below). Collapsing them onto one flag, or reaching for
 `NEXT_PUBLIC_FORECAST_ASSET_BASE_URL` to disable imagery, drops production onto a route
 that 504s. A test pins this.
 
-**There is no publisher-side kill switch for imagery, despite appearances.**
-`RENDER_OFFICE_COUNT=0` does not disable rendering: PHI and US are force-pinned back into
-the render tier right after the slice, an empty `renderable` throws, and an empty manifest
-throws again on purpose. And `latest.json` is only overwritten by a *successful* render
-run, so a publisher that stops rendering leaves the last manifest live and clients keep
-being served the old release. Imagery is switched off at the client, not the publisher.
+**The render tier is off, at the publisher, and that is the deployed state.**
+`RENDER_OFFICE_COUNT: ${{ vars.RENDER_OFFICE_COUNT || '0' }}` in the workflow, gating
+`RENDER_ENABLED` in the publisher: no pins, no browser, no capture, no PNG uploads, no
+manifest, no prune. A run writes `forecast/{OFFICE}.json` plus the index and exits with
+`reason: "imagery disabled"`. The render path itself is untouched — set the repository
+variable to a positive number and it comes back, which a dry run at
+`RENDER_OFFICE_COUNT=1` verifies still produces all 80 objects for an office.
+
+**Why off:** nothing served the PNGs. The client gates imagery on
+`NEXT_PUBLIC_PUBLISHED_PLOTS`, which is unset in Vercel, so `PublishedForecastPlot` never
+mounted and no release object was ever requested. Measured 2026-07-30, the render tier was
+**1,120 of ~1,190 R2 writes per run — ~94% of Class A, ~570k/month against a 1M free
+tier** — and ~15 minutes of a ~28-minute run. That run length is what broke *data*
+freshness: `concurrency: forecast-plot-publisher` does not cancel, so 28-minute runs
+serialised behind a `*/15` cron into ~one run every two hours, and 36 offices were sitting
+6–24 hours stale (MOB published Jul 29 21:15Z while upstream had reissued at Jul 30
+11:51Z). Data-only runs are ~12 minutes and ~68 writes.
+
+**Turning imagery back on is two switches, not one.** `RENDER_OFFICE_COUNT` publishes the
+PNGs; `NEXT_PUBLIC_PUBLISHED_PLOTS=true` in Vercel (build-time — needs a redeploy) is what
+makes a client ask for them. Setting only the first recreates exactly the state this
+removed. Budget it at ~80 writes per office per run: at 16 runs/day that is ~38k Class A
+per office per month.
+
+**`latest.json` is deliberately left behind, not deleted.** It is only overwritten by a
+successful render, so with imagery off it freezes at the last release that rendered. That
+is why the pre-fetch exit compares `sourceRevision` *only* when `RENDER_ENABLED` — an
+unconditional compare would see a mismatch on every run forever. The frozen manifest is
+harmless (no client reads it while the flag is unset) and keeps the published path working
+if the flag is flipped before the next render run. The `releases/` objects it points at are
+never pruned while rendering is off, since `pruneOldReleases` runs only in the render path;
+clearing the ~1.5 GB left from the last render is a one-time manual delete.
 
 `app/api/forecast/route.ts` (`runtime = "edge"`) is the data source: it fans out
 batched requests to `api.weather.gov/gridpoints/{wfo}/{x},{y}` for the selected
@@ -431,9 +457,11 @@ lattice legitimately covers the frame with neighbours' data.
   ~14 MB total. This is *how a live office renders at all*; it is not an optimisation.
   Written under a stable key, not inside a release, so `pruneOldReleases` (scoped to
   `Prefix: "releases/"`) can never delete it.
-- **Render tier** — only `RENDER_OFFICE_COUNT` offices (default 24) get PNGs, taken from
-  `scripts/data/office-population.json`. PHI is always included, since it is the default
-  office and must have imagery wherever it ranks.
+- **Render tier** — `RENDER_OFFICE_COUNT` offices get PNGs, taken from
+  `scripts/data/office-population.json`, with PHI and US pinned in regardless of rank.
+  **The workflow sets this to 0, so in practice no run renders anything** — see "the render
+  tier is off" above for why and for what turning it back on takes. The script's own
+  default is still 24, which is what a local run gets unless it says otherwise.
 
 **The seven areas are data tier only, and that falls out of the ranking rather than being
 enforced.** `office-population.json` is scored per CWA, so no area appears in it and none
