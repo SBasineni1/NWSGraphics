@@ -267,6 +267,7 @@ def decode_fields(grib_bytes: bytes):
     temperatures: dict[int, np.ndarray] = {}
     u_winds: dict[int, np.ndarray] = {}
     v_winds: dict[int, np.ndarray] = {}
+    humidities: dict[int, np.ndarray] = {}
     latitudes = longitudes = None
 
     # RAP packages U/V pairs as multi-field GRIB messages. Without this switch ecCodes
@@ -302,6 +303,8 @@ def decode_fields(grib_bytes: bytes):
                             u_winds[level] = values
                         elif short_name == "v":
                             v_winds[level] = values
+                        elif short_name == "r":
+                            humidities[level] = values
                     elif level_type == "surface":
                         if short_name in {"cape", "cin", "sp", "pres", "gh", "orog"}:
                             scalars[short_name] = values
@@ -340,10 +343,13 @@ def decode_fields(grib_bytes: bytes):
     surface_height_key = "gh" if "gh" in scalars else "orog" if "orog" in scalars else None
     if missing or surface_height_key is None:
         raise RuntimeError(f"RAP GRIB span is missing fields: {', '.join(missing + ([] if surface_height_key else ['surface height']))}")
-    common_levels = sorted(set(heights) & set(temperatures) & set(u_winds) & set(v_winds), reverse=True)
+    common_levels = sorted(
+        set(heights) & set(temperatures) & set(u_winds) & set(v_winds) & set(humidities),
+        reverse=True,
+    )
     if len(common_levels) < 8:
-        raise RuntimeError("RAP GRIB span has an incomplete 200--1000-mb temperature/height/wind profile")
-    return latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, surface_height_key, common_levels
+        raise RuntimeError("RAP GRIB span has an incomplete 200--1000-mb temperature/height/wind/humidity profile")
+    return latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, common_levels
 
 
 def load_view_points(root: Path, office: str) -> list[dict]:
@@ -376,7 +382,7 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
         cycle, grib_url, records = discover_cycle()
     byte_range = record_span(records)
     grib_bytes = fetch_bytes(grib_url, byte_range=byte_range, timeout=90)
-    latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, surface_height_key, levels = decode_fields(grib_bytes)
+    latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, levels = decode_fields(grib_bytes)
 
     tree = cKDTree(np.column_stack((latitudes, longitudes * np.cos(np.radians(latitudes)))))
     grid_dir = root / "public" / "gridpoints"

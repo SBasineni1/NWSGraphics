@@ -66,6 +66,20 @@ class MesoanalysisPipelineTest(unittest.TestCase):
         self.assertEqual(spc_sector(-75.2, 40.0, "PHI"), 17)
         self.assertEqual(spc_sector(-97.0, 38.0, "US"), 19)
 
+    def test_record_span_covers_pressure_level_humidity(self):
+        """RH at 200-1000 mb must sit inside the downloaded span, or the parcel
+        lift has no environmental moisture and must reconstruct it."""
+        records = parse_index("\n".join([
+            "28:1564933:d=2026081222:HGT:200 mb:anl:",
+            "30:1648810:d=2026081222:RH:200 mb:anl:",
+            "191:10345419:d=2026081222:RH:1000 mb:anl:",
+            "297:17477825:d=2026081222:HGT:level of free convection:anl:",
+            "298:17685677:d=2026081222:LTNG:surface:anl:",
+        ]))
+        start, end = record_span(records)
+        self.assertLessEqual(start, 1648810)
+        self.assertGreaterEqual(end, 10345419)
+
 
 if __name__ == "__main__":
     unittest.main()
