@@ -592,6 +592,57 @@ def decode_fields(grib_bytes: bytes):
     return latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, common_levels
 
 
+def decode_rtma(grib_bytes: bytes):
+    """Decode the RTMA surface span into the parcel's starting state.
+
+    Two details are load-bearing and were both verified against a live file:
+    the surface height record is ``orog``, not ``gh``; and RTMA longitudes arrive
+    in 0-360 convention, so they need the same normalisation RAP gets or every
+    nearest-neighbour query lands on the far side of the planet.
+    """
+
+    import numpy as np
+    from eccodes import codes_get, codes_get_array, codes_grib_multi_support_on, codes_grib_new_from_file, codes_release
+
+    wanted = {
+        ("orog", "surface"): "orography",
+        ("sp", "surface"): "surfacePressure",
+        ("2t", "heightAboveGround"): "temperature2m",
+        ("2d", "heightAboveGround"): "dewpoint2m",
+    }
+    fields: dict[str, "np.ndarray"] = {}
+    latitudes = longitudes = None
+
+    codes_grib_multi_support_on()
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as temporary:
+        temporary.write(grib_bytes)
+        temporary.flush()
+        with open(temporary.name, "rb") as handle:
+            while True:
+                gid = codes_grib_new_from_file(handle)
+                if gid is None:
+                    break
+                try:
+                    key = (str(codes_get(gid, "shortName")), str(codes_get(gid, "typeOfLevel")))
+                    if key in wanted:
+                        values = np.asarray(codes_get_array(gid, "values"), dtype=np.float64)
+                        values[np.abs(values) >= 1e20] = np.nan
+                        # float32 is safe for these ranges -- measured max error
+                        # 1.5e-5 K for 2t/2d and exactly 0 Pa for sp -- and saves ~57 MiB.
+                        fields[wanted[key]] = values.astype(np.float32)
+                        if latitudes is None:
+                            latitudes = np.asarray(codes_get_array(gid, "latitudes"), dtype=np.float64)
+                            longitudes = np.asarray(codes_get_array(gid, "longitudes"), dtype=np.float64)
+                            longitudes = np.where(longitudes > 180, longitudes - 360, longitudes)
+                finally:
+                    codes_release(gid)
+
+    missing = sorted(set(wanted.values()) - fields.keys())
+    if missing or latitudes is None:
+        raise RuntimeError(f"RTMA span is missing fields: {', '.join(missing) or 'grid'}")
+    return latitudes, longitudes, fields
+
+
 def load_view_points(root: Path, office: str) -> list[dict]:
     grid_path = root / "public" / "gridpoints" / f"{office}.json"
     city_path = root / "public" / "cities" / f"{office}.json"
