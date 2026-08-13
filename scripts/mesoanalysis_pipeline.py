@@ -5,8 +5,11 @@ The request path never opens or decodes GRIB.  This publisher downloads one boun
 slice of the latest RAP analysis, samples it onto the lat/lon lattices the graphics suite
 already owns, and writes small JSON objects which the Node publisher uploads to R2.
 
-Only ``publish()`` imports NumPy/SciPy/ecCodes.  Keeping those imports lazy lets the
-cycle/index/meteorology helpers remain unit-testable without native GRIB dependencies.
+NumPy is imported at module scope: it is pure-pip, already required by the test suite,
+and the vectorized parcel lift (``lift``) needs it whenever it is called, not just from
+``publish()``.  SciPy and ecCodes stay lazily imported inside ``publish()`` and
+``decode_fields()``, since those pull in native GRIB dependencies that unit tests must
+not require.
 """
 
 from __future__ import annotations
@@ -23,6 +26,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+
+import numpy as np
 
 
 NOMADS_ROOT = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/rap/prod"
@@ -143,6 +148,214 @@ def lapse_rate_c_per_km(
             top_temperature = lower_temperature + (upper_temperature - lower_temperature) * fraction
             return (surface_temperature - top_temperature) / (depth_metres / 1000.0)
     return None
+
+
+# --- Vectorized parcel lift -------------------------------------------------
+#
+# Ported from the validated prototype (scratchpad/parcel.py), checked against
+# MetPy 1.7.1 on eight synthetic soundings.  Units are Pa, K, m, and J/kg.
+# ``lift`` returns a dict of CAPE, CIN, LCL pressure/height AGL, LFC height AGL,
+# and EL height AGL.  The first LFC and last EL are used.  No LFC means
+# CAPE=CIN=0 and LFC/EL=NaN; no EL means CAPE integrates to the sounding top and
+# EL=NaN.  NaN levels are removed, profiles pressure-sorted, and gaps bridged.
+# Levels below an elevated parcel are ignored.  For a start below all data,
+# heights are extrapolated but integration begins at the first available level.
+_RD = 287.04749097718457
+_G = 9.80665
+_EPSILON = 0.6219569100577033
+_KAPPA = 0.2854
+
+
+def _es(t):
+    tc = np.asarray(t) - 273.15
+    return 611.2 * np.exp(np.clip(17.67 * tc / (tc + 243.5), -80.0, 80.0))
+
+
+def _rs(p, t):
+    e = np.minimum(_es(t), 0.99 * p)
+    return _EPSILON * e / (p - e)
+
+
+def _tv(t, r):
+    return t * (r + _EPSILON) / (_EPSILON * (1.0 + r))
+
+
+def _tlcl(t, td):
+    """Bolton (1980) LCL temperature, equation 15."""
+    td = np.minimum(td, t)
+    return 56.0 + 1.0 / (1.0 / (td - 56.0) + np.log(t / td) / 800.0)
+
+
+def _theta_e(p, t, td):
+    """Bolton (1980) equivalent potential temperature, equation 43."""
+    td = np.minimum(td, t)
+    tl = _tlcl(t, td)
+    e = np.minimum(_es(td), 0.99 * p)
+    r = _EPSILON * e / (p - e)
+    th = t * (100000.0 / (p - e)) ** _KAPPA * (t / tl) ** (0.28 * r)
+    return th * np.exp(r * (1.0 + 0.448 * r) * (3036.0 / tl - 1.78))
+
+
+def _theta_es(p, t):
+    e = np.minimum(_es(t), 0.99 * p)
+    r = _EPSILON * e / (p - e)
+    th = t * (100000.0 / (p - e)) ** _KAPPA
+    return th * np.exp(r * (1.0 + 0.448 * r) * (3036.0 / t - 1.78))
+
+
+def _moist_temperature(p, target, guess):
+    """Invert saturated Bolton theta-e with eight bounded Newton iterations."""
+    t = np.clip(guess, 150.0, 360.0)
+    target = target[:, None]
+    for _ in range(8):
+        value = _theta_es(p, t)
+        deriv = (_theta_es(p, t + 0.05) - _theta_es(p, t - 0.05)) / 0.1
+        step = np.divide(value - target, deriv, out=np.zeros_like(t),
+                         where=np.isfinite(deriv) & (np.abs(deriv) > 1e-8))
+        t = np.clip(t - np.clip(step, -12.0, 12.0), 150.0, 360.0)
+    return t
+
+
+def _interp(p, value, valid, target):
+    """Row-wise log-pressure interpolation, with two-point extrapolation."""
+    n, nz = p.shape
+    count = valid.sum(1)
+    x, xt = np.log(np.where(valid, p, 1.0)), np.log(target)
+    above = valid & (x <= xt[:, None])
+    upper = np.where(above.any(1), np.argmax(above, 1), np.maximum(count - 1, 0))
+    lower = upper - 1
+    bottom = xt >= x[:, 0]
+    lower = np.where(bottom, 0, lower)
+    upper = np.where(bottom, np.minimum(1, np.maximum(count - 1, 0)), upper)
+    last = np.maximum(count - 1, 0)
+    top = xt <= x[np.arange(n), last]
+    lower, upper = np.where(top, np.maximum(count - 2, 0), lower), np.where(top, last, upper)
+    lower, upper = np.clip(lower, 0, nz - 1), np.clip(upper, 0, nz - 1)
+    row = np.arange(n)
+    x0, x1, y0, y1 = x[row, lower], x[row, upper], value[row, lower], value[row, upper]
+    w = np.divide(xt - x0, x1 - x0, out=np.zeros_like(xt), where=abs(x1 - x0) > 1e-12)
+    result = np.where(count == 1, value[:, 0], y0 + w * (y1 - y0))
+    return np.where(count > 0, result, np.nan)
+
+
+def _environment_tv(pressure, temperature, relative_humidity):
+    """Environmental virtual temperature from RH, replacing the prototype's
+    hypsometric reconstruction. RAP ships RH on every pressure level we use, so
+    there is nothing to reconstruct."""
+    saturation = _es(temperature)
+    vapor = np.clip(relative_humidity, 0.0, 100.0) / 100.0 * saturation
+    mixing = 0.622 * vapor / np.maximum(pressure - vapor, 1.0)
+    return _tv(temperature, mixing)
+
+
+def _crossing(x0, x1, y0, y1):
+    f = np.divide(-y0, y1 - y0, out=np.zeros_like(y0), where=abs(y1 - y0) > 1e-12)
+    return x0 + np.clip(f, 0.0, 1.0) * (x1 - x0)
+
+
+def _integral(x, delta, valid, x_high, x_low):
+    """Integrate RD*delta over log pressure between vertical boundaries."""
+    x0, x1, d0, d1 = x[:, :-1], x[:, 1:], delta[:, :-1], delta[:, 1:]
+    pair, layer_width = valid[:, :-1] & valid[:, 1:], x0 - x1
+    hi, lo = np.minimum(x0, x_high[:, None]), np.maximum(x1, x_low[:, None])
+    width = np.maximum(hi - lo, 0.0)
+    fh = np.divide(x0 - hi, layer_width, out=np.zeros_like(width),
+                   where=pair & (layer_width > 0))
+    fl = np.divide(x0 - lo, layer_width, out=np.zeros_like(width),
+                   where=pair & (layer_width > 0))
+    dh, dl = d0 + (d1 - d0) * fh, d0 + (d1 - d0) * fl
+    return np.sum(np.where(pair & (width > 0), _RD * 0.5 * (dh + dl) * width, 0.0), 1)
+
+
+def lift(parcel_pressure, parcel_temperature, parcel_dewpoint,
+         level_pressure, level_temperature, level_height, level_relative_humidity):
+    """Lift a batch; parcel arrays are (n,), level arrays are (n, n_levels).
+
+    ``level_relative_humidity`` is percent RH at each pressure level, used to
+    compute environmental virtual temperature directly rather than
+    reconstructing it hypsometrically.
+
+    Returns a dict of ``cape``, ``cin``, ``lcl_pressure``, ``lcl_height``,
+    ``lfc_height``, and ``el_height`` (equilibrium-level height AGL), each of
+    shape ``(n,)``.
+    """
+    p0, t0, td0 = (np.asarray(a, dtype=np.float64) for a in
+                   (parcel_pressure, parcel_temperature, parcel_dewpoint))
+    p, t, z, rh = (np.asarray(a, dtype=np.float64) for a in
+                   (level_pressure, level_temperature, level_height, level_relative_humidity))
+    if p0.ndim != 1 or t0.shape != p0.shape or td0.shape != p0.shape:
+        raise ValueError("parcel inputs must all have shape (n_points,)")
+    if p.ndim != 2 or t.shape != p.shape or z.shape != p.shape or rh.shape != p.shape:
+        raise ValueError("level inputs must all have shape (n_points, n_levels)")
+    if p.shape[0] != p0.size or p.shape[1] < 2:
+        raise ValueError("incompatible n_points or fewer than two levels")
+
+    parcel_ok = (np.isfinite(p0) & np.isfinite(t0) & np.isfinite(td0) &
+                 (p0 > 0) & (t0 > 150) & (td0 > 150))
+    raw = (np.isfinite(p) & np.isfinite(t) & np.isfinite(z) & np.isfinite(rh) &
+           (p > 0) & (t > 120))
+    order = np.argsort(np.where(raw, -p, np.inf), axis=1)
+    p, t, z, rh, raw = (np.take_along_axis(a, order, axis=1) for a in (p, t, z, rh, raw))
+    active = raw & (p <= p0[:, None] * (1 + 2e-6))
+    order = np.argsort(~active, axis=1, kind="stable")
+    p, t, z, rh, valid = (np.take_along_axis(a, order, axis=1)
+                          for a in (p, t, z, rh, active))
+    count = valid.sum(1)
+    ps, ts, zs, rhs = (np.where(valid, p, 10000.0), np.where(valid, t, 250.0),
+                       np.where(valid, z, 0.0), np.where(valid, rh, 0.0))
+
+    tlcl = _tlcl(t0, td0)
+    plcl = np.minimum(p0 * (tlcl / t0) ** (1 / _KAPPA), p0)
+    theta_e = _theta_e(p0, t0, td0)
+    dry = t0[:, None] * (ps / p0[:, None]) ** _KAPPA
+    guess = tlcl[:, None] * (ps / plcl[:, None]) ** 0.19
+    parcel_t = np.where(ps >= plcl[:, None], dry, _moist_temperature(ps, theta_e, guess))
+    parcel_t = np.where(valid, parcel_t, np.nan)
+    r0 = _rs(p0, np.minimum(td0, t0))
+    parcel_r = np.where(ps >= plcl[:, None], r0[:, None], _rs(ps, parcel_t))
+    parcel_tv = _tv(parcel_t, parcel_r)
+    env_tv = _environment_tv(ps, ts, rhs)
+    delta = np.where(valid, parcel_tv - env_tv, np.nan)
+
+    base_z, lcl_z = _interp(ps, zs, valid, p0), _interp(ps, zs, valid, plcl)
+    env_lcl = _interp(ps, env_tv, valid, plcl)
+    delta_lcl = _tv(tlcl, _rs(plcl, tlcl)) - env_lcl
+    x = np.log(ps)
+    x0, x1, d0, d1 = x[:, :-1], x[:, 1:], delta[:, :-1], delta[:, 1:]
+    pair = valid[:, :-1] & valid[:, 1:]
+    cross_x = _crossing(x0, x1, d0, d1)
+    frac = np.divide(x0 - cross_x, x0 - x1, out=np.zeros_like(cross_x),
+                     where=pair & (x0 > x1))
+    cross_z = z[:, :-1] + frac * (z[:, 1:] - z[:, :-1])
+
+    positive = np.any(valid & (ps <= plcl[:, None]) & (delta > 0), 1)
+    upward = pair & (d0 <= 0) & (d1 > 0) & (cross_x <= np.log(plcl)[:, None] + 1e-10)
+    # USAF/MetPy convention when positive area begins directly above the LCL.
+    lfc_is_lcl = positive & ((delta_lcl >= -1e-7) | ~upward.any(1))
+    up_index, row = np.argmax(upward, 1), np.arange(p0.size)
+    has_lfc = parcel_ok & (count >= 2) & positive & (lfc_is_lcl | upward.any(1))
+    x_lfc = np.where(lfc_is_lcl, np.log(plcl), cross_x[row, up_index])
+    z_lfc = np.where(lfc_is_lcl, lcl_z, cross_z[row, up_index])
+
+    downward = pair & (d0 > 0) & (d1 <= 0) & (cross_x < x_lfc[:, None])
+    indices = np.arange(p.shape[1] - 1)[None, :]
+    down_index = np.max(np.where(downward, indices, -1), 1)
+    has_el, down_safe = has_lfc & (down_index >= 0), np.maximum(down_index, 0)
+    x_el, z_el = cross_x[row, down_safe], cross_z[row, down_safe]
+    x_top = x[row, np.maximum(count - 1, 0)]
+    cape = np.where(has_lfc, np.maximum(_integral(
+        x, delta, valid, x_lfc, np.where(has_el, x_el, x_top)), 0), 0)
+    cin = np.where(has_lfc, np.minimum(_integral(x, delta, valid, x[:, 0], x_lfc), 0), 0)
+
+    good = parcel_ok & (count >= 2)
+    return {
+        "cape": np.where(good, cape, np.nan),
+        "cin": np.where(good, cin, np.nan),
+        "lcl_pressure": np.where(good, plcl, np.nan),
+        "lcl_height": np.where(good, lcl_z - base_z, np.nan),
+        "lfc_height": np.where(has_lfc, z_lfc - base_z, np.nan),
+        "el_height": np.where(has_el, z_el - base_z, np.nan),
+    }
 
 
 def pressure_layer_lapse_rate(

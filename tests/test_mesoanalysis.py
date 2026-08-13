@@ -1,10 +1,13 @@
 import unittest
 from datetime import datetime, timezone
 
+import numpy as np
+
 from scripts.mesoanalysis_pipeline import (
     bulk_shear_knots,
     lapse_rate_c_per_km,
     lcl_height_metres,
+    lift,
     parse_index,
     pressure_layer_lapse_rate,
     record_span,
@@ -79,6 +82,67 @@ class MesoanalysisPipelineTest(unittest.TestCase):
         start, end = record_span(records)
         self.assertLessEqual(start, 1648810)
         self.assertGreaterEqual(end, 10345419)
+
+
+class ParcelLiftTest(unittest.TestCase):
+    def _profile(self, surface_t=303.0, surface_td=294.0, lapse=7.0):
+        """A single synthetic sounding: 37 levels, 1000 mb to 200 mb."""
+        pressure = np.linspace(100000.0, 20000.0, 37)[None, :]
+        height = np.linspace(100.0, 12000.0, 37)[None, :]
+        temperature = (surface_t - lapse * (height - height[0, 0]) / 1000.0)
+        humidity = np.full_like(temperature, 60.0)
+        return pressure, temperature, height, humidity
+
+    def test_moist_unstable_profile_has_positive_cape(self):
+        pressure, temperature, height, humidity = self._profile()
+        out = lift(
+            np.array([100000.0]), np.array([303.0]), np.array([294.0]),
+            pressure, temperature, height, humidity,
+        )
+        self.assertGreater(out["cape"][0], 0.0)
+        self.assertLessEqual(out["cin"][0], 0.0)
+        self.assertTrue(np.isfinite(out["lcl_height"][0]))
+
+    def test_no_lfc_returns_zero_cape_and_nan_levels(self):
+        # A deeply stable profile: 2 C/km lapse rate and a dry parcel.
+        pressure, temperature, height, humidity = self._profile(surface_t=283.0, lapse=2.0)
+        out = lift(
+            np.array([100000.0]), np.array([283.0]), np.array([253.0]),
+            pressure, temperature, height, np.full_like(humidity, 10.0),
+        )
+        self.assertEqual(out["cape"][0], 0.0)
+        self.assertTrue(np.isnan(out["lfc_height"][0]))
+
+    def test_lcl_rises_as_the_parcel_dries(self):
+        pressure, temperature, height, humidity = self._profile()
+        moist = lift(np.array([100000.0]), np.array([303.0]), np.array([298.0]),
+                     pressure, temperature, height, humidity)
+        dry = lift(np.array([100000.0]), np.array([303.0]), np.array([283.0]),
+                   pressure, temperature, height, humidity)
+        self.assertLess(moist["lcl_height"][0], dry["lcl_height"][0])
+
+    def test_tolerates_nan_levels_without_returning_nan_cape(self):
+        pressure, temperature, height, humidity = self._profile()
+        temperature = temperature.copy()
+        temperature[0, 5] = np.nan
+        height = height.copy()
+        height[0, 5] = np.nan
+        out = lift(
+            np.array([100000.0]), np.array([303.0]), np.array([294.0]),
+            pressure, temperature, height, humidity,
+        )
+        self.assertFalse(np.isnan(out["cape"][0]))
+
+    def test_is_vectorized_across_points(self):
+        pressure, temperature, height, humidity = self._profile()
+        n = 64
+        out = lift(
+            np.full(n, 100000.0), np.full(n, 303.0), np.full(n, 294.0),
+            np.repeat(pressure, n, axis=0), np.repeat(temperature, n, axis=0),
+            np.repeat(height, n, axis=0), np.repeat(humidity, n, axis=0),
+        )
+        self.assertEqual(out["cape"].shape, (n,))
+        self.assertTrue(np.allclose(out["cape"], out["cape"][0]))
 
 
 if __name__ == "__main__":

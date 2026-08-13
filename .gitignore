@@ -44,3 +44,4 @@ next-env.d.ts
 
 # cached upstream geo sources for scripts/build-office-bundles.mjs (128 MB)
 /.cache/
+.venv-meso-dev/
