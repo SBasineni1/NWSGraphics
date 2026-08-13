@@ -31,6 +31,7 @@ import numpy as np
 
 
 NOMADS_ROOT = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/rap/prod"
+RTMA_ROOT = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/rtma/prod"
 SPC_ROOT = "https://www.spc.noaa.gov/exper/mesoanalysis"
 USER_AGENT = "NWSGraphics mesoanalysis publisher (github.com/suchitbasineni/NWSGraphics)"
 
@@ -426,6 +427,32 @@ def rap_urls(cycle: datetime) -> tuple[str, str]:
     base = os.environ.get("MESO_NOMADS_ROOT", NOMADS_ROOT).rstrip("/")
     grib = f"{base}/rap.{day}/rap.t{hour}z.awp130pgrbf00.grib2"
     return grib, f"{grib}.idx"
+
+
+def rtma_urls(cycle: datetime) -> tuple[str, str]:
+    day, hour = cycle_parts(cycle)
+    base = os.environ.get("MESO_RTMA_ROOT", RTMA_ROOT).rstrip("/")
+    grib = f"{base}/rtma2p5.{day}/rtma2p5.t{hour}z.2dvaranl_ndfd.grb2_wexp"
+    return grib, f"{grib}.idx"
+
+
+def rtma_record_span(records: list[IndexRecord]) -> tuple[int, int]:
+    """One inclusive byte range covering RTMA's surface height, surface pressure,
+    2 m temperature and 2 m dewpoint.
+
+    These four are the first four records of the file and are contiguous from byte
+    zero, verified against a live index: 0 -> 26,683,628 for the 22Z 2026-08-12 cycle.
+    """
+    first = next((r for r in records if ":HGT:surface:anl:" in f":{r.description}"), None)
+    last_index = next(
+        (i for i, r in enumerate(records) if ":DPT:2 m above ground:anl:" in f":{r.description}"),
+        None,
+    )
+    if first is None or last_index is None:
+        raise ValueError("RTMA analysis is missing surface height or 2 m dewpoint")
+    if last_index + 1 >= len(records):
+        raise ValueError("RTMA index cannot determine the end of the 2 m dewpoint record")
+    return first.offset, records[last_index + 1].offset - 1
 
 
 def fetch_bytes(url: str, byte_range: tuple[int, int] | None = None, timeout: int = 45) -> bytes:

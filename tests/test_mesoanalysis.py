@@ -12,6 +12,8 @@ from scripts.mesoanalysis_pipeline import (
     parse_index,
     pressure_layer_lapse_rate,
     record_span,
+    rtma_record_span,
+    rtma_urls,
     spc_archive_urls,
     spc_sector,
 )
@@ -83,6 +85,31 @@ class MesoanalysisPipelineTest(unittest.TestCase):
         start, end = record_span(records)
         self.assertLessEqual(start, 1648810)
         self.assertGreaterEqual(end, 10345419)
+
+    def test_rtma_urls_use_the_wexp_suffix(self):
+        cycle = datetime(2026, 8, 12, 22, tzinfo=timezone.utc)
+        grib, index = rtma_urls(cycle)
+        self.assertTrue(grib.endswith("rtma2p5.t22z.2dvaranl_ndfd.grb2_wexp"))
+        self.assertIn("rtma2p5.20260812", grib)
+        self.assertEqual(index, f"{grib}.idx")
+
+    def test_rtma_record_span_covers_surface_through_dewpoint(self):
+        records = parse_index("\n".join([
+            "1:0:d=2026081222:HGT:surface:anl:",
+            "2:7490118:d=2026081222:PRES:surface:anl:",
+            "3:14980236:d=2026081222:TMP:2 m above ground:anl:",
+            "4:21065993:d=2026081222:DPT:2 m above ground:anl:",
+            "5:26683629:d=2026081222:UGRD:10 m above ground:anl:",
+        ]))
+        self.assertEqual(rtma_record_span(records), (0, 26683628))
+
+    def test_rtma_record_span_rejects_an_incomplete_file(self):
+        records = parse_index("\n".join([
+            "1:0:d=2026081222:HGT:surface:anl:",
+            "2:7490118:d=2026081222:PRES:surface:anl:",
+        ]))
+        with self.assertRaises(ValueError):
+            rtma_record_span(records)
 
 
 class ParcelLiftTest(unittest.TestCase):
