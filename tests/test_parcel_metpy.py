@@ -8,6 +8,14 @@ vs requirements-mesoanalysis-dev.txt).
 Run:
   .venv-meso-dev/bin/python -m unittest tests.test_parcel_metpy -v
   .venv-meso-dev/bin/python tests/test_parcel_metpy.py --benchmark
+
+Any dev/CI environment that is supposed to have MetPy installed should also set
+REQUIRE_METPY=1. Without it, `unittest tests.test_parcel_metpy` in a venv where MetPy
+is present but broken (partial install, a broken pint/xarray underneath it) silently
+reports the comparison as skipped and exits 0 -- the whole point of this file is a
+MetPy-agreement check, so that must be a hard failure, not a quiet pass:
+
+  REQUIRE_METPY=1 .venv-meso-dev/bin/python -m unittest tests.test_parcel_metpy -v
 """
 import argparse
 import os
@@ -20,13 +28,27 @@ from pathlib import Path
 os.environ.setdefault("MPLCONFIGDIR", str(Path(__file__).parent / "tmp" / "mpl"))
 import numpy as np
 
-from scripts.mesoanalysis_pipeline import lift
+from scripts.mesoanalysis_pipeline import (
+    lift, _es,
+    _tlcl as _lift_tlcl,
+    _theta_e as _lift_theta_e,
+    _rs as _lift_rs,
+    _tv as _lift_tv,
+    _moist_temperature as _lift_moist_temperature,
+    _interp as _lift_interp,
+    _crossing as _lift_crossing,
+    _integral as _lift_integral,
+    _KAPPA as _LIFT_KAPPA,
+)
 
 # MetPy is dev/test-only (requirements-mesoanalysis-dev.txt) and absent from production
 # CI, which discovers every tests/test_*.py with only requirements-mesoanalysis.txt
 # installed (.github/workflows/publish-mesoanalysis.yml). Importing it unconditionally
 # would turn that discovery run into a hard failure everywhere but the dev venv, so the
-# comparison is skipped rather than erroring when MetPy is not installed.
+# comparison is skipped rather than erroring when MetPy is not installed -- unless
+# REQUIRE_METPY says this environment is supposed to have it, in which case a broken
+# import should fail loudly instead of silently skipping (see module docstring).
+REQUIRE_METPY = bool(os.environ.get("REQUIRE_METPY"))
 try:
     import metpy
     import metpy.calc as mpcalc
@@ -34,6 +56,8 @@ try:
     _METPY_AVAILABLE = True
 except ImportError:
     _METPY_AVAILABLE = False
+    if REQUIRE_METPY:
+        raise
 
 CAPE_RTOL = 0.15
 CAPE_ATOL = 100.0
@@ -83,6 +107,119 @@ def _sounding(name, t_values, td_values, kind="surface", base=1000.0,
                 z_in=z_in, rh_in=rh_in, kind=kind, nan_indices=tuple(nan_indices))
 
 
+def _dry_integrated_sounding():
+    """A sounding whose heights are hydrostatically integrated from dry temperature,
+    not virtual temperature -- deliberately physically inconsistent, so it is a case
+    where a height-based (hypsometric) reconstruction of environmental Tv and an
+    RH-based one must genuinely disagree. lift() no longer reconstructs Tv from height
+    at all (see _legacy_cape below for the retired path), so its CAPE here should still
+    track MetPy's own p/t/td-only reference despite the height field carrying no
+    moisture signal whatsoever.
+
+    Built without MetPy (Bolton RH via the production _es, pure NumPy hydrostatics) so
+    the identical inputs and CAPE can be pinned as a golden value in
+    tests/test_mesoanalysis.py, which must run with no MetPy present.
+    """
+    base = 1000.0
+    p = np.arange(base, 99.9, -25.0)
+    anchors = np.array([base, base - 75, base - 150, 700, 500, 300, 200, 100], dtype=float)
+    t_values = np.array([30, 26, 22, 10, -8, -36, -55, -72], dtype=float)
+    td_values = np.array([28, 24, 20, 8, -10, -38, -57, -74], dtype=float)
+    t = _interp(p, anchors, t_values) + 273.15
+    td = np.minimum(_interp(p, anchors, td_values) + 273.15, t)
+    z = np.zeros_like(p)
+    z[1:] = np.cumsum(
+        287.04749097718457 * 0.5 * (t[:-1] + t[1:]) / 9.80665
+        * np.log(p[:-1] / p[1:])
+    )
+    rh = np.clip(100.0 * _es(td) / _es(t), 0.0, 100.0)
+    return dict(name="dry_integrated_heights", p=p, t=t, td=td, z=z, rh=rh,
+                p_in=p.copy(), t_in=t.copy(), z_in=z.copy(), rh_in=rh.copy(),
+                kind="surface", nan_indices=())
+
+
+def _legacy_environment_tv(p, t, z, valid, p0, td0):
+    """The pre-Task-3 hypsometric virtual-temperature reconstruction, ported
+    unchanged from scratchpad/parcel.py. Production deleted this code path entirely
+    when lift() gained an RH input -- it is kept here, nowhere else, purely to prove
+    on _dry_integrated_sounding() that the RH-based replacement is not a no-op."""
+    rd, g = 287.04749097718457, 9.80665
+    env = np.full_like(t, np.nan)
+    pair = valid[:, :-1] & valid[:, 1:]
+    dlogp, dz = np.log(p[:, :-1] / p[:, 1:]), z[:, 1:] - z[:, :-1]
+    layer = np.divide(g * dz, rd * dlogp, out=np.full_like(dz, np.nan),
+                      where=pair & (dlogp > 1e-10) & (dz > 0))
+    r0 = _lift_rs(p0, np.minimum(td0, t[:, 0]))
+    anchored = valid[:, 0] & np.isclose(p[:, 0], p0, rtol=2e-6, atol=0.2)
+    first = np.where(anchored, _lift_tv(t[:, 0], r0), layer[:, 0])
+    env[:, 0] = np.where(valid[:, 0] & np.isfinite(first), first, t[:, 0])
+    for j in range(p.shape[1] - 1):
+        reconstructed = np.clip(2 * layer[:, j] - env[:, j],
+                                0.998 * t[:, j + 1], 1.060 * t[:, j + 1])
+        env[:, j + 1] = np.where(pair[:, j] & np.isfinite(reconstructed), reconstructed,
+                                 np.where(valid[:, j + 1], t[:, j + 1], np.nan))
+    return env
+
+
+def _legacy_cape(p0, t0, td0, p, t, z):
+    """The full pre-Task-3 lift(), CAPE/CIN/LCL only. Duplicated rather than
+    imported -- production has no code path left that reconstructs Tv from height,
+    so there is nothing to import."""
+    p0, t0, td0 = (np.asarray(a, dtype=np.float64) for a in (p0, t0, td0))
+    p, t, z = (np.asarray(a, dtype=np.float64) for a in (p, t, z))
+    raw = (np.isfinite(p) & np.isfinite(t) & np.isfinite(z) & (p > 0) & (t > 120))
+    order = np.argsort(np.where(raw, -p, np.inf), axis=1)
+    p, t, z, raw = (np.take_along_axis(a, order, axis=1) for a in (p, t, z, raw))
+    active = raw & (p <= p0[:, None] * (1 + 2e-6))
+    order = np.argsort(~active, axis=1, kind="stable")
+    p, t, z, valid = (np.take_along_axis(a, order, axis=1) for a in (p, t, z, active))
+    count = valid.sum(1)
+    ps, ts, zs = np.where(valid, p, 10000.0), np.where(valid, t, 250.0), np.where(valid, z, 0.0)
+
+    tlcl = _lift_tlcl(t0, td0)
+    plcl = np.minimum(p0 * (tlcl / t0) ** (1 / _LIFT_KAPPA), p0)
+    theta_e = _lift_theta_e(p0, t0, td0)
+    dry = t0[:, None] * (ps / p0[:, None]) ** _LIFT_KAPPA
+    guess = tlcl[:, None] * (ps / plcl[:, None]) ** 0.19
+    parcel_t = np.where(ps >= plcl[:, None], dry, _lift_moist_temperature(ps, theta_e, guess))
+    parcel_t = np.where(valid, parcel_t, np.nan)
+    r0 = _lift_rs(p0, np.minimum(td0, t0))
+    parcel_r = np.where(ps >= plcl[:, None], r0[:, None], _lift_rs(ps, parcel_t))
+    parcel_tv = _lift_tv(parcel_t, parcel_r)
+    env_tv = _legacy_environment_tv(ps, ts, zs, valid, p0, td0)
+    delta = np.where(valid, parcel_tv - env_tv, np.nan)
+
+    lcl_z = _lift_interp(ps, zs, valid, plcl)
+    env_lcl = _lift_interp(ps, env_tv, valid, plcl)
+    delta_lcl = _lift_tv(tlcl, _lift_rs(plcl, tlcl)) - env_lcl
+    x = np.log(ps)
+    x0, x1, d0, d1 = x[:, :-1], x[:, 1:], delta[:, :-1], delta[:, 1:]
+    pair = valid[:, :-1] & valid[:, 1:]
+    cross_x = _lift_crossing(x0, x1, d0, d1)
+
+    positive = np.any(valid & (ps <= plcl[:, None]) & (delta > 0), 1)
+    upward = pair & (d0 <= 0) & (d1 > 0) & (cross_x <= np.log(plcl)[:, None] + 1e-10)
+    lfc_is_lcl = positive & ((delta_lcl >= -1e-7) | ~upward.any(1))
+    up_index, row = np.argmax(upward, 1), np.arange(p0.size)
+    parcel_ok = (np.isfinite(p0) & np.isfinite(t0) & np.isfinite(td0) &
+                 (p0 > 0) & (t0 > 150) & (td0 > 150))
+    has_lfc = parcel_ok & (count >= 2) & positive & (lfc_is_lcl | upward.any(1))
+    x_lfc = np.where(lfc_is_lcl, np.log(plcl), cross_x[row, up_index])
+
+    downward = pair & (d0 > 0) & (d1 <= 0) & (cross_x < x_lfc[:, None])
+    indices = np.arange(p.shape[1] - 1)[None, :]
+    down_index = np.max(np.where(downward, indices, -1), 1)
+    has_el, down_safe = has_lfc & (down_index >= 0), np.maximum(down_index, 0)
+    x_el = cross_x[row, down_safe]
+    x_top = x[row, np.maximum(count - 1, 0)]
+    cape = np.where(has_lfc, np.maximum(_lift_integral(
+        x, delta, valid, x_lfc, np.where(has_el, x_el, x_top)), 0), 0)
+    cin = np.where(has_lfc, np.minimum(_lift_integral(x, delta, valid, x[:, 0], x_lfc), 0), 0)
+
+    good = parcel_ok & (count >= 2)
+    return np.where(good, cape, np.nan), np.where(good, cin, np.nan), np.where(good, plcl, np.nan)
+
+
 def make_soundings():
     return [
         _sounding(
@@ -129,6 +266,7 @@ def make_soundings():
             nan_indices=(4, 9, 17, 25),
             scramble=True,
         ),
+        _dry_integrated_sounding(),
     ]
 
 
@@ -197,9 +335,36 @@ def validate():
         np.full((1, 5), np.nan),
     )["cape"][0])
 
+    # Extra proof, specific to dry_integrated_heights: confirm the retired hypsometric
+    # reconstruction (_legacy_cape) actually disagrees with the RH-based lift() on this
+    # profile, not just that lift() happens to still match MetPy. If this stops
+    # disagreeing by a meaningful margin, the fixture no longer exercises anything and
+    # needs more low-level moisture contrast -- asserted, not just printed, so a future
+    # edit to the profile can't silently defang it.
+    dry = next(s for s in soundings if s["name"] == "dry_integrated_heights")
+    dp0, dt0, dtd0, dref_cape, _dref_cin, _dref_lcl = _reference(dry)
+    dours_cape = lift(
+        np.array([dp0]), np.array([dt0]), np.array([dtd0]),
+        dry["p_in"][None] * 100.0, dry["t_in"][None], dry["z_in"][None], dry["rh_in"][None],
+    )["cape"][0]
+    dlegacy_cape, _dlegacy_cin, _dlegacy_lcl = _legacy_cape(
+        np.array([dp0]), np.array([dt0]), np.array([dtd0]),
+        dry["p_in"][None] * 100.0, dry["t_in"][None], dry["z_in"][None],
+    )
+    legacy_vs_ours_pct = 100 * (dlegacy_cape[0] - dours_cape) / dours_cape
+    print(f"\ndry_integrated_heights: RH-based CAPE {dours_cape:.1f} J/kg vs "
+          f"retired-hypsometric CAPE {dlegacy_cape[0]:.1f} J/kg "
+          f"({legacy_vs_ours_pct:+.2f}%); MetPy reference {dref_cape:.1f} J/kg.")
+    if abs(legacy_vs_ours_pct) < 3.0:
+        raise AssertionError(
+            "dry_integrated_heights no longer exercises a real disagreement between "
+            f"the RH-based and retired hypsometric paths ({legacy_vs_ours_pct:.2f}%); "
+            "the profile needs more low-level moisture contrast to be useful."
+        )
+
     if failures:
         raise AssertionError("Agreement findings exceeded declared tolerance:\n" + "\n".join(failures))
-    print("\nAll eight cases are within the predeclared tolerances.")
+    print(f"\nAll {len(soundings)} cases are within the predeclared tolerances.")
     return rows
 
 

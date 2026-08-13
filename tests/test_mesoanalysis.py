@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import numpy as np
 
 from scripts.mesoanalysis_pipeline import (
+    _es,
     bulk_shear_knots,
     lapse_rate_c_per_km,
     lcl_height_metres,
@@ -143,6 +144,52 @@ class ParcelLiftTest(unittest.TestCase):
         )
         self.assertEqual(out["cape"].shape, (n,))
         self.assertTrue(np.allclose(out["cape"], out["cape"][0]))
+
+    def test_pins_standard_profile_cape_against_scale_regressions(self):
+        """The other ParcelLiftTest cases only check sign, monotonicity, NaN
+        tolerance and vectorization -- none constrains magnitude, so a uniform scale
+        error survives every one of them (verified: swapping the integral's RD
+        constant for G, halving the integral, or dropping the virtual-temperature
+        correction entirely all pass every other test in this file). This pins the
+        actual CAPE lift() computes for the standard profile, cross-checked against
+        MetPy 1.7.1 in tests/test_parcel_metpy.py (see task-3-report.md for that run's
+        output) so a magnitude regression is caught here with no MetPy present."""
+        pressure, temperature, height, humidity = self._profile()
+        out = lift(
+            np.array([100000.0]), np.array([303.0]), np.array([294.0]),
+            pressure, temperature, height, humidity,
+        )
+        self.assertAlmostEqual(out["cape"][0], 5956.173836227748, delta=1.0)
+
+    def test_pins_dry_integrated_heights_cape_against_scale_regressions(self):
+        """A second magnitude gate, on a profile whose heights are hydrostatically
+        integrated from dry temperature rather than virtual temperature --
+        deliberately physically inconsistent, so it can only match MetPy if lift()
+        gets environmental buoyancy from RH rather than leaking it in through height.
+        The retired pre-Task-3 hypsometric reconstruction disagreed with the RH path
+        on this exact profile by +5.01% (see tests/test_parcel_metpy.py's
+        dry_integrated_heights case and task-3-report.md). Built without MetPy: the
+        anchor interpolation, dry hydrostatic integration, and Bolton RH (via the
+        production _es) below are plain NumPy, matching that case's inputs exactly."""
+        base = 1000.0
+        p = np.arange(base, 99.9, -25.0)
+        anchors = np.array([base, base - 75, base - 150, 700, 500, 300, 200, 100])
+        t_values = np.array([30, 26, 22, 10, -8, -36, -55, -72], dtype=float)
+        td_values = np.array([28, 24, 20, 8, -10, -38, -57, -74], dtype=float)
+        t = np.interp(p, anchors[::-1], t_values[::-1]) + 273.15
+        td = np.minimum(np.interp(p, anchors[::-1], td_values[::-1]) + 273.15, t)
+        z = np.zeros_like(p)
+        z[1:] = np.cumsum(
+            287.04749097718457 * 0.5 * (t[:-1] + t[1:]) / 9.80665 * np.log(p[:-1] / p[1:])
+        )
+        rh = np.clip(100.0 * _es(td) / _es(t), 0.0, 100.0)
+        out = lift(
+            np.array([p[0] * 100.0]), np.array([t[0]]), np.array([td[0]]),
+            (p * 100.0)[None], t[None], z[None], rh[None],
+        )
+        self.assertAlmostEqual(out["cape"][0], 7972.4205080191905, delta=1.0)
+        self.assertAlmostEqual(out["cin"][0], -5.69075932046221, delta=0.5)
+        self.assertAlmostEqual(out["lcl_pressure"][0], 97144.41346726583, delta=50.0)
 
 
 if __name__ == "__main__":
