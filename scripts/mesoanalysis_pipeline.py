@@ -467,7 +467,25 @@ def fetch_bytes(url: str, byte_range: tuple[int, int] | None = None, timeout: in
         return data
 
 
-def discover_cycle(now: datetime | None = None) -> tuple[datetime, str, list[IndexRecord]]:
+def surface_label(rtma) -> str:
+    return "rtma" if rtma else "rap"
+
+
+def probe_rtma(cycle: datetime):
+    """Return (grib_url, byte_range) when RTMA exists for this hour, else None.
+
+    RTMA and RAP land at different times, so a missing RTMA hour is routine rather
+    than exceptional. Publishing RAP-only beats walking back to an older paired hour.
+    """
+    grib_url, index_url = rtma_urls(cycle)
+    try:
+        records = parse_index(fetch_bytes(index_url, timeout=20).decode("utf-8"))
+        return grib_url, rtma_record_span(records)
+    except (OSError, RuntimeError, ValueError, urllib.error.HTTPError):
+        return None
+
+
+def discover_cycle(now: datetime | None = None) -> tuple[datetime, str, list[IndexRecord], tuple[str, tuple[int, int]] | None]:
     # Probe the current hour first. RAP f00 usually appears late in the hour, so early
     # probes fall through to the previous cycle while a :50-ish probe can publish the
     # new one without deliberately holding it back for another hour.
@@ -479,7 +497,7 @@ def discover_cycle(now: datetime | None = None) -> tuple[datetime, str, list[Ind
         try:
             records = parse_index(fetch_bytes(index_url, timeout=20).decode("utf-8"))
             record_span(records)
-            return cycle, grib_url, records
+            return cycle, grib_url, records, probe_rtma(cycle)
         except (OSError, RuntimeError, ValueError, urllib.error.HTTPError) as error:
             last_error = error
     raise RuntimeError(f"No complete RAP analysis found in the last eight cycles: {last_error}")
@@ -670,7 +688,7 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
         records = parse_index(fetch_bytes(index_url, timeout=20).decode("utf-8"))
         cycle = requested_cycle
     else:
-        cycle, grib_url, records = discover_cycle()
+        cycle, grib_url, records, _rtma = discover_cycle()
     byte_range = record_span(records)
     grib_bytes = fetch_bytes(grib_url, byte_range=byte_range, timeout=90)
     latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, levels = decode_fields(grib_bytes)
@@ -818,13 +836,14 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.discover_only:
-        cycle, source, records = discover_cycle()
+        cycle, source, records, rtma = discover_cycle()
         print(json.dumps({
             "model": "RAP",
             "cycle": cycle.isoformat().replace("+00:00", "Z"),
             "cycleId": cycle.strftime("%Y%m%d%H"),
             "source": source,
             "byteRange": record_span(records),
+            "surface": surface_label(rtma),
         }))
         return
     if args.output_dir is None:

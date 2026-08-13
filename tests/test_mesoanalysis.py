@@ -111,6 +111,13 @@ class MesoanalysisPipelineTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             rtma_record_span(records)
 
+    def test_discovery_reports_which_surface_it_found(self):
+        """A cycle with RAP but no RTMA must still publish, flagged as a raw-RAP
+        surface. Walking back an hour for RTMA would serve staler data."""
+        from scripts.mesoanalysis_pipeline import surface_label
+        self.assertEqual(surface_label(None), "rap")
+        self.assertEqual(surface_label(("https://example/rtma", (0, 10))), "rtma")
+
 
 class ParcelLiftTest(unittest.TestCase):
     def _profile(self, surface_t=303.0, surface_td=294.0, lapse=7.0):
