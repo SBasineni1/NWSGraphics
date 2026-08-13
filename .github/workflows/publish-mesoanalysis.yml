@@ -78,6 +78,10 @@ jobs:
           npm ci
           python -m pip install -r requirements-mesoanalysis.txt
 
+      - name: Run mesoanalysis unit tests
+        if: steps.publication.outputs.enabled == 'true'
+        run: python -m unittest discover -s tests -p 'test_*.py' -t .
+
       - name: Publish latest complete RAP analysis
         if: steps.publication.outputs.enabled == 'true'
         run: npm run mesoanalysis:publish
