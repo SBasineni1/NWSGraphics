@@ -29,16 +29,19 @@ test("server-renders the default office's apparent-temperature product", async (
   assert.match(html, /Day (?:<!-- -->)?1(?:<!-- -->)? Forecast Graphics/);
   assert.match(html, /Day (?:<!-- -->)?2/);
   assert.match(html, /Day (?:<!-- -->)?3/);
+  assert.match(html, /Analysis/);
+  assert.match(html, /Experimental/);
+  assert.match(html, /Day (?:<!-- -->)?3[\s\S]*Analysis/, "Analysis should follow the forecast days");
   assert.match(html, /Forecast catalogue/);
   assert.match(html, /Temperature &amp; heat/);
-  assert.match(html, /NWS data source/);
+  assert.match(html, /NWS (?:<!-- -->)?Philadelphia \/ Mount Holly/);
+  assert.doesNotMatch(html, /NWS data source|Data status|Source:/);
   assert.match(html, />Menu</);
   // Product count is derived, not hardcoded, so adding a product can't leave it stale.
   // React splits the interpolation into its own text node, hence the comment markers.
   // Day 1 carries all fourteen: nine fields, the WPC rainfall outlook, and SPC's
   // categorical plus tornado/hail/wind probabilities.
   assert.match(html, /\[(?:<!-- -->)?14(?:<!-- -->)?\]/);
-  assert.match(html, /Data status/);
   assert.doesNotMatch(html, /FORECAST AREA|VALID PERIOD|NWS ISSUED|All charts/);
   assert.doesNotMatch(html, /STATIC FORECAST|900 × 760 PNG|publication-ready/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
@@ -159,7 +162,7 @@ test("missing forecast data reads as missing, not as a forecast of zero", async 
   // all, so one transient miss pinned "temporarily unavailable" until a hard reload.
   assert.match(component, /const \[bundleError, setBundleError\]/);
   assert.match(component, /const \[forecastError, setForecastError\]/);
-  assert.match(component, /const error = bundleError \|\| forecastError/);
+  assert.match(component, /const error = bundleError \|\| \(showAnalysis \? mesoanalysisError : forecastError\)/);
   assert.match(component, /setBundleError\(false\)/);
   assert.match(component, /setForecastError\(false\)/);
   // And retried: the bundle effect only re-runs when the office changes, so without a
@@ -472,16 +475,16 @@ test("finds an office by town or ZIP without scrolling 125 of them", async () =>
   assert.match(builder, /nws_reference_map/);
 });
 
-test("scrolls the catalogue without scrolling the sidebar's data status away", async () => {
+test("scrolls the catalogue independently of the fixed office picker", async () => {
   const [component, css] = await Promise.all([
     readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
-  // Only the catalogue scrolls: the office picker and the data-status footer sit outside
-  // it, so "auto-updating" vs "published" is readable at any product count. Fourteen
-  // products already overflow a laptop viewport, which pushed the footer off the bottom.
+  // Only the catalogue scrolls; the office picker remains fixed above it.
   assert.match(component, /<div className="catalog-scroll">/);
-  assert.match(component, /<\/div>\s*\n\s*<footer className="catalog-footer">/);
+  assert.match(component, /<footer className="catalog-footer">/);
+  assert.match(component, /https:\/\/www\.weather\.gov\/\$\{office\.id\.toLowerCase\(\)\}/);
+  assert.doesNotMatch(component, /Data status|Source:/);
   assert.match(css, /\.catalog-scroll \{[^}]*overflow-y: auto/);
   assert.match(css, /\.catalog-scroll \{[^}]*min-height: 0/);
   // The bar is hidden in both dialects. Chromium ignores ::-webkit-scrollbar once
@@ -573,6 +576,32 @@ test("publishes forecast data without rendering imagery when the render tier is 
   // The data tier is never gated on the render tier: dropping imagery must not drop the
   // objects that are the only forecast source in production.
   assert.match(publisher, /await publishObject\(`forecast\/\$\{office\}\.json`/);
+});
+
+test("release pruning is manual, dry by default, and can never fire on a schedule", async () => {
+  const [workflow, script] = await Promise.all([
+    readFile(new URL("../.github/workflows/prune-releases.yml", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/prune-releases.mjs", import.meta.url), "utf8"),
+  ]);
+  // A run that renders prunes itself, so a recurring job here could only ever race the
+  // publisher over the release it just wrote. Dispatch only, and sharing the publisher's
+  // concurrency group so the two never touch `releases/` at once.
+  assert.match(workflow, /workflow_dispatch/);
+  assert.doesNotMatch(workflow, /^\s*schedule:/m);
+  assert.match(workflow, /group: forecast-plot-publisher/);
+  // Deleting is opt-in per run: the default dispatch only reports.
+  assert.match(workflow, /if: inputs\.delete/);
+  assert.match(script, /const apply = process\.argv\.includes\("--delete"\)/);
+  // The key filter is anchored to the shape the publisher writes, so the forecast data
+  // tier — the only prefix production actually reads — can never be selected.
+  assert.match(script, /const RELEASE_KEY = \/\^releases\\\/\\d\{8\}T\\d\{6\}Z\\\/\//);
+  assert.match(script, /Prefix: "releases\/"/);
+  assert.doesNotMatch(script, /Prefix: "forecast/);
+  // latest.json goes last and only after the objects are gone: a manifest that outlives
+  // its release renders as broken images, where no manifest just leaves views on canvas.
+  const deleteReleases = script.indexOf("deleted += batch.length");
+  const deleteManifest = script.indexOf('Key: "latest.json"');
+  assert.ok(deleteReleases > 0 && deleteManifest > deleteReleases, "latest.json must be removed after the releases");
 });
 
 test("a budget-limited run serves the views that are furthest behind, not the alphabet", async () => {
@@ -696,14 +725,17 @@ test("publisher discovers products from the page, so adding one needs no job cha
   assert.match(publisher, /getAttribute\("data-product-file"\)/);
   // Anchored on `kind:` so this scrapes PRODUCTS entries and not PRODUCT_GROUPS, whose
   // entries are also `{ id, title }`.
-  const productIds = [...component.matchAll(/kind: "\w+", id: "(\w+)", title:/g)].map((match) => match[1]);
+  // Mesoanalysis has its own data-only publisher and never enters forecast PNG releases,
+  // so only inspect the forecast catalogue this publisher actually drives.
+  const forecastCatalogue = component.slice(component.indexOf("const PRODUCTS"), component.indexOf("const MESO_PRODUCTS"));
+  const productIds = [...forecastCatalogue.matchAll(/kind: "\w+", id: "(\w+)", title:/g)].map((match) => match[1]);
   assert.ok(productIds.length >= 10, `expected the product list to be discovered, got ${productIds.length}`);
   for (const id of productIds) {
     // Whole-word, or a short id like "wind" would match "window" in a comment.
     assert.doesNotMatch(publisher, new RegExp(`\\b${id}\\b`), `publisher must not name product "${id}" — it should discover products`);
   }
   // Every product's file slug has to satisfy the asset-path guard, or its PNG 404s.
-  const slugs = [...component.matchAll(/file: "([a-z-]+)"/g)].map((match) => match[1]);
+  const slugs = [...forecastCatalogue.matchAll(/file: "([a-z-]+)"/g)].map((match) => match[1]);
   assert.equal(slugs.length, productIds.length);
   for (const slug of slugs) {
     for (const key of [`${slug}.png`, `${slug}-preview.png`]) {
@@ -892,7 +924,7 @@ test("no render path can hang on an external request", async () => {
   // three canvases — ~286 MB, past what a renderer allocates on a CI runner. Serialized
   // it is ~118 MB, and costs nothing: the work is CPU-bound either way.
   assert.match(component, /function enqueueRender/);
-  assert.match(component, /enqueueRender\(\(\) => renderPlot\(/);
+  assert.match(component, /enqueueRender\(\(\) => renderFieldPlot\(/);
   assert.match(component, /enqueueRender\(\(\) => renderOutlookPlot\(/);
   // Scratch canvases hand memory back rather than waiting for GC under pressure.
   assert.match(component, /function releaseCanvas/);
@@ -1068,9 +1100,11 @@ test("resolves both published key shapes and rejects anything else", async () =>
   // before any network call, leaving the national view with no data source in production.
   const pattern = /^releases\/\d{8}T\d{6}Z\/(?:[A-Z]{2,3}\/)?day-[1-3]\/[a-z][a-z-]*\.png$/;
   const forecastPattern = /^forecast\/[A-Z]{2,3}\.json$/;
+  const mesoanalysisPattern = /^mesoanalysis\/[A-Z]{2,3}\.json$/;
   // Guard against the literals in the route drifting from what this test asserts.
   assert.ok(source.includes(pattern.source), "route release regex no longer matches the tested pattern");
   assert.ok(source.includes(forecastPattern.source), "route forecast regex no longer matches the tested pattern");
+  assert.ok(source.includes(mesoanalysisPattern.source), "route mesoanalysis regex no longer matches the tested pattern");
 
   for (const key of [
     "releases/20260724T205317Z/PHI/day-1/max-apparent-temperature.png",
@@ -1103,6 +1137,63 @@ test("resolves both published key shapes and rejects anything else", async () =>
   for (const key of ["forecast/phi.json", "forecast/A.json", "forecast/TOOLONG.json", "forecast/PHI.txt", "forecast/../secret.json"]) {
     assert.ok(!forecastPattern.test(key), `expected ${key} to be rejected`);
   }
+
+  for (const key of ["mesoanalysis/PHI.json", "mesoanalysis/US.json", "mesoanalysis/MA.json"]) {
+    assert.ok(mesoanalysisPattern.test(key), `expected ${key} to be served`);
+  }
+  for (const key of ["mesoanalysis/phi.json", "mesoanalysis/A.json", "mesoanalysis/TOOLONG.json", "mesoanalysis/../secret.json"]) {
+    assert.ok(!mesoanalysisPattern.test(key), `expected ${key} to be rejected`);
+  }
+});
+
+test("publishes an hourly RAP mesoanalysis with same-hour SPC comparisons", async () => {
+  const [component, pipeline, publisher, workflow, comparisonRoute] = await Promise.all([
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/mesoanalysis_pipeline.py", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/publish-mesoanalysis.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../.github/workflows/publish-mesoanalysis.yml", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/spc-mesoanalysis/route.ts", import.meta.url), "utf8"),
+  ]);
+
+  for (const product of [
+    "surfaceCape", "surfaceCin", "mixedLayerCape", "mixedLayerCin", "mostUnstableCape",
+    "lowLevelLapseRate", "midLevelLapseRate", "lclHeight", "precipitableWater",
+    "stormRelativeHelicity1km", "stormRelativeHelicity3km", "bulkShear6km",
+  ]) {
+    assert.match(component, new RegExp(`id: "${product}"`));
+    assert.match(pipeline, new RegExp(`"${product}"`));
+  }
+  assert.match(component, /data-view="analysis"/);
+  assert.match(component, /Compare with SPC/);
+  assert.match(component, /payload\.comparison\.products\[spec\.id\]/);
+  assert.match(component, /const comparisonImage = comparison/);
+  assert.doesNotMatch(component, /Our \{payload\.model\} analysis/);
+  assert.doesNotMatch(component, /SPC sector \{payload\.comparison\.sector\}/);
+  assert.match(pipeline, /strftime\("%y%m%d%H"\)/);
+  assert.match(pipeline, /\{spc_name\}_\{stamp\}\.gif/);
+  assert.match(pipeline, /--discover-only/);
+  assert.match(publisher, /previous\?\.cycle === discovery\.cycle/);
+  assert.match(publisher, /JSON\.stringify\(previous\.scope\) === JSON\.stringify\(requestedScope\)/);
+  assert.match(pipeline, /"scope": "all" if only is None else sorted\(only\)/);
+  assert.match(publisher, /Key: `mesoanalysis\/\$\{file\}`/);
+  assert.ok(
+    publisher.indexOf('Key: "mesoanalysis/latest.json"') > publisher.indexOf("await pooled(officeFiles"),
+    "the manifest must publish after every office payload",
+  );
+  assert.match(workflow, /cron: "7,22,37,52 \* \* \* \*"/);
+  assert.match(workflow, /offices:/);
+  assert.match(workflow, /MESO_OFFICES: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.offices \|\| '' \}\}/);
+  assert.doesNotMatch(workflow, /vars\.MESO_OFFICES/);
+  for (const product of ["sbcp", "mlcp", "mucp", "lllr", "laps", "lclh", "pwtr", "srh1", "srh3", "shr6"]) {
+    assert.match(comparisonRoute, new RegExp(`"${product}"`));
+  }
+  assert.match(comparisonRoute, /\^\\d\{8\}\$/);
+  assert.match(comparisonRoute, /max-age=31536000/);
+  assert.match(comparisonRoute, /"User-Agent": "NWSGraphics/);
+  assert.match(comparisonRoute, /for \(let attempt = 0; attempt < 2;/);
+  assert.match(component, /Loading SPC archive…/);
+  assert.match(component, /SPC archive is temporarily unavailable\./);
+  assert.match(component, />Retry</);
 });
 
 test("a wide-frame view stops the field at the land it covers", async () => {
@@ -1115,7 +1206,7 @@ test("a wide-frame view stops the field at the land it covers", async () => {
   // clip() would intersect them and leave nothing.
   assert.match(component, /for \(const area of bundle\.states\) addAreaToPath\(context, area, projectPoint\);/);
   assert.match(component, /function addAreaToPath/);
-  const render = component.slice(component.indexOf("async function renderPlot"));
+  const render = component.slice(component.indexOf("async function renderFieldPlot"));
   const clip = render.slice(render.indexOf("const clipToLand"), render.indexOf("releaseCanvas(raster)"));
   assert.ok(clip.indexOf("context.clip()") < clip.indexOf("context.drawImage(raster"), "the clip must be set before the raster is composited");
   assert.match(clip, /if \(clipToLand\) context\.restore\(\);/);

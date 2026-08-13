@@ -32,11 +32,15 @@ export async function GET(
   // in production, so the fan-out happens once an hour in the publisher instead and this
   // route only relays the result.
   const FORECAST_KEY = /^forecast\/[A-Z]{2,3}\.json$/;
+  // Hourly RAP/HRRR analyses are also rewritten in place per view. Heavy GRIB decoding
+  // happens in the publisher; the Worker only relays these bounded JSON objects.
+  const MESOANALYSIS_KEY = /^mesoanalysis\/[A-Z]{2,3}\.json$/;
 
   const { path } = await context.params;
   const assetKey = path.join("/");
   const isForecast = FORECAST_KEY.test(assetKey);
-  if ((!isForecast && !ASSET_KEY.test(assetKey)) || assetKey.includes("..")) {
+  const isMesoanalysis = MESOANALYSIS_KEY.test(assetKey);
+  if ((!isForecast && !isMesoanalysis && !ASSET_KEY.test(assetKey)) || assetKey.includes("..")) {
     return NextResponse.json({ error: "Invalid forecast asset path" }, { status: 400 });
   }
 
@@ -57,12 +61,12 @@ export async function GET(
     return new NextResponse(response.body, {
       status: 200,
       headers: {
-        "Content-Type": response.headers.get("Content-Type") ?? (isForecast ? "application/json" : "image/png"),
+        "Content-Type": response.headers.get("Content-Type") ?? (isForecast || isMesoanalysis ? "application/json" : "image/png"),
         // Releases are immutable and keyed by issuance time; a forecast is rewritten in
         // place whenever NWS reissues, so it can only be cached as long as we are willing
         // to show a stale one. Five minutes keeps repeat views free without outliving the
         // ten-minute publish cadence in the issuance windows.
-        "Cache-Control": isForecast
+        "Cache-Control": isForecast || isMesoanalysis
           ? "public, max-age=300, s-maxage=300"
           : "public, max-age=31536000, s-maxage=31536000, immutable",
       },

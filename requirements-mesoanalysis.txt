@@ -1,0 +1,4 @@
+# The scheduled publisher decodes GRIB outside the Cloudflare request path.
+eccodes>=2.44,<3
+numpy>=2,<3
+scipy>=1.15,<2

@@ -396,9 +396,12 @@ render rewrites, so with imagery off an unconditional compare reports a deploy o
 run forever — which costs the gate its entire purpose, ~2 minutes of `npm ci` and a build
 before the publisher exits anyway.
 
-**Clearing the orphaned releases is `npm run plots:prune-releases -- --delete`**, a one-off,
-because `pruneOldReleases` runs only inside the render path and therefore never runs at all
-now. It deletes `releases/**` *and* `latest.json`, in that order and deliberately: a
+**Clearing the orphaned releases is the `Prune published releases` workflow** — manual
+dispatch, dry run unless the `delete` input is set, and it shares the publisher's
+concurrency group so the two never touch `releases/` at once. It exists because
+`pruneOldReleases` runs only inside the render path and therefore never runs at all now,
+and it lives in Actions so the R2 credentials never leave GitHub. Locally the same thing is
+`npm run plots:prune-releases -- --delete`. It deletes `releases/**` *and* `latest.json`, in that order and deliberately: a
 manifest that outlives its objects is worse than no manifest, because
 `PublishedForecastPlot` renders missing assets as broken images while an absent manifest
 just leaves every view on the live canvas. It never touches `forecast/`, which is the only

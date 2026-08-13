@@ -8,6 +8,13 @@ import { parsePlaceIndex, searchPlaces } from "../../lib/place-search.mjs";
 import { ALERT_COLORS, DEFAULT_ALERT_COLOR } from "../alert-colors";
 
 type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "dewpoint" | "windGust" | "windSpeed" | "skyCover" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
+type MesoProductId =
+  | "surfaceCape" | "surfaceCin"
+  | "mixedLayerCape" | "mixedLayerCin" | "mostUnstableCape"
+  | "lowLevelLapseRate" | "midLevelLapseRate"
+  | "lclHeight" | "precipitableWater"
+  | "stormRelativeHelicity1km" | "stormRelativeHelicity3km" | "bulkShear6km";
+type FieldProductId = ProductId | MesoProductId;
 type ForecastPoint = {
   id: string;
   name: string;
@@ -15,13 +22,31 @@ type ForecastPoint = {
   lat: number;
   lon: number;
   label: boolean;
-  metrics: Record<ProductId, Array<number | null>>;
+  metrics: Partial<Record<FieldProductId, Array<number | null>>>;
 };
 type ForecastPayload = {
   office: OfficeId;
   generatedAt: string;
   updatedAt: string;
   days: Array<{ date: string; label: string; shortLabel: string }>;
+  points: ForecastPoint[];
+  failures: number;
+};
+type MesoanalysisPayload = {
+  schemaVersion: 1;
+  office: OfficeId;
+  model: "RAP" | "HRRR";
+  cycle: string;
+  validTime: string;
+  generatedAt: string;
+  source: string;
+  definitions: Record<MesoProductId, string>;
+  comparison: {
+    provider: string;
+    sector: number;
+    validTime: string;
+    products: Record<MesoProductId, string>;
+  };
   points: ForecastPoint[];
   failures: number;
 };
@@ -111,7 +136,7 @@ type OfficeBundle = {
 type Bounds = { west: number; south: number; east: number; north: number };
 type MapExtent = { left: number; top: number; right: number; bottom: number; zoom: number };
 type ColorStop = { value: number; color: string };
-type ProductGroupId = "temperature" | "wind" | "sky" | "precipitation" | "severe";
+type ProductGroupId = "temperature" | "wind" | "sky" | "precipitation" | "severe" | "environment" | "kinematics";
 
 // Two kinds of product share the catalogue, the day switcher and the publisher, but not
 // the renderer: a field is an interpolated raster off the NWS gridpoints, an outlook is a
@@ -130,9 +155,9 @@ type ProductCommon = {
    */
   days?: number[];
 };
-type FieldProductSpec = ProductCommon & {
+type FieldProductSpec<Id extends FieldProductId = FieldProductId> = ProductCommon & {
   kind: "field";
-  id: ProductId;
+  id: Id;
   unit: string;
   decimals: number;
   stops: ColorStop[];
@@ -166,7 +191,7 @@ type OutlookProductSpec = ProductCommon & {
    */
   maxIntensity?: number;
 };
-type ProductSpec = FieldProductSpec | OutlookProductSpec;
+type ProductSpec = FieldProductSpec<ProductId> | OutlookProductSpec;
 
 type OutlookGeometry =
   | { type: "Polygon"; coordinates: number[][][] }
@@ -350,6 +375,35 @@ async function loadForecast(office: OfficeId): Promise<ForecastPayload> {
   if (!response.ok) throw new Error("Forecast unavailable");
   return (await response.json()) as ForecastPayload;
 }
+
+/** Hourly RAP analysis, decoded and sampled by the off-request publisher. */
+async function loadMesoanalysis(office: OfficeId): Promise<MesoanalysisPayload> {
+  const paths = PUBLISHED_ASSET_BASE_URL
+    ? [`/api/forecast-assets/mesoanalysis/${office}.json`, `/mesoanalysis/${office}.json`]
+    // A developer can run the ingest with --output-dir public/mesoanalysis and inspect
+    // the exact production payload locally without configuring R2.
+    : [`/mesoanalysis/${office}.json`];
+  // Local development can have a freshly generated public/mesoanalysis payload while
+  // the configured R2 bucket is still on an older cycle. Read every available source
+  // and choose the newest valid hour instead of letting an older first response shadow
+  // current local data. In production the bundled fallback is normally absent.
+  const payloads = (await Promise.all(paths.map(async (path) => {
+    try {
+      const separator = path.includes("?") ? "&" : "?";
+      const response = await fetch(`${path}${separator}ts=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) return null;
+      const payload = (await response.json()) as MesoanalysisPayload;
+      return payload.office === office && Number.isFinite(Date.parse(payload.validTime)) ? payload : null;
+    } catch {
+      // A missing view is normal outside RAP's CONUS domain; report it in the panel.
+      return null;
+    }
+  }))).filter((payload): payload is MesoanalysisPayload => payload !== null);
+  const newest = payloads.sort((left, right) => Date.parse(right.validTime) - Date.parse(left.validTime))[0];
+  if (newest) return newest;
+  throw new Error("Mesoanalysis unavailable");
+}
+
 const PRODUCTS: ProductSpec[] = [
   {
     kind: "field", id: "apparentTemperature", title: "Maximum Apparent Temperature", nav: "Feels Like", group: "temperature", legend: "APPARENT TEMPERATURE (°F)", unit: "°", file: "max-apparent-temperature", decimals: 0, verticalLegend: true,
@@ -422,6 +476,57 @@ const PRODUCTS: ProductSpec[] = [
   },
 ];
 
+const MESO_PRODUCTS: Array<FieldProductSpec<MesoProductId>> = [
+  {
+    kind: "field", id: "surfaceCape", title: "Surface-Based CAPE", nav: "SBCAPE", group: "environment", legend: "SURFACE-BASED CAPE (J/KG)", unit: " J/kg", file: "rap-surface-cape", decimals: 0, fillAlpha: 215, verticalLegend: true,
+    stops: [{ value: 0, color: "#f7f7f7" }, { value: 250, color: "#d9f0d3" }, { value: 500, color: "#addd8e" }, { value: 1000, color: "#78c679" }, { value: 1500, color: "#31a354" }, { value: 2000, color: "#fed976" }, { value: 3000, color: "#fd8d3c" }, { value: 4000, color: "#e31a1c" }, { value: 5000, color: "#800026" }],
+  },
+  {
+    kind: "field", id: "surfaceCin", title: "Surface-Based CIN", nav: "SBCIN", group: "environment", legend: "SURFACE-BASED CIN (J/KG)", unit: " J/kg", file: "rap-surface-cin", decimals: 0, fillAlpha: 205, verticalLegend: true,
+    stops: [{ value: -500, color: "#3f007d" }, { value: -250, color: "#54278f" }, { value: -150, color: "#756bb1" }, { value: -100, color: "#9e9ac8" }, { value: -50, color: "#cbc9e2" }, { value: -25, color: "#d9f0d3" }, { value: 0, color: "#ffffff" }],
+  },
+  {
+    kind: "field", id: "mixedLayerCape", title: "90-mb Mixed-Layer CAPE", nav: "MLCAPE", group: "environment", legend: "MIXED-LAYER CAPE (J/KG)", unit: " J/kg", file: "rap-mixed-layer-cape", decimals: 0, fillAlpha: 215, verticalLegend: true,
+    stops: [{ value: 0, color: "#f7f7f7" }, { value: 250, color: "#d9f0d3" }, { value: 500, color: "#addd8e" }, { value: 1000, color: "#78c679" }, { value: 1500, color: "#31a354" }, { value: 2000, color: "#fed976" }, { value: 3000, color: "#fd8d3c" }, { value: 4000, color: "#e31a1c" }, { value: 5000, color: "#800026" }],
+  },
+  {
+    kind: "field", id: "mixedLayerCin", title: "90-mb Mixed-Layer CIN", nav: "MLCIN", group: "environment", legend: "MIXED-LAYER CIN (J/KG)", unit: " J/kg", file: "rap-mixed-layer-cin", decimals: 0, fillAlpha: 205, verticalLegend: true,
+    stops: [{ value: -500, color: "#3f007d" }, { value: -250, color: "#54278f" }, { value: -150, color: "#756bb1" }, { value: -100, color: "#9e9ac8" }, { value: -50, color: "#cbc9e2" }, { value: -25, color: "#d9f0d3" }, { value: 0, color: "#ffffff" }],
+  },
+  {
+    kind: "field", id: "mostUnstableCape", title: "Most-Unstable CAPE", nav: "MUCAPE", group: "environment", legend: "MOST-UNSTABLE CAPE (J/KG)", unit: " J/kg", file: "rap-most-unstable-cape", decimals: 0, fillAlpha: 215, verticalLegend: true,
+    stops: [{ value: 0, color: "#f7f7f7" }, { value: 250, color: "#d9f0d3" }, { value: 500, color: "#addd8e" }, { value: 1000, color: "#78c679" }, { value: 1500, color: "#31a354" }, { value: 2000, color: "#fed976" }, { value: 3000, color: "#fd8d3c" }, { value: 4000, color: "#e31a1c" }, { value: 5000, color: "#800026" }],
+  },
+  {
+    kind: "field", id: "lowLevelLapseRate", title: "0–3 km AGL Lapse Rate", nav: "Low-Level Lapse", group: "environment", legend: "0–3 KM AGL LAPSE RATE (°C/KM)", unit: " °C/km", file: "rap-low-level-lapse-rate", decimals: 1, fillAlpha: 215, verticalLegend: true,
+    stops: [{ value: 3, color: "#313695" }, { value: 4, color: "#74add1" }, { value: 5, color: "#abd9e9" }, { value: 6, color: "#e0f3f8" }, { value: 7, color: "#ffffbf" }, { value: 8, color: "#fdae61" }, { value: 9, color: "#f46d43" }, { value: 10, color: "#a50026" }],
+  },
+  {
+    kind: "field", id: "midLevelLapseRate", title: "700–500 mb Lapse Rate", nav: "Mid-Level Lapse", group: "environment", legend: "700–500 MB LAPSE RATE (°C/KM)", unit: " °C/km", file: "rap-mid-level-lapse-rate", decimals: 1, fillAlpha: 215, verticalLegend: true,
+    stops: [{ value: 4, color: "#313695" }, { value: 5, color: "#74add1" }, { value: 5.5, color: "#abd9e9" }, { value: 6, color: "#e0f3f8" }, { value: 6.5, color: "#ffffbf" }, { value: 7, color: "#fee090" }, { value: 7.5, color: "#fdae61" }, { value: 8, color: "#f46d43" }, { value: 9, color: "#a50026" }],
+  },
+  {
+    kind: "field", id: "lclHeight", title: "Surface-Parcel LCL Height", nav: "LCL Height", group: "environment", legend: "LCL HEIGHT AGL (METRES)", unit: " m", file: "rap-lcl-height", decimals: 0, fillAlpha: 210, verticalLegend: true,
+    stops: [{ value: 0, color: "#08306b" }, { value: 250, color: "#2171b5" }, { value: 500, color: "#6baed6" }, { value: 750, color: "#bdd7e7" }, { value: 1000, color: "#ffffcc" }, { value: 1500, color: "#fed976" }, { value: 2000, color: "#fd8d3c" }, { value: 3000, color: "#bd0026" }],
+  },
+  {
+    kind: "field", id: "precipitableWater", title: "Precipitable Water", nav: "PWAT", group: "environment", legend: "PRECIPITABLE WATER (INCHES)", unit: " in", file: "rap-precipitable-water", decimals: 2, fillAlpha: 215, verticalLegend: true,
+    stops: [{ value: 0.25, color: "#8c510a" }, { value: 0.5, color: "#d8b365" }, { value: 0.75, color: "#f6e8c3" }, { value: 1, color: "#c7eae5" }, { value: 1.25, color: "#80cdc1" }, { value: 1.5, color: "#35978f" }, { value: 1.75, color: "#01665e" }, { value: 2, color: "#542788" }, { value: 2.5, color: "#b358a6" }, { value: 3, color: "#f1b6da" }],
+  },
+  {
+    kind: "field", id: "stormRelativeHelicity1km", title: "0–1 km Storm-Relative Helicity", nav: "0–1 km SRH", group: "kinematics", legend: "0–1 KM STORM-RELATIVE HELICITY (M²/S²)", unit: " m²/s²", file: "rap-srh-1km", decimals: 0, fillAlpha: 210, verticalLegend: true,
+    stops: [{ value: -200, color: "#2166ac" }, { value: -100, color: "#67a9cf" }, { value: 0, color: "#f7f7f7" }, { value: 50, color: "#d9f0a3" }, { value: 100, color: "#fee08b" }, { value: 200, color: "#fdae61" }, { value: 300, color: "#f46d43" }, { value: 500, color: "#a50026" }],
+  },
+  {
+    kind: "field", id: "stormRelativeHelicity3km", title: "0–3 km Storm-Relative Helicity", nav: "0–3 km SRH", group: "kinematics", legend: "0–3 KM STORM-RELATIVE HELICITY (M²/S²)", unit: " m²/s²", file: "rap-srh-3km", decimals: 0, fillAlpha: 210, verticalLegend: true,
+    stops: [{ value: -200, color: "#2166ac" }, { value: -100, color: "#67a9cf" }, { value: 0, color: "#f7f7f7" }, { value: 50, color: "#d9f0a3" }, { value: 100, color: "#fee08b" }, { value: 200, color: "#fdae61" }, { value: 300, color: "#f46d43" }, { value: 500, color: "#a50026" }],
+  },
+  {
+    kind: "field", id: "bulkShear6km", title: "Surface–6 km Bulk Shear", nav: "0–6 km Shear", group: "kinematics", legend: "SURFACE–6 KM BULK SHEAR (KNOTS)", unit: " kt", file: "rap-bulk-shear-6km", decimals: 0, fillAlpha: 210, verticalLegend: true,
+    stops: [{ value: 0, color: "#f7fbff" }, { value: 10, color: "#deebf7" }, { value: 20, color: "#9ecae1" }, { value: 30, color: "#6baed6" }, { value: 40, color: "#31a354" }, { value: 50, color: "#fed976" }, { value: 60, color: "#fd8d3c" }, { value: 70, color: "#e31a1c" }, { value: 80, color: "#800026" }],
+  },
+];
+
 const ALL_FORECAST_DAYS = [1, 2, 3];
 
 /** Day tabs a product is issued for — the whole run unless it says otherwise. */
@@ -440,6 +545,8 @@ function findOutlook(payloads: OutlookPayloads, spec: OutlookProductSpec, day: n
 }
 
 const PRODUCT_GROUPS: Array<{ id: ProductGroupId; title: string }> = [
+  { id: "environment", title: "Instability & thermodynamics" },
+  { id: "kinematics", title: "Shear & helicity" },
   { id: "temperature", title: "Temperature & heat" },
   { id: "wind", title: "Wind" },
   { id: "sky", title: "Sky & moisture" },
@@ -796,6 +903,13 @@ function forecastHeaderLines(forecast: ForecastPayload, dayIndex: number, office
   };
 }
 
+function mesoanalysisHeaderLines(payload: MesoanalysisPayload) {
+  return {
+    valid: `VALID  ${stampLabel(payload.validTime)}`,
+    issued: `${payload.model} ANALYSIS CYCLE  ${stampLabel(payload.cycle)}`,
+  };
+}
+
 /**
  * Neither centre's outlook day matches the site's Eastern calendar day — SPC's
  * convective day runs 12Z–12Z and WPC's rainfall periods end at 12Z — so an outlook is
@@ -967,10 +1081,19 @@ function commitPlot(canvas: HTMLCanvasElement, mapCanvas: HTMLCanvasElement, tit
   releaseCanvas(mapCanvas);
 }
 
-async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, bundle: OfficeBundle, spec: FieldProductSpec, dayIndex: number, office: OfficeId) {
+async function renderFieldPlot(
+  canvas: HTMLCanvasElement,
+  pointsInPayload: ForecastPoint[],
+  bundle: OfficeBundle,
+  spec: FieldProductSpec,
+  valueIndex: number,
+  office: OfficeId,
+  headerLines: { valid: string; issued: string },
+  unavailableLabel = "DATA UNAVAILABLE",
+) {
   const { mapCanvas, context, plot, extent, projectPoint, width, height } = await beginMapCanvas(bundle);
 
-  const points = forecast.points.filter((point) => point.metrics[spec.id][dayIndex] !== null);
+  const points = pointsInPayload.filter((point) => point.metrics[spec.id]?.[valueIndex] != null);
   const gridPoints = points.filter((point) => !point.label);
   const fieldPoints = gridPoints.length ? gridPoints : points;
 
@@ -984,13 +1107,10 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
     context.restore();
     context.textAlign = "center";
     context.font = `600 19px ${PLOT_FONT_FAMILY}`;
-    outlinedText(context, "FORECAST DATA UNAVAILABLE", width / 2, height / 2 - 6, 4);
+    outlinedText(context, unavailableLabel, width / 2, height / 2 - 6, 4);
     context.textAlign = "left";
     drawSignature(context, width, height);
-    commitPlot(canvas, mapCanvas, spec.title, {
-      valid: forecast.days[dayIndex]?.label?.toUpperCase() ?? `DAY ${dayIndex + 1}`,
-      issued: "SOURCE UNAVAILABLE",
-    }, await loadHeaderMark());
+    commitPlot(canvas, mapCanvas, spec.title, headerLines, await loadHeaderMark());
     return;
   }
   const fillAlpha = spec.fillAlpha ?? 185;
@@ -1029,7 +1149,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
         ? 0
         : 1 - (reach - SUPPORT_FULL) / (SUPPORT_NONE - SUPPORT_FULL);
     if (exact[cell] !== -1) {
-      field[cell] = fieldPoints[exact[cell]].metrics[spec.id][dayIndex] ?? 0;
+      field[cell] = fieldPoints[exact[cell]].metrics[spec.id]?.[valueIndex] ?? 0;
       continue;
     }
     let weighted = 0;
@@ -1038,7 +1158,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
       const index = indices[cell * NEIGHBOR_COUNT + slot];
       if (index === -1) break;
       const weight = weights[cell * NEIGHBOR_COUNT + slot];
-      weighted += (fieldPoints[index].metrics[spec.id][dayIndex] ?? 0) * weight;
+      weighted += (fieldPoints[index].metrics[spec.id]?.[valueIndex] ?? 0) * weight;
       total += weight;
     }
     field[cell] = total ? weighted / total : 0;
@@ -1102,8 +1222,8 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
 
   context.textAlign = "center";
   for (const point of points.filter((item) => item.label)) {
-    const value = point.metrics[spec.id][dayIndex];
-    if (value === null) continue;
+    const value = point.metrics[spec.id]?.[valueIndex];
+    if (value == null) continue;
     // projectPoint, not project: forecast points arrive in ordinary -180..180 longitudes
     // and an office crossing the antimeridian draws in a shifted space, so going straight
     // to `project` puts every label a world away from the map it belongs to.
@@ -1174,7 +1294,7 @@ async function renderPlot(canvas: HTMLCanvasElement, forecast: ForecastPayload, 
 
   // Commit the completed map and header together. Rendering offscreen avoids
   // concurrent development-mode effects sharing one canvas drawing state.
-  commitPlot(canvas, mapCanvas, spec.title, forecastHeaderLines(forecast, dayIndex, office), await loadHeaderMark());
+  commitPlot(canvas, mapCanvas, spec.title, headerLines, await loadHeaderMark());
 }
 
 /**
@@ -1578,7 +1698,16 @@ function ForecastPlot({ spec, forecast, outlook, outlookPending, bundle, dayInde
       if (outlookPending) return;
       void enqueueRender(() => renderOutlookPlot(target, outlook, bundle, spec, dayIndex, office.id)).then(done);
     } else {
-      void enqueueRender(() => renderPlot(target, forecast, bundle, spec, dayIndex, office.id)).then(done);
+      void enqueueRender(() => renderFieldPlot(
+        target,
+        forecast.points,
+        bundle,
+        spec,
+        dayIndex,
+        office.id,
+        forecastHeaderLines(forecast, dayIndex, office.id),
+        "FORECAST DATA UNAVAILABLE",
+      )).then(done);
     }
     return () => { active = false; };
   }, [forecast, outlook, outlookPending, bundle, spec, dayIndex, office]);
@@ -1613,6 +1742,110 @@ function ForecastPlot({ spec, forecast, outlook, outlookPending, bundle, dayInde
         data-render-state={ready ? "ready" : "rendering"}
       />
     </article>
+  );
+}
+
+function MesoanalysisPlot({ spec, payload, bundle, office, compare }: { spec: FieldProductSpec<MesoProductId>; payload: MesoanalysisPayload; bundle: OfficeBundle; office: Office; compare: boolean }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (!canvas.current) return;
+    let active = true;
+    setReady(false);
+    const target = canvas.current;
+    void enqueueRender(() => renderFieldPlot(
+      target,
+      payload.points,
+      bundle,
+      spec,
+      0,
+      office.id,
+      mesoanalysisHeaderLines(payload),
+      "RAP ANALYSIS UNAVAILABLE",
+    )).then(() => { if (active) setReady(true); });
+    return () => { active = false; };
+  }, [payload, bundle, spec, office]);
+
+  const download = useCallback(() => {
+    if (!canvas.current || !ready) return;
+    canvas.current.toBlob((blob) => {
+      if (!blob) return;
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      const stamp = payload.validTime.replace(/[-:]/g, "").replace("T", "-").slice(0, 13);
+      link.download = `${office.id.toLowerCase()}-${spec.file}-${stamp}z.png`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }, "image/png");
+  }, [office, payload.validTime, ready, spec.file]);
+
+  const comparison = payload.comparison.products[spec.id];
+  // SPC serves archive GIFs with the correct image type and CORS headers. Loading the
+  // immutable archive URL directly also avoids routing the image through the local
+  // Workers fetch implementation, which can stall on this particular legacy host.
+  const comparisonImage = comparison;
+  return (
+    <article className={`forecast-product mesoanalysis-product${compare ? " is-comparing" : ""}`} id={`product-${spec.id}`} data-product-id={spec.id} data-product-file={spec.file}>
+      <div className="product-bar">
+        <h3>{spec.title}</h3>
+        <button onClick={download} disabled={!ready}>{ready ? "Download PNG ↓" : "Rendering…"}</button>
+      </div>
+      <div className="mesoanalysis-pair">
+        <figure>
+          <canvas
+            ref={canvas}
+            className="forecast-canvas"
+            role="img"
+            aria-label={`${spec.title}, ${payload.model} analysis valid ${payload.validTime}, for the ${office.id} forecast area`}
+            data-product-id={spec.id}
+            data-product-file={spec.file}
+            data-office={office.id}
+            data-valid-time={payload.validTime}
+            data-render-state={ready ? "ready" : "rendering"}
+          />
+        </figure>
+        {compare && comparison && comparisonImage && (
+          <figure className="spc-comparison">
+            {/* Archive URLs are immutable by valid hour, so the comparison cannot move
+                underneath a test after a newer SPC analysis arrives. */}
+            <SpcComparisonImage key={comparisonImage} src={comparisonImage} alt={`SPC ${spec.title} comparison valid ${payload.comparison.validTime}`} />
+          </figure>
+        )}
+      </div>
+      <p className="mesoanalysis-definition">{payload.definitions[spec.id]}</p>
+    </article>
+  );
+}
+
+function SpcComparisonImage({ src, alt }: { src: string; alt: string }) {
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<"loading" | "loaded" | "error">("loading");
+  const separator = src.includes("?") ? "&" : "?";
+  const requestSrc = attempt ? `${src}${separator}attempt=${attempt}` : src;
+  return (
+    <div className={`spc-comparison-media is-${state}`}>
+      {state !== "loaded" && (
+        <div className="spc-comparison-status" role="status">
+          {state === "loading" ? (
+            <span>Loading SPC archive…</span>
+          ) : (
+            <>
+              <span>SPC archive is temporarily unavailable.</span>
+              <button type="button" onClick={() => { setState("loading"); setAttempt((value) => value + 1); }}>Retry</button>
+            </>
+          )}
+        </div>
+      )}
+      {/* eslint-disable-next-line @next/next/no-img-element -- immutable external GIF comparison, not an LCP asset */}
+      <img
+        className="spc-comparison-image"
+        src={requestSrc}
+        alt={alt}
+        loading="lazy"
+        onLoad={() => setState("loaded")}
+        onError={() => setState("error")}
+      />
+    </div>
   );
 }
 
@@ -2495,12 +2728,15 @@ function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office:
 
 export function ForecastGraphic() {
   const [forecast, setForecast] = useState<ForecastPayload | null>(null);
+  const [mesoanalysis, setMesoanalysis] = useState<MesoanalysisPayload | null>(null);
   const [publishedForecast, setPublishedForecast] = useState<PublishedForecastManifest | null>(null);
   const [bundle, setBundle] = useState<OfficeBundle | null>(null);
   const [outlooks, setOutlooks] = useState<OutlookPayloads>({ spc: null, wpc: null });
   // Distinct from "no outlook": tracks whether the outlook fetches have settled at all.
   const [outlookPending, setOutlookPending] = useState(true);
   const [dayIndex, setDayIndex] = useState(0);
+  const [showAnalysis, setShowAnalysis] = useState(false);
+  const [compareSpc, setCompareSpc] = useState(false);
   // Alerts are a view, not a fourth day: they describe what is in force right now, so they
   // sit alongside the day tabs rather than inside one. Kept as its own flag so `dayIndex`
   // stays a real day index everywhere else and nothing has to decode a sentinel value.
@@ -2519,7 +2755,8 @@ export function ForecastGraphic() {
   // unavailable" until a hard reload, even once everything was fetching fine again.
   const [bundleError, setBundleError] = useState(false);
   const [forecastError, setForecastError] = useState(false);
-  const error = bundleError || forecastError;
+  const [mesoanalysisError, setMesoanalysisError] = useState(false);
+  const error = bundleError || (showAnalysis ? mesoanalysisError : forecastError);
 
   // The server can't see the query string, so it renders the default office; the client
   // swaps to the requested one on hydration without a markup mismatch.
@@ -2681,9 +2918,29 @@ export function ForecastGraphic() {
   const publishedDays = publishedDaysFor(publishedForecast, office.id);
   const hasPublishedOffice = Boolean(publishedDays && publishedDays.length >= FORECAST_DAYS.length);
 
+  // Hourly RAP analysis is a separate, precomputed tier. It is fetched only when opened
+  // and refreshed on the same 15-minute cadence that discovers new model cycles.
+  useEffect(() => {
+    if (!showAnalysis) return;
+    let active = true;
+    const load = async () => {
+      try {
+        const payload = await loadMesoanalysis(office.id);
+        if (!active) return;
+        setMesoanalysis(payload);
+        setMesoanalysisError(false);
+      } catch {
+        if (active) setMesoanalysisError(true);
+      }
+    };
+    void load();
+    const refresh = window.setInterval(load, 15 * 60 * 1000);
+    return () => { active = false; window.clearInterval(refresh); };
+  }, [showAnalysis, office.id]);
+
   // Only fetch live gridpoint data when this office has no published imagery to show.
   useEffect(() => {
-    if (hasPublishedOffice) return;
+    if (hasPublishedOffice || showAnalysis) return;
     let active = true;
     const load = async () => {
       try {
@@ -2698,55 +2955,50 @@ export function ForecastGraphic() {
     void load();
     const refresh = window.setInterval(load, 15 * 60 * 1000);
     return () => { active = false; window.clearInterval(refresh); };
-  }, [office, hasPublishedOffice]);
+  }, [office, hasPublishedOffice, showAnalysis]);
 
   // The catalogue is day-aware: SPC issues split tornado/hail/wind probabilities only
   // through Day 2 and a combined severe probability only on Day 3, so those products
   // appear and disappear with the day tab rather than showing an empty map.
   const availableProducts = useMemo(() => PRODUCTS.filter((spec) => productDays(spec).includes(dayIndex + 1)), [dayIndex]);
+  const catalogueProducts: Array<ProductSpec | FieldProductSpec<MesoProductId>> = useMemo(
+    () => showAnalysis ? MESO_PRODUCTS : availableProducts,
+    [showAnalysis, availableProducts],
+  );
   const availableGroups = useMemo(
-    () => PRODUCT_GROUPS.filter((group) => availableProducts.some((product) => product.group === group.id)),
-    [availableProducts],
+    () => PRODUCT_GROUPS.filter((group) => catalogueProducts.some((product) => product.group === group.id)),
+    [catalogueProducts],
   );
   const publishedDay = publishedDays?.[dayIndex];
   // Derived rather than cleared on switch, so a previous office's payload can never be
   // drawn against the newly selected office's boundary.
   const officeForecast = forecast?.office === office.id ? forecast : null;
+  const officeMesoanalysis = mesoanalysis?.office === office.id ? mesoanalysis : null;
   return (
     <main className="app-shell">
       <aside className="catalog-sidebar">
         <OfficePicker office={office} onSelect={selectOffice} />
-        {/* The catalogue grew past one screen, which pushed the data-status footer off
-            the bottom of the sidebar. Only the catalogue scrolls; the office picker and
-            the status footer stay put, so "auto-updating" vs "published" is always
-            visible no matter how far down the product list you are. */}
         <div className="catalog-scroll">
           <nav className="catalog-nav" aria-label="Forecast product catalogue">
             <p>Menu</p>
-            <a className="is-active" href="#overview"><span>Overview</span><b>[{availableProducts.length}]</b></a>
+            <a className="is-active" href="#overview"><span>Overview</span><b>[{catalogueProducts.length}]</b></a>
             {availableGroups.map((group) => (
-              <a key={group.id} href={`#product-${availableProducts.find((product) => product.group === group.id)!.id}`}>
+              <a key={group.id} href={`#product-${catalogueProducts.find((product) => product.group === group.id)!.id}`}>
                 <span>{group.title}</span>
-                <b>[{availableProducts.filter((product) => product.group === group.id).length}]</b>
+                <b>[{catalogueProducts.filter((product) => product.group === group.id).length}]</b>
               </a>
             ))}
           </nav>
           <div className="catalog-divider" />
           <nav className="product-index" aria-label="Individual forecast products">
             <p>Products</p>
-            {availableProducts.map((spec) => <a key={spec.id} href={`#product-${spec.id}`}>{spec.nav}</a>)}
+            {catalogueProducts.map((spec) => <a key={spec.id} href={`#product-${spec.id}`}>{spec.nav}</a>)}
           </nav>
         </div>
         <footer className="catalog-footer">
-          <span className="status-label">Data status</span>
-          <span className="live-status"><i /> {hasPublishedOffice ? "PUBLISHED IMAGES" : "AUTO-UPDATING"}</span>
-          <p>
-            Source: National Weather Service<br />
-            {/* The picker's trigger is a button, so the office link lives here instead. */}
-            <a href={`https://www.weather.gov/${office.id.toLowerCase()}/`} target="_blank" rel="noreferrer">
-              NWS {office.label} ↗
-            </a>
-          </p>
+          <a href={`https://www.weather.gov/${office.id.toLowerCase()}/`} target="_blank" rel="noreferrer">
+            NWS {office.label} ↗
+          </a>
         </footer>
       </aside>
 
@@ -2758,25 +3010,36 @@ export function ForecastGraphic() {
             <nav className="day-switcher" aria-label="Forecast day">
               {/* Ahead of Day 1, because it is the only thing here describing right now
                   rather than a forecast day — and the first thing worth knowing. */}
-              <button type="button" data-view="alerts" className={showAlerts ? "is-active" : ""} aria-pressed={showAlerts} onClick={() => setShowAlerts(true)}>
+              <button type="button" data-view="alerts" className={showAlerts ? "is-active" : ""} aria-pressed={showAlerts} onClick={() => { setShowAnalysis(false); setShowAlerts(true); }}>
                 Alerts
               </button>
               {FORECAST_DAYS.map((index) => (
-                <button key={index} type="button" data-day-index={index} className={!showAlerts && dayIndex === index ? "is-active" : ""} aria-pressed={!showAlerts && dayIndex === index} onClick={() => { setShowAlerts(false); setDayIndex(index); }}>
+                <button key={index} type="button" data-day-index={index} className={!showAnalysis && !showAlerts && dayIndex === index ? "is-active" : ""} aria-pressed={!showAnalysis && !showAlerts && dayIndex === index} onClick={() => { setShowAnalysis(false); setShowAlerts(false); setDayIndex(index); }}>
                   Day {index + 1}
                 </button>
               ))}
+              <button type="button" data-view="analysis" className={`analysis-tab${showAnalysis ? " is-active" : ""}`} aria-pressed={showAnalysis} onClick={() => { setShowAnalysis(true); setShowAlerts(false); }}>
+                Analysis <span className="experimental-badge">Experimental</span>
+              </button>
             </nav>
           </div>
-          <a href="https://api.weather.gov/" target="_blank" rel="noreferrer">NWS data source ↗</a>
+          {showAnalysis && <button type="button" className={`comparison-toggle${compareSpc ? " is-active" : ""}`} aria-pressed={compareSpc} onClick={() => setCompareSpc((value) => !value)}>{compareSpc ? "Hide SPC comparison" : "Compare with SPC"}</button>}
         </header>
 
         <div className="workspace-content" id="overview">
           <header className="catalog-heading">
-            <h1>{showAlerts ? "Active Watches & Warnings" : `Day ${dayIndex + 1} Forecast Graphics`}</h1>
+            <h1>{showAnalysis ? "Hourly Mesoanalysis" : showAlerts ? "Active Watches & Warnings" : `Day ${dayIndex + 1} Forecast Graphics`}</h1>
           </header>
 
-          {showAlerts && (
+          {showAnalysis && !officeMesoanalysis && !error && <div className="gallery-message">Loading the latest RAP analysis…</div>}
+          {showAnalysis && error && <div className="gallery-message">RAP mesoanalysis is temporarily unavailable for this view.</div>}
+          {showAnalysis && officeMesoanalysis && officeBundle && (
+            <section className="forecast-gallery mesoanalysis-gallery" aria-label={`Hourly RAP mesoanalysis valid ${officeMesoanalysis.validTime}`} data-analysis-source={officeMesoanalysis.model} data-office={office.id}>
+              {MESO_PRODUCTS.map((spec) => <MesoanalysisPlot key={spec.id} spec={spec} payload={officeMesoanalysis} bundle={officeBundle} office={office} compare={compareSpc} />)}
+            </section>
+          )}
+
+          {!showAnalysis && showAlerts && (
             <AlertsPanel
               alerts={officeAlerts?.alerts ?? null}
               zones={officeZones}
@@ -2788,9 +3051,9 @@ export function ForecastGraphic() {
             />
           )}
 
-          {!showAlerts && !hasPublishedOffice && !officeForecast && !error && <div className="gallery-message">Loading the latest NWS forecast plots…</div>}
-          {!showAlerts && !hasPublishedOffice && error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
-          {!showAlerts && publishedDay && (
+          {!showAnalysis && !showAlerts && !hasPublishedOffice && !officeForecast && !error && <div className="gallery-message">Loading the latest NWS forecast plots…</div>}
+          {!showAnalysis && !showAlerts && !hasPublishedOffice && error && <div className="gallery-message">Forecast data is temporarily unavailable.</div>}
+          {!showAnalysis && !showAlerts && publishedDay && (
             <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} published forecast plots`} data-forecast-source="published" data-office={office.id}>
               {availableProducts.map((spec, index) => {
                 const asset = publishedDay.products[spec.id];
@@ -2798,7 +3061,7 @@ export function ForecastGraphic() {
               })}
             </section>
           )}
-          {!showAlerts && !hasPublishedOffice && officeForecast && officeBundle && (
+          {!showAnalysis && !showAlerts && !hasPublishedOffice && officeForecast && officeBundle && (
             <section className="forecast-gallery" aria-label={`Day ${dayIndex + 1} forecast plots`} data-office={office.id}>
               {availableProducts.map((spec) => (
                 <ForecastPlot key={spec.id} spec={spec} forecast={officeForecast} outlook={spec.kind === "outlook" ? findOutlook(outlooks, spec, dayIndex + 1) : null} outlookPending={outlookPending} bundle={officeBundle} dayIndex={dayIndex} office={office} />

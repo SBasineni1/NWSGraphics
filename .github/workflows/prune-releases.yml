@@ -1,0 +1,70 @@
+name: Prune published releases
+
+# Manual only, and deliberately so. `pruneOldReleases` runs *inside* the publisher's render
+# path, so with RENDER_OFFICE_COUNT at 0 it never runs at all and the objects from the last
+# render run stay in the bucket forever — about 1.5 GB across ~1,120 PNGs no client
+# requests, since imagery is gated off at the client. This is the one-off that clears them.
+#
+# It lives here rather than in a local shell so the R2 credentials never leave GitHub.
+#
+# There is no `schedule:` and there must not be one: a run that renders prunes itself, so a
+# recurring job here could only ever race the publisher over the release it just wrote.
+on:
+  workflow_dispatch:
+    inputs:
+      delete:
+        description: Actually delete. Leave off for a dry run that only reports what it would remove.
+        required: false
+        default: false
+        type: boolean
+
+# Shares the publisher's group so the two can never touch `releases/` at once. It does not
+# cancel, so this waits for a publish in flight rather than interrupting it.
+concurrency:
+  group: forecast-plot-publisher
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    # Listing and deleting ~1,120 objects is seconds of API calls; anything approaching this
+    # is a stall, not a big bucket.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+
+    steps:
+      - name: Check publication configuration
+        shell: bash
+        run: |
+          if [[ -z "$R2_ACCOUNT_ID" || -z "$R2_ACCESS_KEY_ID" || -z "$R2_SECRET_ACCESS_KEY" || -z "$R2_BUCKET" ]]; then
+            echo "::error::Pruning needs the same R2 secrets the publisher uses."
+            exit 1
+          fi
+
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Only for @aws-sdk/client-s3 — the script itself is plain Node.
+      - name: Install dependencies
+        run: npm ci
+
+      # Always runs, including when the delete input is set: the report is the record of
+      # what the next step removed, and it costs one listing.
+      - name: Report what would be deleted
+        run: npm run plots:prune-releases
+
+      - name: Delete releases and the stale manifest
+        if: inputs.delete
+        run: npm run plots:prune-releases -- --delete

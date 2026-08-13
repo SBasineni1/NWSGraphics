@@ -10,6 +10,12 @@ days for every product. Each map's colour field covers the whole frame using
 real gridpoint data from neighbouring offices; the selected office's County
 Warning Area is marked by its outline.
 
+The **Analysis** view adds an hourly RAP mesoanalysis for surface-, mixed-layer,
+and most-unstable CAPE; surface and mixed-layer CIN; low- and mid-level lapse
+rates; LCL height; precipitable water; storm-relative helicity; and 0–6 km bulk
+shear. Its comparison switch places each plot beside the archived SPC
+mesoanalysis image for the same valid hour and nearest SPC sector.
+
 ## Local development
 
 Requires Node.js 22 or newer.
@@ -126,6 +132,30 @@ PLOT_OUTPUT_ONLY=true npm run plots:publish
 ```
 
 The output directory is ignored by Git.
+
+### RAP mesoanalysis publication
+
+`.github/workflows/publish-mesoanalysis.yml` checks for a newly completed RAP
+analysis four times per hour. An unchanged cycle exits after reading the small
+NOMADS index; a new cycle downloads one contiguous GRIB range, samples every
+CONUS view, and publishes `mesoanalysis/{OFFICE}.json` to the same R2 bucket.
+The Worker only relays those JSON objects—it never decodes GRIB in a request.
+
+For a local one-office test:
+
+```bash
+python3 -m pip install -r requirements-mesoanalysis.txt
+MESO_OUTPUT_ONLY=true MESO_OUTPUT_DIR=outputs/mesoanalysis MESO_OFFICES=PHI \
+  npm run mesoanalysis:publish
+```
+
+Scheduled runs always publish every drawable RAP-domain view. For a targeted
+diagnostic run, use the workflow's manual **offices** input with a
+comma-separated list such as `PHI,OKX`; leaving it blank also publishes every
+view. The schedule intentionally ignores repository variables so a forgotten
+PHI-only test setting cannot narrow production. Publication manifests record
+their scope, so a targeted manual run also cannot make the next full-domain
+scheduled run skip that RAP cycle.
 
 ## Forecast-point maintenance
 

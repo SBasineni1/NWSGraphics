@@ -1,0 +1,83 @@
+name: Publish RAP mesoanalysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Regenerate the current RAP cycle
+        required: false
+        default: false
+        type: boolean
+      offices:
+        description: Optional comma-separated view ids for a manual test (blank publishes every RAP-domain view)
+        required: false
+        default: ""
+        type: string
+  schedule:
+    # RAP analyses are hourly but normally finish late in the hour. Four inexpensive
+    # index probes keep latency low; the publisher exits before GRIB download or R2
+    # writes whenever the latest complete cycle is already present.
+    - cron: "7,22,37,52 * * * *"
+
+concurrency:
+  group: mesoanalysis-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      FORCE_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.force == true }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+      # Scheduled production runs are deliberately always full-domain. A stale repository
+      # variable from a PHI-only test must never silently narrow the hourly publication.
+      # Manual dispatches retain a targeted option for inexpensive diagnostics.
+      MESO_OFFICES: ${{ github.event_name == 'workflow_dispatch' && inputs.offices || '' }}
+
+    steps:
+      - name: Check publication configuration
+        id: publication
+        shell: bash
+        run: |
+          if [[ -n "$R2_ACCOUNT_ID" && -n "$R2_ACCESS_KEY_ID" && -n "$R2_SECRET_ACCESS_KEY" && -n "$R2_BUCKET" && -n "$R2_PUBLIC_BASE_URL" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Mesoanalysis publication is waiting for the existing R2 secrets and variables."
+          fi
+
+      - name: Check out source
+        if: steps.publication.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        if: steps.publication.outputs.enabled == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Python
+        if: steps.publication.outputs.enabled == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-mesoanalysis.txt
+
+      - name: Install dependencies
+        if: steps.publication.outputs.enabled == 'true'
+        run: |
+          npm ci
+          python -m pip install -r requirements-mesoanalysis.txt
+
+      - name: Publish latest complete RAP analysis
+        if: steps.publication.outputs.enabled == 'true'
+        run: npm run mesoanalysis:publish

@@ -14,7 +14,6 @@
   --blue-soft: #eaf3ff;
   --orange: #d94f00;
   --black: #141414;
-  --live: #16845b;
 }
 
 * { box-sizing: border-box; }
@@ -430,17 +429,10 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
   letter-spacing: -.01em;
   transition: background .16s ease;
 }
-/* The catalogue is the only part of the sidebar that scrolls, so the picker above and
-   the data-status footer below stay on screen at any product count. The scrollbar is
-   deliberately visible rather than hidden-until-hover: it is the only cue that there is
-   more catalogue below, and the footer it is scrolling past is the thing you want to
-   keep an eye on. It sits in a gutter carved out of the sidebar's own padding so the
-   nav text stays aligned with the picker above it. */
-/* The catalogue is the only part of the sidebar that scrolls, so the picker above it and
-   the data-status footer below it stay on screen at any product count. The bar itself is
-   hidden — wheel, trackpad, keyboard and touch all still work, and the list running past
-   the edge is cue enough. Both dialects are needed: Chromium ignores ::-webkit-scrollbar
-   once scrollbar-width is set, and Firefox has no pseudo-element to hide. */
+/* The catalogue scrolls independently of the office picker. The bar itself is hidden —
+   wheel, trackpad, keyboard and touch still work, and the list running past the edge is
+   cue enough. Both dialects are needed: Chromium ignores ::-webkit-scrollbar once
+   scrollbar-width is set, and Firefox has no pseudo-element to hide. */
 .catalog-scroll {
   flex: 1 1 auto;
   min-height: 0;
@@ -490,25 +482,14 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
   letter-spacing: -.02em;
 }
 .product-index a:hover { color: #fff; }
-.catalog-footer { margin-top: auto; padding: 27px 0 0; border-top: 1px solid #2a2a2a; }
-.status-label {
-  display: block;
-  margin-bottom: 14px;
-  color: #777;
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: -.015em;
+.catalog-footer { margin-top: auto; padding: 20px 0 0; border-top: 1px solid #2a2a2a; }
+.catalog-footer a {
+  color: #8b8b8b;
+  font-size: 10px;
+  line-height: 1.5;
+  text-decoration: none;
 }
-.live-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: #f2f2f2;
-  font: 600 11px var(--font-geist-sans), Arial, sans-serif;
-  letter-spacing: -.01em;
-}
-.live-status i { width: 7px; height: 7px; border-radius: 50%; background: var(--live); }
-.catalog-footer p { margin: 11px 0 0; color: #777; font-size: 10px; line-height: 1.5; }
+.catalog-footer a:hover { color: #f4f4f4; }
 
 .catalog-workspace { min-width: 0; }
 
@@ -541,8 +522,32 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
 }
 .day-switcher button:hover { color: #bdbdbd; }
 .day-switcher button.is-active { color: #fff; }
+.day-switcher .analysis-tab { display: inline-flex; align-items: center; gap: 6px; }
+.day-switcher .experimental-badge {
+  padding: 2px 5px;
+  border: 1px solid #744226;
+  border-radius: 999px;
+  color: #e5793d;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: .045em;
+  text-transform: uppercase;
+}
+.day-switcher .analysis-tab.is-active .experimental-badge { border-color: #9c5730; color: #ff8a47; }
 .workspace-topbar a { color: #fff; text-decoration: none; font-size: 12px; font-weight: 550; letter-spacing: -.025em; }
 .workspace-topbar a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.comparison-toggle {
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--orange);
+  font: 600 12px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: -.025em;
+  cursor: pointer;
+}
+.comparison-toggle:hover,
+.comparison-toggle.is-active { text-decoration: underline; text-underline-offset: 3px; }
 
 .workspace-content { width: min(1480px, 100%); margin: 0 auto; padding: 52px clamp(18px, 3vw, 42px) 72px; scroll-margin-top: 76px; }
 .catalog-heading {
@@ -580,6 +585,17 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
 .product-bar a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .product-bar button:disabled { color: var(--faint); cursor: wait; }
 .forecast-canvas { display: block; width: 100%; height: auto; border: 1px solid var(--line-strong); background: #dfe8ee; }
+.mesoanalysis-pair { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
+.mesoanalysis-pair figure { min-width: 0; margin: 0; }
+.mesoanalysis-product.is-comparing { grid-column: 1 / -1; }
+.mesoanalysis-product.is-comparing .mesoanalysis-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.spc-comparison-media { position: relative; aspect-ratio: 4 / 3; border: 1px solid var(--line-strong); background: #e6e6e6; overflow: hidden; }
+.spc-comparison-image { display: block; width: 100%; height: 100%; object-fit: contain; }
+.spc-comparison-media:not(.is-loaded) .spc-comparison-image { visibility: hidden; }
+.spc-comparison-status { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 9px; padding: 20px; color: var(--muted); font: 550 12px var(--font-geist-sans), Arial, sans-serif; text-align: center; }
+.spc-comparison-status button { border: 0; padding: 0; background: transparent; color: var(--orange); font: 650 12px var(--font-geist-sans), Arial, sans-serif; cursor: pointer; }
+.spc-comparison-status button:hover { text-decoration: underline; text-underline-offset: 3px; }
+.mesoanalysis-definition { margin: 9px 0 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
 
 .gallery-message {
   min-height: 240px;
@@ -667,6 +683,7 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
 
 @media (max-width: 1120px) {
   .forecast-gallery { grid-template-columns: 1fr; }
+  .mesoanalysis-product.is-comparing .mesoanalysis-pair { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 820px) {
@@ -698,6 +715,7 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
   html { scroll-behavior: auto; }
   .workspace-topbar { padding: 0 16px; }
   .workspace-topbar a { display: none; }
+  .comparison-toggle { font-size: 11px; }
   .breadcrumbs { gap: 8px; }
   .breadcrumbs > span { display: none; }
   .day-switcher { gap: 16px; }
