@@ -45,3 +45,10 @@ next-env.d.ts
 # cached upstream geo sources for scripts/build-office-bundles.mjs (128 MB)
 /.cache/
 .venv-meso-dev/
+
+# compiled python
+__pycache__/
+*.pyc
+
+# matplotlib font cache written by tests/test_parcel_metpy.py
+tests/tmp/

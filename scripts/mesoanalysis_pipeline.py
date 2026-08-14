@@ -162,7 +162,6 @@ def lapse_rate_c_per_km(
 # Levels below an elevated parcel are ignored.  For a start below all data,
 # heights are extrapolated but integration begins at the first available level.
 _RD = 287.04749097718457
-_G = 9.80665
 _EPSILON = 0.6219569100577033
 _KAPPA = 0.2854
 
@@ -639,15 +638,17 @@ def decode_fields(grib_bytes: bytes):
     }
     missing = sorted(required - scalars.keys())
     surface_height_key = "gh" if "gh" in scalars else "orog" if "orog" in scalars else None
-    if missing or surface_height_key is None:
-        raise RuntimeError(f"RAP GRIB span is missing fields: {', '.join(missing + ([] if surface_height_key else ['surface height']))}")
+    surface_pressure_key = "sp" if "sp" in scalars else "pres" if "pres" in scalars else None
+    if missing or surface_height_key is None or surface_pressure_key is None:
+        missing_labels = missing + ([] if surface_height_key else ["surface height"]) + ([] if surface_pressure_key else ["surface pressure"])
+        raise RuntimeError(f"RAP GRIB span is missing fields: {', '.join(missing_labels)}")
     common_levels = sorted(
         set(heights) & set(temperatures) & set(u_winds) & set(v_winds) & set(humidities),
         reverse=True,
     )
     if len(common_levels) < 8:
         raise RuntimeError("RAP GRIB span has an incomplete 200--1000-mb temperature/height/wind/humidity profile")
-    return latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, common_levels
+    return latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, surface_pressure_key, common_levels
 
 
 def decode_rtma(grib_bytes: bytes):
@@ -732,7 +733,7 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
         cycle, grib_url, records, rtma = discover_cycle()
     byte_range = record_span(records)
     grib_bytes = fetch_bytes(grib_url, byte_range=byte_range, timeout=90)
-    latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, levels = decode_fields(grib_bytes)
+    latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, surface_pressure_key, levels = decode_fields(grib_bytes)
 
     # A failure decoding RTMA must not lose the whole run: degrade to the RAP-only
     # surface Task 6 already established, with a logged reason.
@@ -797,7 +798,7 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
 
         # The parcel starts at RTMA's observed surface where RTMA covers the point, and at
         # RAP's own surface otherwise. This is the whole point of the change.
-        parcel_pressure = scalars["sp"][rap_index].astype(np.float64) if "sp" in scalars else scalars["pres"][rap_index].astype(np.float64)
+        parcel_pressure = scalars[surface_pressure_key][rap_index].astype(np.float64)
         parcel_temperature = scalars["temperature2m"][rap_index].astype(np.float64)
         parcel_dewpoint = scalars["dewpoint2m"][rap_index].astype(np.float64)
         surface_height = scalars[surface_height_key][rap_index].astype(np.float64)
@@ -824,7 +825,6 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
             key = (round(point["lat"], 4), round(point["lon"], 4))
 
             surface_temperature = finite(parcel_temperature[i])
-            dewpoint = finite(parcel_dewpoint[i])
             # RTMA-adjusted terrain height, used only for lowLevelLapseRate's anchor below.
             adjusted_surface_height = finite(surface_height[i])
             # RAP's own surface height, unaffected by RTMA -- bulkShear6km must come out
