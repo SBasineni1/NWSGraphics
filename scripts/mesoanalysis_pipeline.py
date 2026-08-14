@@ -492,10 +492,10 @@ def rap_definitions() -> dict:
     """Definitions for the raw-RAP-surface fallback path (no RTMA lift)."""
     return {
         **_shared_definitions(),
-        "surfaceCape": "RAP surface-based CAPE analysis",
-        "surfaceCin": "RAP surface-based CIN analysis; normalized to negative J/kg",
+        "surfaceCape": "Surface-based CAPE, parcel lifted from RAP's own surface through the RAP profile",
+        "surfaceCin": "Surface-based CIN from the same RAP-surface lift; normalized to negative J/kg",
         "lowLevelLapseRate": "Derived 0-3 km AGL lapse rate from RAP pressure-level temperature and height",
-        "lclHeight": "Derived surface-parcel LCL AGL from RAP 2 m temperature/dewpoint spread",
+        "lclHeight": "Surface-parcel LCL AGL from the RAP-surface parcel lift, using Bolton (1980)",
     }
 
 
@@ -520,7 +520,10 @@ def probe_rtma(cycle: datetime):
     try:
         records = parse_index(fetch_bytes(index_url, timeout=20).decode("utf-8"))
         return grib_url, rtma_record_span(records)
-    except (OSError, RuntimeError, ValueError, urllib.error.HTTPError):
+    except Exception:
+        # Deliberately broad, matching the RTMA byte-fetch path: http.client.IncompleteRead
+        # subclasses HTTPException rather than OSError, so a truncated NOMADS response would
+        # otherwise escape and kill a run that is designed to degrade to the RAP surface.
         return None
 
 
@@ -925,6 +928,10 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
     manifest = {
         "schemaVersion": 1,
         "model": "RAP",
+        # The surface actually used, same value the per-office payloads record. The publisher
+        # compares it against a fresh discovery so an hour published on the RAP surface can be
+        # republished once RTMA lands for that same cycle -- RTMA routinely arrives after RAP.
+        "surface": surface,
         "cycle": valid_time.isoformat().replace("+00:00", "Z"),
         "generatedAt": generated_at.isoformat().replace("+00:00", "Z"),
         # A targeted manual publication must not make the next full-domain schedule
