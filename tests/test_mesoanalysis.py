@@ -118,6 +118,32 @@ class MesoanalysisPipelineTest(unittest.TestCase):
         self.assertEqual(surface_label(None), "rap")
         self.assertEqual(surface_label(("https://example/rtma", (0, 10))), "rtma")
 
+    def test_rtma_and_rap_definitions_differ_on_exactly_the_four_changed_products(self):
+        """rtma_definitions() and rap_definitions() must describe the same eight
+        untouched products identically, and differ only on the four Task 7 changed
+        (surfaceCape, surfaceCin, lclHeight, lowLevelLapseRate) -- otherwise the two
+        dicts can silently drift apart as either one is edited."""
+        from scripts.mesoanalysis_pipeline import rap_definitions, rtma_definitions
+        rap = rap_definitions()
+        rtma = rtma_definitions()
+        self.assertEqual(set(rap), set(rtma))
+        changed = {key for key in rap if rap[key] != rtma[key]}
+        self.assertEqual(changed, {"surfaceCape", "surfaceCin", "lclHeight", "lowLevelLapseRate"})
+        unchanged = set(rap) - changed
+        self.assertEqual(
+            unchanged,
+            {
+                "mixedLayerCape",
+                "mixedLayerCin",
+                "mostUnstableCape",
+                "midLevelLapseRate",
+                "precipitableWater",
+                "stormRelativeHelicity1km",
+                "stormRelativeHelicity3km",
+                "bulkShear6km",
+            },
+        )
+
 
 class ParcelLiftTest(unittest.TestCase):
     def _profile(self, surface_t=303.0, surface_td=294.0, lapse=7.0):

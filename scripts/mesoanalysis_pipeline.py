@@ -471,6 +471,46 @@ def surface_label(rtma) -> str:
     return "rtma" if rtma else "rap"
 
 
+def _shared_definitions() -> dict:
+    """The eight product definitions Task 7 left untouched, in either fallback flavor.
+
+    Built once and overlaid by rap_definitions()/rtma_definitions() so the two can
+    never drift apart on the products that didn't change derivation.
+    """
+    return {
+        "mixedLayerCape": "RAP 90-mb mixed-layer CAPE analysis; nearest available match to SPC's 100-mb product",
+        "mixedLayerCin": "RAP 90-mb mixed-layer CIN analysis; normalized negative and compared with SPC's 100-mb product",
+        "mostUnstableCape": "RAP most-unstable CAPE from the lowest-255-mb parcel search layer",
+        "midLevelLapseRate": "Derived RAP 700-500 mb lapse rate from pressure-level temperature and height",
+        "precipitableWater": "RAP total-column precipitable water analysis",
+        "stormRelativeHelicity1km": "RAP 0-1 km storm-relative helicity analysis",
+        "stormRelativeHelicity3km": "RAP 0-3 km storm-relative helicity analysis",
+        "bulkShear6km": "Derived RAP 10 m to 6 km AGL bulk wind difference",
+    }
+
+
+def rap_definitions() -> dict:
+    """Definitions for the raw-RAP-surface fallback path (no RTMA lift)."""
+    return {
+        **_shared_definitions(),
+        "surfaceCape": "RAP surface-based CAPE analysis",
+        "surfaceCin": "RAP surface-based CIN analysis; normalized to negative J/kg",
+        "lowLevelLapseRate": "Derived 0-3 km AGL lapse rate from RAP pressure-level temperature and height",
+        "lclHeight": "Derived surface-parcel LCL AGL from RAP 2 m temperature/dewpoint spread",
+    }
+
+
+def rtma_definitions() -> dict:
+    """Definitions for the RTMA-adjusted-surface path (Task 7's parcel lift)."""
+    return {
+        **_shared_definitions(),
+        "surfaceCape": "Surface-based CAPE, parcel lifted from the RTMA 2.5 km observation-adjusted surface through the RAP profile",
+        "surfaceCin": "Surface-based CIN from the same lift; normalized to negative J/kg",
+        "lowLevelLapseRate": "0-3 km AGL lapse rate anchored on the RTMA surface temperature and terrain",
+        "lclHeight": "Surface-parcel LCL AGL from the parcel lift, using Bolton (1980)",
+    }
+
+
 def probe_rtma(cycle: datetime):
     """Return (grib_url, byte_range) when RTMA exists for this hour, else None.
 
@@ -706,6 +746,11 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
             print(f"RTMA decode failed, falling back to RAP-only surface: {error}")
             rtma_lat = rtma_lon = rtma_fields = None
 
+    # Reflects what was actually used, not merely what probe_rtma() found: a probe
+    # success followed by a decode failure must still report "rap", since rtma_fields
+    # is what every downstream metric actually reads from.
+    surface = surface_label(rtma_fields)
+
     tree = cKDTree(np.column_stack((latitudes, longitudes * np.cos(np.radians(latitudes)))))
     grid_dir = root / "public" / "gridpoints"
     offices = sorted(path.stem for path in grid_dir.glob("*.json") if only is None or path.stem in only)
@@ -856,27 +901,15 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
         latitude = sum(point["lat"] for point in sampled_points) / len(sampled_points)
         sector = spc_sector(longitude, latitude, office)
         payload = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "office": office,
             "model": "RAP",
+            "surface": surface,
             "cycle": valid_time.isoformat().replace("+00:00", "Z"),
             "validTime": valid_time.isoformat().replace("+00:00", "Z"),
             "generatedAt": generated_at.isoformat().replace("+00:00", "Z"),
             "source": grib_url,
-            "definitions": {
-                "surfaceCape": "RAP surface-based CAPE analysis",
-                "surfaceCin": "RAP surface-based CIN analysis; normalized to negative J/kg",
-                "mixedLayerCape": "RAP 90-mb mixed-layer CAPE analysis; nearest available match to SPC's 100-mb product",
-                "mixedLayerCin": "RAP 90-mb mixed-layer CIN analysis; normalized negative and compared with SPC's 100-mb product",
-                "mostUnstableCape": "RAP most-unstable CAPE from the lowest-255-mb parcel search layer",
-                "lowLevelLapseRate": "Derived 0-3 km AGL lapse rate from RAP pressure-level temperature and height",
-                "midLevelLapseRate": "Derived RAP 700-500 mb lapse rate from pressure-level temperature and height",
-                "lclHeight": "Derived surface-parcel LCL AGL from RAP 2 m temperature/dewpoint spread",
-                "precipitableWater": "RAP total-column precipitable water analysis",
-                "stormRelativeHelicity1km": "RAP 0-1 km storm-relative helicity analysis",
-                "stormRelativeHelicity3km": "RAP 0-3 km storm-relative helicity analysis",
-                "bulkShear6km": "Derived RAP 10 m to 6 km AGL bulk wind difference",
-            },
+            "definitions": rtma_definitions() if surface == "rtma" else rap_definitions(),
             "comparison": {
                 "provider": "NOAA/NWS Storm Prediction Center",
                 "sector": sector,
