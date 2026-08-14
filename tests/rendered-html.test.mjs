@@ -1173,14 +1173,39 @@ test("publishes an hourly RAP mesoanalysis with same-hour SPC comparisons", asyn
   assert.match(pipeline, /\{spc_name\}_\{stamp\}\.gif/);
   assert.match(pipeline, /--discover-only/);
   assert.match(publisher, /previous\?\.cycle === discovery\.cycle/);
-  assert.match(publisher, /JSON\.stringify\(previous\.scope\) === JSON\.stringify\(requestedScope\)/);
+  // `previous?.scope` and `previous.scope` are both acceptable here; the gate must compare
+  // scope, but a null manifest must not throw reaching for it.
+  assert.match(publisher, /JSON\.stringify\(previous\??\.scope\) === JSON\.stringify\(requestedScope\)/);
   assert.match(pipeline, /"scope": "all" if only is None else sorted\(only\)/);
   assert.match(publisher, /Key: `mesoanalysis\/\$\{file\}`/);
   assert.ok(
     publisher.indexOf('Key: "mesoanalysis/latest.json"') > publisher.indexOf("await pooled(officeFiles"),
     "the manifest must publish after every office payload",
   );
-  assert.match(workflow, /cron: "7,22,37,52 \* \* \* \*"/);
+  // GitHub delivers roughly one run an hour from this schedule, not four, so the minutes
+  // are positioned where RAP f00 is imminent rather than spread evenly. Measured
+  // 2026-08-13: gaps of 64/61/62/62/79/38/52/57/59/57/55 minutes and a two-hour hole.
+  assert.match(workflow, /cron: "10,41,48,55 \* \* \* \*"/);
+  const mesoMinutes = /cron: "([\d,]+) \* \* \* \*"/.exec(workflow)[1].split(",").map(Number);
+  assert.ok(
+    mesoMinutes.filter((minute) => minute >= 40).length >= 3,
+    "most mesoanalysis cron minutes must sit in the window where RAP f00 is imminent",
+  );
+  // A run that finds nothing must wait for a nearly-due cycle instead of surrendering the
+  // hour: the next delivered run is an hour away, not fifteen minutes.
+  assert.match(publisher, /MESO_WAIT_AFTER_MINUTE/);
+  assert.match(publisher, /MESO_WAIT_BUDGET_MS/);
+  assert.match(publisher, /getUTCMinutes\(\) >= waitAfterMinute/);
+  assert.match(publisher, /newer RAP cycle landed/);
+  // The wait must never apply to a forced or output-only run, and must never outlast the
+  // job's own timeout-minutes.
+  assert.match(publisher, /!outputOnly\s*\n\s*&& !forcePublish\s*\n\s*&& nothingToPublish\(discovery\)/);
+  const waitBudgetMinutes = Number(/MESO_WAIT_BUDGET_MS \?\? (\d+) \* 60_000/.exec(publisher)[1]);
+  const jobTimeoutMinutes = Number(/timeout-minutes: (\d+)/.exec(workflow)[1]);
+  assert.ok(
+    waitBudgetMinutes < jobTimeoutMinutes,
+    `wait budget ${waitBudgetMinutes}m must leave room inside the ${jobTimeoutMinutes}m job timeout`,
+  );
   assert.match(workflow, /offices:/);
   assert.match(workflow, /MESO_OFFICES: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.offices \|\| '' \}\}/);
   assert.doesNotMatch(workflow, /vars\.MESO_OFFICES/);
