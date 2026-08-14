@@ -687,11 +687,24 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
         grib_url, index_url = rap_urls(requested_cycle)
         records = parse_index(fetch_bytes(index_url, timeout=20).decode("utf-8"))
         cycle = requested_cycle
+        rtma = probe_rtma(requested_cycle)
     else:
-        cycle, grib_url, records, _rtma = discover_cycle()
+        cycle, grib_url, records, rtma = discover_cycle()
     byte_range = record_span(records)
     grib_bytes = fetch_bytes(grib_url, byte_range=byte_range, timeout=90)
     latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, levels = decode_fields(grib_bytes)
+
+    # A failure decoding RTMA must not lose the whole run: degrade to the RAP-only
+    # surface Task 6 already established, with a logged reason.
+    rtma_lat = rtma_lon = None
+    rtma_fields = None
+    if rtma:
+        rtma_url, rtma_range = rtma
+        try:
+            rtma_lat, rtma_lon, rtma_fields = decode_rtma(fetch_bytes(rtma_url, byte_range=rtma_range, timeout=120))
+        except Exception as error:
+            print(f"RTMA decode failed, falling back to RAP-only surface: {error}")
+            rtma_lat = rtma_lon = rtma_fields = None
 
     tree = cKDTree(np.column_stack((latitudes, longitudes * np.cos(np.radians(latitudes)))))
     grid_dir = root / "public" / "gridpoints"
@@ -700,31 +713,86 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
     generated_at = datetime.now(timezone.utc)
     written: list[str] = []
 
-    output.mkdir(parents=True, exist_ok=True)
+    # Office frames overlap heavily, and a parcel lift is orders of magnitude dearer than
+    # a nearest-neighbour lookup, so the loop inverts: union every view's points, dedupe,
+    # lift once as an (n_points, n_levels) array, then per-office assembly is a dict lookup.
+    all_points: dict[tuple[float, float], dict] = {}
+    per_office: dict[str, list[dict]] = {}
     for office in offices:
         points = load_view_points(root, office)
-        if not points:
-            continue
-        point_latitudes = np.asarray([point["lat"] for point in points])
-        point_longitudes = np.asarray([point["lon"] for point in points])
-        query = np.column_stack((point_latitudes, point_longitudes * np.cos(np.radians(point_latitudes))))
-        distance, nearest = tree.query(query, k=1)
+        per_office[office] = points
+        for point in points:
+            all_points.setdefault((round(point["lat"], 4), round(point["lon"], 4)), point)
+    unique = list(all_points.values())
+
+    metrics_by_key: dict[tuple[float, float], dict] = {}
+    if unique:
+        unique_lat = np.asarray([p["lat"] for p in unique])
+        unique_lon = np.asarray([p["lon"] for p in unique])
+        rap_query = np.column_stack((unique_lat, unique_lon * np.cos(np.radians(unique_lat))))
+        rap_distance, rap_index = tree.query(rap_query, k=1)
         # Reject Hawaii/Alaska/territories and oceanic points outside RAP's domain rather
         # than stretching the nearest edge cell across thousands of miles.
-        keep = distance <= 0.5
-        sampled_points: list[dict] = []
-        for position, (point, model_index) in enumerate(zip(points, nearest)):
-            if not keep[position]:
+        in_domain = rap_distance <= 0.5
+
+        if rtma_fields is not None:
+            # Coordinates stay float64: cKDTree upcasts float32 internally so there is no
+            # memory saving, and float32 changed 9 of 50,000 nearest-neighbour results.
+            rtma_tree = cKDTree(np.column_stack((rtma_lat, rtma_lon * np.cos(np.radians(rtma_lat)))))
+            rtma_distance, rtma_index = rtma_tree.query(rap_query, k=1)
+            rtma_in_domain = rtma_distance <= 0.1
+        else:
+            rtma_index = None
+            rtma_in_domain = np.zeros(len(unique), dtype=bool)
+
+        level_pressure = np.tile(np.asarray(levels, dtype=np.float64) * 100.0, (len(unique), 1))
+        level_temperature = np.column_stack([temperatures[l][rap_index] for l in levels])
+        level_height = np.column_stack([heights[l][rap_index] for l in levels])
+        level_humidity = np.column_stack([humidities[l][rap_index] for l in levels])
+
+        # The parcel starts at RTMA's observed surface where RTMA covers the point, and at
+        # RAP's own surface otherwise. This is the whole point of the change.
+        parcel_pressure = scalars["sp"][rap_index].astype(np.float64) if "sp" in scalars else scalars["pres"][rap_index].astype(np.float64)
+        parcel_temperature = scalars["temperature2m"][rap_index].astype(np.float64)
+        parcel_dewpoint = scalars["dewpoint2m"][rap_index].astype(np.float64)
+        surface_height = scalars[surface_height_key][rap_index].astype(np.float64)
+        if rtma_index is not None:
+            use = rtma_in_domain
+            parcel_pressure[use] = rtma_fields["surfacePressure"][rtma_index[use]].astype(np.float64)
+            parcel_temperature[use] = rtma_fields["temperature2m"][rtma_index[use]].astype(np.float64)
+            parcel_dewpoint[use] = rtma_fields["dewpoint2m"][rtma_index[use]].astype(np.float64)
+            surface_height[use] = rtma_fields["orography"][rtma_index[use]].astype(np.float64)
+
+        # Discard levels below ground in RTMA's finer terrain.
+        below_ground = level_pressure > parcel_pressure[:, None]
+        level_temperature = np.where(below_ground, np.nan, level_temperature)
+        level_height = np.where(below_ground, np.nan, level_height)
+        level_humidity = np.where(below_ground, np.nan, level_humidity)
+
+        lifted = lift(parcel_pressure, parcel_temperature, parcel_dewpoint,
+                      level_pressure, level_temperature, level_height, level_humidity)
+
+        for i, point in enumerate(unique):
+            if not in_domain[i]:
                 continue
-            surface_temperature = finite(scalars["temperature2m"][model_index])
-            dewpoint = finite(scalars["dewpoint2m"][model_index])
-            surface_height = finite(scalars[surface_height_key][model_index])
+            model_index = rap_index[i]
+            key = (round(point["lat"], 4), round(point["lon"], 4))
+
+            surface_temperature = finite(parcel_temperature[i])
+            dewpoint = finite(parcel_dewpoint[i])
+            # RTMA-adjusted terrain height, used only for lowLevelLapseRate's anchor below.
+            adjusted_surface_height = finite(surface_height[i])
+            # RAP's own surface height, unaffected by RTMA -- bulkShear6km must come out
+            # unchanged, exactly like mixedLayerCape/Cin, mostUnstableCape,
+            # midLevelLapseRate, precipitableWater and both helicities.
+            rap_surface_height = finite(scalars[surface_height_key][model_index])
             profile = [
                 (finite(heights[level][model_index]), finite(temperatures[level][model_index]))
                 for level in levels
             ]
             profile = [(height, temperature) for height, temperature in profile if height is not None and temperature is not None]
-            lapse = None if surface_temperature is None or surface_height is None else lapse_rate_c_per_km(surface_temperature, surface_height, profile)
+            # Re-anchored on the possibly-RTMA surface temperature and terrain height.
+            lapse = None if surface_temperature is None or adjusted_surface_height is None else lapse_rate_c_per_km(surface_temperature, adjusted_surface_height, profile)
             mid_lapse_values = [finite(temperatures[level][model_index]) for level in (700, 500)]
             mid_height_values = [finite(heights[level][model_index]) for level in (700, 500)]
             mid_lapse = None if None in (*mid_lapse_values, *mid_height_values) else pressure_layer_lapse_rate(
@@ -741,19 +809,19 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
             ]
             surface_u = finite(scalars["wind10u"][model_index])
             surface_v = finite(scalars["wind10v"][model_index])
-            shear = None if surface_u is None or surface_v is None or surface_height is None else bulk_shear_knots(
-                surface_u, surface_v, surface_height, wind_profile
+            shear = None if surface_u is None or surface_v is None or rap_surface_height is None else bulk_shear_knots(
+                surface_u, surface_v, rap_surface_height, wind_profile
             )
-            lcl = None if surface_temperature is None or dewpoint is None else lcl_height_metres(surface_temperature, dewpoint)
-            cape = finite(scalars["cape"][model_index])
-            cin = finite(scalars["cin"][model_index])
+            cape = finite(lifted["cape"][i])
+            cin = finite(lifted["cin"][i])
+            lcl = finite(lifted["lcl_height"][i])
             mixed_layer_cape = finite(scalars["mixedLayerCape"][model_index])
             mixed_layer_cin = finite(scalars["mixedLayerCin"][model_index])
             most_unstable_cape = finite(scalars["mostUnstableCape"][model_index])
             pwat = finite(scalars["pwat"][model_index])
             helicity1 = finite(scalars["helicity1000"][model_index])
             helicity3 = finite(scalars["helicity3000"][model_index])
-            metrics = {
+            metrics_by_key[key] = {
                 "surfaceCape": [None if cape is None else round(max(0.0, cape))],
                 # Normalise to the meteorological signed convention used on our legend.
                 "surfaceCin": [None if cin is None else round(-abs(cin))],
@@ -768,6 +836,18 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
                 "stormRelativeHelicity3km": [None if helicity3 is None else round(helicity3)],
                 "bulkShear6km": [None if shear is None else round(shear)],
             }
+
+    output.mkdir(parents=True, exist_ok=True)
+    for office in offices:
+        points = per_office[office]
+        if not points:
+            continue
+        sampled_points: list[dict] = []
+        for point in points:
+            key = (round(point["lat"], 4), round(point["lon"], 4))
+            metrics = metrics_by_key.get(key)
+            if metrics is None:
+                continue
             sampled_points.append({**point, "metrics": metrics})
 
         if not sampled_points:
