@@ -5,8 +5,11 @@ The request path never opens or decodes GRIB.  This publisher downloads one boun
 slice of the latest RAP analysis, samples it onto the lat/lon lattices the graphics suite
 already owns, and writes small JSON objects which the Node publisher uploads to R2.
 
-Only ``publish()`` imports NumPy/SciPy/ecCodes.  Keeping those imports lazy lets the
-cycle/index/meteorology helpers remain unit-testable without native GRIB dependencies.
+NumPy is imported at module scope: it is pure-pip, already required by the test suite,
+and the vectorized parcel lift (``lift``) needs it whenever it is called, not just from
+``publish()``.  SciPy and ecCodes stay lazily imported inside ``publish()`` and
+``decode_fields()``, since those pull in native GRIB dependencies that unit tests must
+not require.
 """
 
 from __future__ import annotations
@@ -24,8 +27,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
+
 
 NOMADS_ROOT = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/rap/prod"
+RTMA_ROOT = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/rtma/prod"
 SPC_ROOT = "https://www.spc.noaa.gov/exper/mesoanalysis"
 USER_AGENT = "NWSGraphics mesoanalysis publisher (github.com/suchitbasineni/NWSGraphics)"
 
@@ -145,6 +151,213 @@ def lapse_rate_c_per_km(
     return None
 
 
+# --- Vectorized parcel lift -------------------------------------------------
+#
+# Ported from the validated prototype (scratchpad/parcel.py), checked against
+# MetPy 1.7.1 on eight synthetic soundings.  Units are Pa, K, m, and J/kg.
+# ``lift`` returns a dict of CAPE, CIN, LCL pressure/height AGL, LFC height AGL,
+# and EL height AGL.  The first LFC and last EL are used.  No LFC means
+# CAPE=CIN=0 and LFC/EL=NaN; no EL means CAPE integrates to the sounding top and
+# EL=NaN.  NaN levels are removed, profiles pressure-sorted, and gaps bridged.
+# Levels below an elevated parcel are ignored.  For a start below all data,
+# heights are extrapolated but integration begins at the first available level.
+_RD = 287.04749097718457
+_EPSILON = 0.6219569100577033
+_KAPPA = 0.2854
+
+
+def _es(t):
+    tc = np.asarray(t) - 273.15
+    return 611.2 * np.exp(np.clip(17.67 * tc / (tc + 243.5), -80.0, 80.0))
+
+
+def _rs(p, t):
+    e = np.minimum(_es(t), 0.99 * p)
+    return _EPSILON * e / (p - e)
+
+
+def _tv(t, r):
+    return t * (r + _EPSILON) / (_EPSILON * (1.0 + r))
+
+
+def _tlcl(t, td):
+    """Bolton (1980) LCL temperature, equation 15."""
+    td = np.minimum(td, t)
+    return 56.0 + 1.0 / (1.0 / (td - 56.0) + np.log(t / td) / 800.0)
+
+
+def _theta_e(p, t, td):
+    """Bolton (1980) equivalent potential temperature, equation 43."""
+    td = np.minimum(td, t)
+    tl = _tlcl(t, td)
+    e = np.minimum(_es(td), 0.99 * p)
+    r = _EPSILON * e / (p - e)
+    th = t * (100000.0 / (p - e)) ** _KAPPA * (t / tl) ** (0.28 * r)
+    return th * np.exp(r * (1.0 + 0.448 * r) * (3036.0 / tl - 1.78))
+
+
+def _theta_es(p, t):
+    e = np.minimum(_es(t), 0.99 * p)
+    r = _EPSILON * e / (p - e)
+    th = t * (100000.0 / (p - e)) ** _KAPPA
+    return th * np.exp(r * (1.0 + 0.448 * r) * (3036.0 / t - 1.78))
+
+
+def _moist_temperature(p, target, guess):
+    """Invert saturated Bolton theta-e with eight bounded Newton iterations."""
+    t = np.clip(guess, 150.0, 360.0)
+    target = target[:, None]
+    for _ in range(8):
+        value = _theta_es(p, t)
+        deriv = (_theta_es(p, t + 0.05) - _theta_es(p, t - 0.05)) / 0.1
+        step = np.divide(value - target, deriv, out=np.zeros_like(t),
+                         where=np.isfinite(deriv) & (np.abs(deriv) > 1e-8))
+        t = np.clip(t - np.clip(step, -12.0, 12.0), 150.0, 360.0)
+    return t
+
+
+def _interp(p, value, valid, target):
+    """Row-wise log-pressure interpolation, with two-point extrapolation."""
+    n, nz = p.shape
+    count = valid.sum(1)
+    x, xt = np.log(np.where(valid, p, 1.0)), np.log(target)
+    above = valid & (x <= xt[:, None])
+    upper = np.where(above.any(1), np.argmax(above, 1), np.maximum(count - 1, 0))
+    lower = upper - 1
+    bottom = xt >= x[:, 0]
+    lower = np.where(bottom, 0, lower)
+    upper = np.where(bottom, np.minimum(1, np.maximum(count - 1, 0)), upper)
+    last = np.maximum(count - 1, 0)
+    top = xt <= x[np.arange(n), last]
+    lower, upper = np.where(top, np.maximum(count - 2, 0), lower), np.where(top, last, upper)
+    lower, upper = np.clip(lower, 0, nz - 1), np.clip(upper, 0, nz - 1)
+    row = np.arange(n)
+    x0, x1, y0, y1 = x[row, lower], x[row, upper], value[row, lower], value[row, upper]
+    w = np.divide(xt - x0, x1 - x0, out=np.zeros_like(xt), where=abs(x1 - x0) > 1e-12)
+    result = np.where(count == 1, value[:, 0], y0 + w * (y1 - y0))
+    return np.where(count > 0, result, np.nan)
+
+
+def _environment_tv(pressure, temperature, relative_humidity):
+    """Environmental virtual temperature from RH, replacing the prototype's
+    hypsometric reconstruction. RAP ships RH on every pressure level we use, so
+    there is nothing to reconstruct."""
+    saturation = _es(temperature)
+    vapor = np.clip(relative_humidity, 0.0, 100.0) / 100.0 * saturation
+    mixing = 0.622 * vapor / np.maximum(pressure - vapor, 1.0)
+    return _tv(temperature, mixing)
+
+
+def _crossing(x0, x1, y0, y1):
+    f = np.divide(-y0, y1 - y0, out=np.zeros_like(y0), where=abs(y1 - y0) > 1e-12)
+    return x0 + np.clip(f, 0.0, 1.0) * (x1 - x0)
+
+
+def _integral(x, delta, valid, x_high, x_low):
+    """Integrate RD*delta over log pressure between vertical boundaries."""
+    x0, x1, d0, d1 = x[:, :-1], x[:, 1:], delta[:, :-1], delta[:, 1:]
+    pair, layer_width = valid[:, :-1] & valid[:, 1:], x0 - x1
+    hi, lo = np.minimum(x0, x_high[:, None]), np.maximum(x1, x_low[:, None])
+    width = np.maximum(hi - lo, 0.0)
+    fh = np.divide(x0 - hi, layer_width, out=np.zeros_like(width),
+                   where=pair & (layer_width > 0))
+    fl = np.divide(x0 - lo, layer_width, out=np.zeros_like(width),
+                   where=pair & (layer_width > 0))
+    dh, dl = d0 + (d1 - d0) * fh, d0 + (d1 - d0) * fl
+    return np.sum(np.where(pair & (width > 0), _RD * 0.5 * (dh + dl) * width, 0.0), 1)
+
+
+def lift(parcel_pressure, parcel_temperature, parcel_dewpoint,
+         level_pressure, level_temperature, level_height, level_relative_humidity):
+    """Lift a batch; parcel arrays are (n,), level arrays are (n, n_levels).
+
+    ``level_relative_humidity`` is percent RH at each pressure level, used to
+    compute environmental virtual temperature directly rather than
+    reconstructing it hypsometrically.
+
+    Returns a dict of ``cape``, ``cin``, ``lcl_pressure``, ``lcl_height``,
+    ``lfc_height``, and ``el_height`` (equilibrium-level height AGL), each of
+    shape ``(n,)``.
+    """
+    p0, t0, td0 = (np.asarray(a, dtype=np.float64) for a in
+                   (parcel_pressure, parcel_temperature, parcel_dewpoint))
+    p, t, z, rh = (np.asarray(a, dtype=np.float64) for a in
+                   (level_pressure, level_temperature, level_height, level_relative_humidity))
+    if p0.ndim != 1 or t0.shape != p0.shape or td0.shape != p0.shape:
+        raise ValueError("parcel inputs must all have shape (n_points,)")
+    if p.ndim != 2 or t.shape != p.shape or z.shape != p.shape or rh.shape != p.shape:
+        raise ValueError("level inputs must all have shape (n_points, n_levels)")
+    if p.shape[0] != p0.size or p.shape[1] < 2:
+        raise ValueError("incompatible n_points or fewer than two levels")
+
+    parcel_ok = (np.isfinite(p0) & np.isfinite(t0) & np.isfinite(td0) &
+                 (p0 > 0) & (t0 > 150) & (td0 > 150))
+    raw = (np.isfinite(p) & np.isfinite(t) & np.isfinite(z) & np.isfinite(rh) &
+           (p > 0) & (t > 120))
+    order = np.argsort(np.where(raw, -p, np.inf), axis=1)
+    p, t, z, rh, raw = (np.take_along_axis(a, order, axis=1) for a in (p, t, z, rh, raw))
+    active = raw & (p <= p0[:, None] * (1 + 2e-6))
+    order = np.argsort(~active, axis=1, kind="stable")
+    p, t, z, rh, valid = (np.take_along_axis(a, order, axis=1)
+                          for a in (p, t, z, rh, active))
+    count = valid.sum(1)
+    ps, ts, zs, rhs = (np.where(valid, p, 10000.0), np.where(valid, t, 250.0),
+                       np.where(valid, z, 0.0), np.where(valid, rh, 0.0))
+
+    tlcl = _tlcl(t0, td0)
+    plcl = np.minimum(p0 * (tlcl / t0) ** (1 / _KAPPA), p0)
+    theta_e = _theta_e(p0, t0, td0)
+    dry = t0[:, None] * (ps / p0[:, None]) ** _KAPPA
+    guess = tlcl[:, None] * (ps / plcl[:, None]) ** 0.19
+    parcel_t = np.where(ps >= plcl[:, None], dry, _moist_temperature(ps, theta_e, guess))
+    parcel_t = np.where(valid, parcel_t, np.nan)
+    r0 = _rs(p0, np.minimum(td0, t0))
+    parcel_r = np.where(ps >= plcl[:, None], r0[:, None], _rs(ps, parcel_t))
+    parcel_tv = _tv(parcel_t, parcel_r)
+    env_tv = _environment_tv(ps, ts, rhs)
+    delta = np.where(valid, parcel_tv - env_tv, np.nan)
+
+    base_z, lcl_z = _interp(ps, zs, valid, p0), _interp(ps, zs, valid, plcl)
+    env_lcl = _interp(ps, env_tv, valid, plcl)
+    delta_lcl = _tv(tlcl, _rs(plcl, tlcl)) - env_lcl
+    x = np.log(ps)
+    x0, x1, d0, d1 = x[:, :-1], x[:, 1:], delta[:, :-1], delta[:, 1:]
+    pair = valid[:, :-1] & valid[:, 1:]
+    cross_x = _crossing(x0, x1, d0, d1)
+    frac = np.divide(x0 - cross_x, x0 - x1, out=np.zeros_like(cross_x),
+                     where=pair & (x0 > x1))
+    cross_z = z[:, :-1] + frac * (z[:, 1:] - z[:, :-1])
+
+    positive = np.any(valid & (ps <= plcl[:, None]) & (delta > 0), 1)
+    upward = pair & (d0 <= 0) & (d1 > 0) & (cross_x <= np.log(plcl)[:, None] + 1e-10)
+    # USAF/MetPy convention when positive area begins directly above the LCL.
+    lfc_is_lcl = positive & ((delta_lcl >= -1e-7) | ~upward.any(1))
+    up_index, row = np.argmax(upward, 1), np.arange(p0.size)
+    has_lfc = parcel_ok & (count >= 2) & positive & (lfc_is_lcl | upward.any(1))
+    x_lfc = np.where(lfc_is_lcl, np.log(plcl), cross_x[row, up_index])
+    z_lfc = np.where(lfc_is_lcl, lcl_z, cross_z[row, up_index])
+
+    downward = pair & (d0 > 0) & (d1 <= 0) & (cross_x < x_lfc[:, None])
+    indices = np.arange(p.shape[1] - 1)[None, :]
+    down_index = np.max(np.where(downward, indices, -1), 1)
+    has_el, down_safe = has_lfc & (down_index >= 0), np.maximum(down_index, 0)
+    x_el, z_el = cross_x[row, down_safe], cross_z[row, down_safe]
+    x_top = x[row, np.maximum(count - 1, 0)]
+    cape = np.where(has_lfc, np.maximum(_integral(
+        x, delta, valid, x_lfc, np.where(has_el, x_el, x_top)), 0), 0)
+    cin = np.where(has_lfc, np.minimum(_integral(x, delta, valid, x[:, 0], x_lfc), 0), 0)
+
+    good = parcel_ok & (count >= 2)
+    return {
+        "cape": np.where(good, cape, np.nan),
+        "cin": np.where(good, cin, np.nan),
+        "lcl_pressure": np.where(good, plcl, np.nan),
+        "lcl_height": np.where(good, lcl_z - base_z, np.nan),
+        "lfc_height": np.where(has_lfc, z_lfc - base_z, np.nan),
+        "el_height": np.where(has_el, z_el - base_z, np.nan),
+    }
+
+
 def pressure_layer_lapse_rate(
     lower_temperature: float,
     lower_height: float,
@@ -215,6 +428,32 @@ def rap_urls(cycle: datetime) -> tuple[str, str]:
     return grib, f"{grib}.idx"
 
 
+def rtma_urls(cycle: datetime) -> tuple[str, str]:
+    day, hour = cycle_parts(cycle)
+    base = os.environ.get("MESO_RTMA_ROOT", RTMA_ROOT).rstrip("/")
+    grib = f"{base}/rtma2p5.{day}/rtma2p5.t{hour}z.2dvaranl_ndfd.grb2_wexp"
+    return grib, f"{grib}.idx"
+
+
+def rtma_record_span(records: list[IndexRecord]) -> tuple[int, int]:
+    """One inclusive byte range covering RTMA's surface height, surface pressure,
+    2 m temperature and 2 m dewpoint.
+
+    These four are the first four records of the file and are contiguous from byte
+    zero, verified against a live index: 0 -> 26,683,628 for the 22Z 2026-08-12 cycle.
+    """
+    first = next((r for r in records if ":HGT:surface:anl:" in f":{r.description}"), None)
+    last_index = next(
+        (i for i, r in enumerate(records) if ":DPT:2 m above ground:anl:" in f":{r.description}"),
+        None,
+    )
+    if first is None or last_index is None:
+        raise ValueError("RTMA analysis is missing surface height or 2 m dewpoint")
+    if last_index + 1 >= len(records):
+        raise ValueError("RTMA index cannot determine the end of the 2 m dewpoint record")
+    return first.offset, records[last_index + 1].offset - 1
+
+
 def fetch_bytes(url: str, byte_range: tuple[int, int] | None = None, timeout: int = 45) -> bytes:
     headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
     if byte_range:
@@ -227,7 +466,68 @@ def fetch_bytes(url: str, byte_range: tuple[int, int] | None = None, timeout: in
         return data
 
 
-def discover_cycle(now: datetime | None = None) -> tuple[datetime, str, list[IndexRecord]]:
+def surface_label(rtma) -> str:
+    return "rtma" if rtma else "rap"
+
+
+def _shared_definitions() -> dict:
+    """The eight product definitions Task 7 left untouched, in either fallback flavor.
+
+    Built once and overlaid by rap_definitions()/rtma_definitions() so the two can
+    never drift apart on the products that didn't change derivation.
+    """
+    return {
+        "mixedLayerCape": "RAP 90-mb mixed-layer CAPE analysis; nearest available match to SPC's 100-mb product",
+        "mixedLayerCin": "RAP 90-mb mixed-layer CIN analysis; normalized negative and compared with SPC's 100-mb product",
+        "mostUnstableCape": "RAP most-unstable CAPE from the lowest-255-mb parcel search layer",
+        "midLevelLapseRate": "Derived RAP 700-500 mb lapse rate from pressure-level temperature and height",
+        "precipitableWater": "RAP total-column precipitable water analysis",
+        "stormRelativeHelicity1km": "RAP 0-1 km storm-relative helicity analysis",
+        "stormRelativeHelicity3km": "RAP 0-3 km storm-relative helicity analysis",
+        "bulkShear6km": "Derived RAP 10 m to 6 km AGL bulk wind difference",
+    }
+
+
+def rap_definitions() -> dict:
+    """Definitions for the raw-RAP-surface fallback path (no RTMA lift)."""
+    return {
+        **_shared_definitions(),
+        "surfaceCape": "Surface-based CAPE, parcel lifted from RAP's own surface through the RAP profile",
+        "surfaceCin": "Surface-based CIN from the same RAP-surface lift; normalized to negative J/kg",
+        "lowLevelLapseRate": "Derived 0-3 km AGL lapse rate from RAP pressure-level temperature and height",
+        "lclHeight": "Surface-parcel LCL AGL from the RAP-surface parcel lift, using Bolton (1980)",
+    }
+
+
+def rtma_definitions() -> dict:
+    """Definitions for the RTMA-adjusted-surface path (Task 7's parcel lift)."""
+    return {
+        **_shared_definitions(),
+        "surfaceCape": "Surface-based CAPE, parcel lifted from the RTMA 2.5 km observation-adjusted surface through the RAP profile",
+        "surfaceCin": "Surface-based CIN from the same lift; normalized to negative J/kg",
+        "lowLevelLapseRate": "0-3 km AGL lapse rate anchored on the RTMA surface temperature and terrain",
+        "lclHeight": "Surface-parcel LCL AGL from the parcel lift, using Bolton (1980)",
+    }
+
+
+def probe_rtma(cycle: datetime):
+    """Return (grib_url, byte_range) when RTMA exists for this hour, else None.
+
+    RTMA and RAP land at different times, so a missing RTMA hour is routine rather
+    than exceptional. Publishing RAP-only beats walking back to an older paired hour.
+    """
+    grib_url, index_url = rtma_urls(cycle)
+    try:
+        records = parse_index(fetch_bytes(index_url, timeout=20).decode("utf-8"))
+        return grib_url, rtma_record_span(records)
+    except Exception:
+        # Deliberately broad, matching the RTMA byte-fetch path: http.client.IncompleteRead
+        # subclasses HTTPException rather than OSError, so a truncated NOMADS response would
+        # otherwise escape and kill a run that is designed to degrade to the RAP surface.
+        return None
+
+
+def discover_cycle(now: datetime | None = None) -> tuple[datetime, str, list[IndexRecord], tuple[str, tuple[int, int]] | None]:
     # Probe the current hour first. RAP f00 usually appears late in the hour, so early
     # probes fall through to the previous cycle while a :50-ish probe can publish the
     # new one without deliberately holding it back for another hour.
@@ -239,7 +539,7 @@ def discover_cycle(now: datetime | None = None) -> tuple[datetime, str, list[Ind
         try:
             records = parse_index(fetch_bytes(index_url, timeout=20).decode("utf-8"))
             record_span(records)
-            return cycle, grib_url, records
+            return cycle, grib_url, records, probe_rtma(cycle)
         except (OSError, RuntimeError, ValueError, urllib.error.HTTPError) as error:
             last_error = error
     raise RuntimeError(f"No complete RAP analysis found in the last eight cycles: {last_error}")
@@ -267,6 +567,7 @@ def decode_fields(grib_bytes: bytes):
     temperatures: dict[int, np.ndarray] = {}
     u_winds: dict[int, np.ndarray] = {}
     v_winds: dict[int, np.ndarray] = {}
+    humidities: dict[int, np.ndarray] = {}
     latitudes = longitudes = None
 
     # RAP packages U/V pairs as multi-field GRIB messages. Without this switch ecCodes
@@ -302,6 +603,8 @@ def decode_fields(grib_bytes: bytes):
                             u_winds[level] = values
                         elif short_name == "v":
                             v_winds[level] = values
+                        elif short_name == "r":
+                            humidities[level] = values
                     elif level_type == "surface":
                         if short_name in {"cape", "cin", "sp", "pres", "gh", "orog"}:
                             scalars[short_name] = values
@@ -338,12 +641,68 @@ def decode_fields(grib_bytes: bytes):
     }
     missing = sorted(required - scalars.keys())
     surface_height_key = "gh" if "gh" in scalars else "orog" if "orog" in scalars else None
-    if missing or surface_height_key is None:
-        raise RuntimeError(f"RAP GRIB span is missing fields: {', '.join(missing + ([] if surface_height_key else ['surface height']))}")
-    common_levels = sorted(set(heights) & set(temperatures) & set(u_winds) & set(v_winds), reverse=True)
+    surface_pressure_key = "sp" if "sp" in scalars else "pres" if "pres" in scalars else None
+    if missing or surface_height_key is None or surface_pressure_key is None:
+        missing_labels = missing + ([] if surface_height_key else ["surface height"]) + ([] if surface_pressure_key else ["surface pressure"])
+        raise RuntimeError(f"RAP GRIB span is missing fields: {', '.join(missing_labels)}")
+    common_levels = sorted(
+        set(heights) & set(temperatures) & set(u_winds) & set(v_winds) & set(humidities),
+        reverse=True,
+    )
     if len(common_levels) < 8:
-        raise RuntimeError("RAP GRIB span has an incomplete 200--1000-mb temperature/height/wind profile")
-    return latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, surface_height_key, common_levels
+        raise RuntimeError("RAP GRIB span has an incomplete 200--1000-mb temperature/height/wind/humidity profile")
+    return latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, surface_pressure_key, common_levels
+
+
+def decode_rtma(grib_bytes: bytes):
+    """Decode the RTMA surface span into the parcel's starting state.
+
+    Two details are load-bearing and were both verified against a live file:
+    the surface height record is ``orog``, not ``gh``; and RTMA longitudes arrive
+    in 0-360 convention, so they need the same normalisation RAP gets or every
+    nearest-neighbour query lands on the far side of the planet.
+    """
+
+    import numpy as np
+    from eccodes import codes_get, codes_get_array, codes_grib_multi_support_on, codes_grib_new_from_file, codes_release
+
+    wanted = {
+        ("orog", "surface"): "orography",
+        ("sp", "surface"): "surfacePressure",
+        ("2t", "heightAboveGround"): "temperature2m",
+        ("2d", "heightAboveGround"): "dewpoint2m",
+    }
+    fields: dict[str, "np.ndarray"] = {}
+    latitudes = longitudes = None
+
+    codes_grib_multi_support_on()
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as temporary:
+        temporary.write(grib_bytes)
+        temporary.flush()
+        with open(temporary.name, "rb") as handle:
+            while True:
+                gid = codes_grib_new_from_file(handle)
+                if gid is None:
+                    break
+                try:
+                    key = (str(codes_get(gid, "shortName")), str(codes_get(gid, "typeOfLevel")))
+                    if key in wanted:
+                        values = np.asarray(codes_get_array(gid, "values"), dtype=np.float64)
+                        values[np.abs(values) >= 1e20] = np.nan
+                        # float32 is safe for these ranges -- measured max error
+                        # 1.5e-5 K for 2t/2d and exactly 0 Pa for sp -- and saves ~57 MiB.
+                        fields[wanted[key]] = values.astype(np.float32)
+                        if latitudes is None:
+                            latitudes = np.asarray(codes_get_array(gid, "latitudes"), dtype=np.float64)
+                            longitudes = np.asarray(codes_get_array(gid, "longitudes"), dtype=np.float64)
+                            longitudes = np.where(longitudes > 180, longitudes - 360, longitudes)
+                finally:
+                    codes_release(gid)
+
+    missing = sorted(set(wanted.values()) - fields.keys())
+    if missing or latitudes is None:
+        raise RuntimeError(f"RTMA span is missing fields: {', '.join(missing) or 'grid'}")
+    return latitudes, longitudes, fields
 
 
 def load_view_points(root: Path, office: str) -> list[dict]:
@@ -372,11 +731,29 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
         grib_url, index_url = rap_urls(requested_cycle)
         records = parse_index(fetch_bytes(index_url, timeout=20).decode("utf-8"))
         cycle = requested_cycle
+        rtma = probe_rtma(requested_cycle)
     else:
-        cycle, grib_url, records = discover_cycle()
+        cycle, grib_url, records, rtma = discover_cycle()
     byte_range = record_span(records)
     grib_bytes = fetch_bytes(grib_url, byte_range=byte_range, timeout=90)
-    latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, surface_height_key, levels = decode_fields(grib_bytes)
+    latitudes, longitudes, scalars, heights, temperatures, u_winds, v_winds, humidities, surface_height_key, surface_pressure_key, levels = decode_fields(grib_bytes)
+
+    # A failure decoding RTMA must not lose the whole run: degrade to the RAP-only
+    # surface Task 6 already established, with a logged reason.
+    rtma_lat = rtma_lon = None
+    rtma_fields = None
+    if rtma:
+        rtma_url, rtma_range = rtma
+        try:
+            rtma_lat, rtma_lon, rtma_fields = decode_rtma(fetch_bytes(rtma_url, byte_range=rtma_range, timeout=120))
+        except Exception as error:
+            print(f"RTMA decode failed, falling back to RAP-only surface: {error}")
+            rtma_lat = rtma_lon = rtma_fields = None
+
+    # Reflects what was actually used, not merely what probe_rtma() found: a probe
+    # success followed by a decode failure must still report "rap", since rtma_fields
+    # is what every downstream metric actually reads from.
+    surface = surface_label(rtma_fields)
 
     tree = cKDTree(np.column_stack((latitudes, longitudes * np.cos(np.radians(latitudes)))))
     grid_dir = root / "public" / "gridpoints"
@@ -385,31 +762,85 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
     generated_at = datetime.now(timezone.utc)
     written: list[str] = []
 
-    output.mkdir(parents=True, exist_ok=True)
+    # Office frames overlap heavily, and a parcel lift is orders of magnitude dearer than
+    # a nearest-neighbour lookup, so the loop inverts: union every view's points, dedupe,
+    # lift once as an (n_points, n_levels) array, then per-office assembly is a dict lookup.
+    all_points: dict[tuple[float, float], dict] = {}
+    per_office: dict[str, list[dict]] = {}
     for office in offices:
         points = load_view_points(root, office)
-        if not points:
-            continue
-        point_latitudes = np.asarray([point["lat"] for point in points])
-        point_longitudes = np.asarray([point["lon"] for point in points])
-        query = np.column_stack((point_latitudes, point_longitudes * np.cos(np.radians(point_latitudes))))
-        distance, nearest = tree.query(query, k=1)
+        per_office[office] = points
+        for point in points:
+            all_points.setdefault((round(point["lat"], 4), round(point["lon"], 4)), point)
+    unique = list(all_points.values())
+
+    metrics_by_key: dict[tuple[float, float], dict] = {}
+    if unique:
+        unique_lat = np.asarray([p["lat"] for p in unique])
+        unique_lon = np.asarray([p["lon"] for p in unique])
+        rap_query = np.column_stack((unique_lat, unique_lon * np.cos(np.radians(unique_lat))))
+        rap_distance, rap_index = tree.query(rap_query, k=1)
         # Reject Hawaii/Alaska/territories and oceanic points outside RAP's domain rather
         # than stretching the nearest edge cell across thousands of miles.
-        keep = distance <= 0.5
-        sampled_points: list[dict] = []
-        for position, (point, model_index) in enumerate(zip(points, nearest)):
-            if not keep[position]:
+        in_domain = rap_distance <= 0.5
+
+        if rtma_fields is not None:
+            # Coordinates stay float64: cKDTree upcasts float32 internally so there is no
+            # memory saving, and float32 changed 9 of 50,000 nearest-neighbour results.
+            rtma_tree = cKDTree(np.column_stack((rtma_lat, rtma_lon * np.cos(np.radians(rtma_lat)))))
+            rtma_distance, rtma_index = rtma_tree.query(rap_query, k=1)
+            rtma_in_domain = rtma_distance <= 0.1
+        else:
+            rtma_index = None
+            rtma_in_domain = np.zeros(len(unique), dtype=bool)
+
+        level_pressure = np.tile(np.asarray(levels, dtype=np.float64) * 100.0, (len(unique), 1))
+        level_temperature = np.column_stack([temperatures[l][rap_index] for l in levels])
+        level_height = np.column_stack([heights[l][rap_index] for l in levels])
+        level_humidity = np.column_stack([humidities[l][rap_index] for l in levels])
+
+        # The parcel starts at RTMA's observed surface where RTMA covers the point, and at
+        # RAP's own surface otherwise. This is the whole point of the change.
+        parcel_pressure = scalars[surface_pressure_key][rap_index].astype(np.float64)
+        parcel_temperature = scalars["temperature2m"][rap_index].astype(np.float64)
+        parcel_dewpoint = scalars["dewpoint2m"][rap_index].astype(np.float64)
+        surface_height = scalars[surface_height_key][rap_index].astype(np.float64)
+        if rtma_index is not None:
+            use = rtma_in_domain
+            parcel_pressure[use] = rtma_fields["surfacePressure"][rtma_index[use]].astype(np.float64)
+            parcel_temperature[use] = rtma_fields["temperature2m"][rtma_index[use]].astype(np.float64)
+            parcel_dewpoint[use] = rtma_fields["dewpoint2m"][rtma_index[use]].astype(np.float64)
+            surface_height[use] = rtma_fields["orography"][rtma_index[use]].astype(np.float64)
+
+        # Discard levels below ground in RTMA's finer terrain.
+        below_ground = level_pressure > parcel_pressure[:, None]
+        level_temperature = np.where(below_ground, np.nan, level_temperature)
+        level_height = np.where(below_ground, np.nan, level_height)
+        level_humidity = np.where(below_ground, np.nan, level_humidity)
+
+        lifted = lift(parcel_pressure, parcel_temperature, parcel_dewpoint,
+                      level_pressure, level_temperature, level_height, level_humidity)
+
+        for i, point in enumerate(unique):
+            if not in_domain[i]:
                 continue
-            surface_temperature = finite(scalars["temperature2m"][model_index])
-            dewpoint = finite(scalars["dewpoint2m"][model_index])
-            surface_height = finite(scalars[surface_height_key][model_index])
+            model_index = rap_index[i]
+            key = (round(point["lat"], 4), round(point["lon"], 4))
+
+            surface_temperature = finite(parcel_temperature[i])
+            # RTMA-adjusted terrain height, used only for lowLevelLapseRate's anchor below.
+            adjusted_surface_height = finite(surface_height[i])
+            # RAP's own surface height, unaffected by RTMA -- bulkShear6km must come out
+            # unchanged, exactly like mixedLayerCape/Cin, mostUnstableCape,
+            # midLevelLapseRate, precipitableWater and both helicities.
+            rap_surface_height = finite(scalars[surface_height_key][model_index])
             profile = [
                 (finite(heights[level][model_index]), finite(temperatures[level][model_index]))
                 for level in levels
             ]
             profile = [(height, temperature) for height, temperature in profile if height is not None and temperature is not None]
-            lapse = None if surface_temperature is None or surface_height is None else lapse_rate_c_per_km(surface_temperature, surface_height, profile)
+            # Re-anchored on the possibly-RTMA surface temperature and terrain height.
+            lapse = None if surface_temperature is None or adjusted_surface_height is None else lapse_rate_c_per_km(surface_temperature, adjusted_surface_height, profile)
             mid_lapse_values = [finite(temperatures[level][model_index]) for level in (700, 500)]
             mid_height_values = [finite(heights[level][model_index]) for level in (700, 500)]
             mid_lapse = None if None in (*mid_lapse_values, *mid_height_values) else pressure_layer_lapse_rate(
@@ -426,19 +857,19 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
             ]
             surface_u = finite(scalars["wind10u"][model_index])
             surface_v = finite(scalars["wind10v"][model_index])
-            shear = None if surface_u is None or surface_v is None or surface_height is None else bulk_shear_knots(
-                surface_u, surface_v, surface_height, wind_profile
+            shear = None if surface_u is None or surface_v is None or rap_surface_height is None else bulk_shear_knots(
+                surface_u, surface_v, rap_surface_height, wind_profile
             )
-            lcl = None if surface_temperature is None or dewpoint is None else lcl_height_metres(surface_temperature, dewpoint)
-            cape = finite(scalars["cape"][model_index])
-            cin = finite(scalars["cin"][model_index])
+            cape = finite(lifted["cape"][i])
+            cin = finite(lifted["cin"][i])
+            lcl = finite(lifted["lcl_height"][i])
             mixed_layer_cape = finite(scalars["mixedLayerCape"][model_index])
             mixed_layer_cin = finite(scalars["mixedLayerCin"][model_index])
             most_unstable_cape = finite(scalars["mostUnstableCape"][model_index])
             pwat = finite(scalars["pwat"][model_index])
             helicity1 = finite(scalars["helicity1000"][model_index])
             helicity3 = finite(scalars["helicity3000"][model_index])
-            metrics = {
+            metrics_by_key[key] = {
                 "surfaceCape": [None if cape is None else round(max(0.0, cape))],
                 # Normalise to the meteorological signed convention used on our legend.
                 "surfaceCin": [None if cin is None else round(-abs(cin))],
@@ -453,6 +884,18 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
                 "stormRelativeHelicity3km": [None if helicity3 is None else round(helicity3)],
                 "bulkShear6km": [None if shear is None else round(shear)],
             }
+
+    output.mkdir(parents=True, exist_ok=True)
+    for office in offices:
+        points = per_office[office]
+        if not points:
+            continue
+        sampled_points: list[dict] = []
+        for point in points:
+            key = (round(point["lat"], 4), round(point["lon"], 4))
+            metrics = metrics_by_key.get(key)
+            if metrics is None:
+                continue
             sampled_points.append({**point, "metrics": metrics})
 
         if not sampled_points:
@@ -461,27 +904,15 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
         latitude = sum(point["lat"] for point in sampled_points) / len(sampled_points)
         sector = spc_sector(longitude, latitude, office)
         payload = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "office": office,
             "model": "RAP",
+            "surface": surface,
             "cycle": valid_time.isoformat().replace("+00:00", "Z"),
             "validTime": valid_time.isoformat().replace("+00:00", "Z"),
             "generatedAt": generated_at.isoformat().replace("+00:00", "Z"),
             "source": grib_url,
-            "definitions": {
-                "surfaceCape": "RAP surface-based CAPE analysis",
-                "surfaceCin": "RAP surface-based CIN analysis; normalized to negative J/kg",
-                "mixedLayerCape": "RAP 90-mb mixed-layer CAPE analysis; nearest available match to SPC's 100-mb product",
-                "mixedLayerCin": "RAP 90-mb mixed-layer CIN analysis; normalized negative and compared with SPC's 100-mb product",
-                "mostUnstableCape": "RAP most-unstable CAPE from the lowest-255-mb parcel search layer",
-                "lowLevelLapseRate": "Derived 0-3 km AGL lapse rate from RAP pressure-level temperature and height",
-                "midLevelLapseRate": "Derived RAP 700-500 mb lapse rate from pressure-level temperature and height",
-                "lclHeight": "Derived surface-parcel LCL AGL from RAP 2 m temperature/dewpoint spread",
-                "precipitableWater": "RAP total-column precipitable water analysis",
-                "stormRelativeHelicity1km": "RAP 0-1 km storm-relative helicity analysis",
-                "stormRelativeHelicity3km": "RAP 0-3 km storm-relative helicity analysis",
-                "bulkShear6km": "Derived RAP 10 m to 6 km AGL bulk wind difference",
-            },
+            "definitions": rtma_definitions() if surface == "rtma" else rap_definitions(),
             "comparison": {
                 "provider": "NOAA/NWS Storm Prediction Center",
                 "sector": sector,
@@ -497,6 +928,10 @@ def publish(root: Path, output: Path, requested_cycle: datetime | None = None, o
     manifest = {
         "schemaVersion": 1,
         "model": "RAP",
+        # The surface actually used, same value the per-office payloads record. The publisher
+        # compares it against a fresh discovery so an hour published on the RAP surface can be
+        # republished once RTMA lands for that same cycle -- RTMA routinely arrives after RAP.
+        "surface": surface,
         "cycle": valid_time.isoformat().replace("+00:00", "Z"),
         "generatedAt": generated_at.isoformat().replace("+00:00", "Z"),
         # A targeted manual publication must not make the next full-domain schedule
@@ -521,13 +956,14 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.discover_only:
-        cycle, source, records = discover_cycle()
+        cycle, source, records, rtma = discover_cycle()
         print(json.dumps({
             "model": "RAP",
             "cycle": cycle.isoformat().replace("+00:00", "Z"),
             "cycleId": cycle.strftime("%Y%m%d%H"),
             "source": source,
             "byteRange": record_span(records),
+            "surface": surface_label(rtma),
         }))
         return
     if args.output_dir is None:

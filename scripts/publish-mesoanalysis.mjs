@@ -56,13 +56,24 @@ const only = process.env.MESO_OFFICES?.trim();
 const requestedScope = only
   ? [...new Set(only.split(",").map((office) => office.trim().toUpperCase()).filter(Boolean))].sort()
   : "all";
-if (
-  !outputOnly
-  && !forcePublish
-  && previous?.cycle === discovery.cycle
-  && JSON.stringify(previous.scope) === JSON.stringify(requestedScope)
-) {
-  console.log(JSON.stringify({ published: false, reason: "RAP cycle unchanged", cycle: discovery.cycle }));
+// RTMA lands after RAP for the same hour often enough that this matters: an hour first
+// published on the raw RAP surface must be republished once RTMA appears for that same
+// cycle, or the adjusted surface is never used. A manifest predating the `surface` field
+// carries no evidence of an upgrade, so it is treated as not upgradable -- exactly the
+// old cycle-and-scope behaviour.
+const sameCycle = previous?.cycle === discovery.cycle;
+const sameScope = JSON.stringify(previous?.scope) === JSON.stringify(requestedScope);
+const isSurfaceUpgrade = previous?.surface === "rap" && discovery.surface === "rtma";
+if (!outputOnly && !forcePublish && sameCycle && sameScope && !isSurfaceUpgrade) {
+  console.log(JSON.stringify({
+    published: false,
+    reason: previous.surface === undefined
+      ? "RAP cycle unchanged; manifest predates surface provenance"
+      : `RAP cycle unchanged on the ${previous.surface} surface`,
+    cycle: discovery.cycle,
+    surface: discovery.surface,
+    previousSurface: previous.surface ?? null,
+  }));
   process.exit(0);
 }
 

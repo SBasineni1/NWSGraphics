@@ -33,9 +33,11 @@ type ForecastPayload = {
   failures: number;
 };
 type MesoanalysisPayload = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   office: OfficeId;
   model: "RAP" | "HRRR";
+  /** Absent on schemaVersion 1 payloads, which always used the raw RAP surface. */
+  surface?: "rtma" | "rap";
   cycle: string;
   validTime: string;
   generatedAt: string;
@@ -904,9 +906,11 @@ function forecastHeaderLines(forecast: ForecastPayload, dayIndex: number, office
 }
 
 function mesoanalysisHeaderLines(payload: MesoanalysisPayload) {
+  // A v1 payload predates the RTMA surface and was always raw RAP.
+  const surface = payload.surface ?? "rap";
   return {
     valid: `VALID  ${stampLabel(payload.validTime)}`,
-    issued: `${payload.model} ANALYSIS CYCLE  ${stampLabel(payload.cycle)}`,
+    issued: `${payload.model} ANALYSIS CYCLE  ${stampLabel(payload.cycle)}${surface === "rtma" ? "  ·  RTMA SURFACE" : ""}`,
   };
 }
 

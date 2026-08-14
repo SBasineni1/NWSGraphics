@@ -1,0 +1,5 @@
+# Test-only. MetPy is the reference implementation the hand-rolled parcel lift is
+# validated against. Production (requirements-mesoanalysis.txt) must never install it,
+# and scripts/mesoanalysis_pipeline.py must never import it.
+-r requirements-mesoanalysis.txt
+metpy>=1.7,<2
