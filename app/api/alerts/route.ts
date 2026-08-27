@@ -124,7 +124,19 @@ export async function GET(request: Request) {
   }
 
   const payload = await response.json() as { features?: Array<{ id?: string; geometry?: unknown; properties?: Record<string, unknown> }> };
-  const alerts: AlertRecord[] = (payload.features ?? []).map((feature) => {
+  const alerts: AlertRecord[] = (payload.features ?? []).filter((feature) => {
+    // The active feed carries CAP messages that are not live hazards. NWS keeps its
+    // dissemination path warm with a `status: "Test"` "Test Message" — one is in force at
+    // any moment, ten minutes at a time, naming a single real county — and it arrived on
+    // the map exactly like a warning, since it has affectedZones and every downstream
+    // step keys on `event`. Measured on the unfiltered feed: 271 Actual, 1 Test.
+    //
+    // Filtered here rather than by event name because the name is not the signal —
+    // `status` is the CAP field that says whether a message describes a real hazard, and
+    // it also covers Exercise, System and Draft, which would each read as live.
+    const status = feature.properties?.status;
+    return status === undefined || status === null || status === "Actual";
+  }).map((feature) => {
     const p = feature.properties ?? {};
     return {
       id: String(p.id ?? feature.id ?? ""),

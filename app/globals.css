@@ -611,6 +611,71 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
 /* The alerts view shows one map, not a two-up gallery, so it spans the full column. */
 .forecast-gallery:has(> .forecast-product:only-child) { grid-template-columns: minmax(0, 1fr); }
 
+/* Current conditions, above the alerts map. The alerts view is the page's only "right
+   now" view, so the one observed reading on the site belongs here rather than beside a
+   day's forecast. Built from the same parts as a product card — a bar of one line over a
+   bordered surface — so it reads as a sibling of the map below it, not a new kind of
+   object. */
+.current-conditions { margin-bottom: 26px; }
+.current-conditions-bar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 40px;
+  margin-bottom: 9px;
+}
+.current-conditions-bar h3 { margin: 0; font-size: 20px; line-height: 1.05; font-weight: 570; letter-spacing: -.045em; }
+/* Station, town and age sit together as provenance: this is a reading from one real
+   instrument at one real moment, not an analysis of the area the map covers. */
+.current-conditions-bar p {
+  margin: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font: 550 12px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: -.025em;
+  text-align: right;
+}
+.current-conditions-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 20px 40px;
+  padding: 18px 22px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+.current-conditions-headline { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+/* Tabular figures so the number holds its width as it changes on refresh, the same
+   reason the legends use them. */
+.current-conditions-temperature {
+  font: 570 44px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: -.055em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.current-conditions-degree { font-size: 20px; letter-spacing: -.04em; color: var(--muted); }
+.current-conditions-text {
+  color: var(--ink);
+  font: 550 14px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: -.03em;
+}
+.current-conditions-readings { display: flex; flex-wrap: wrap; gap: 18px 30px; margin: 0; }
+.current-conditions-readings div { display: flex; flex-direction: column; gap: 3px; }
+.current-conditions-readings dt {
+  color: var(--faint);
+  font: 600 10px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.current-conditions-readings dd {
+  margin: 0;
+  font: 550 15px var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Active alerts flow past as one strip instead of stacking into a list. The panel is the
    same height whether two hazards are in force or forty, which is the point — this is the
    only view describing right now, and it refreshes every two minutes. */

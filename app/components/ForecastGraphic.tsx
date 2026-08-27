@@ -5,6 +5,7 @@ import { PLOT_FONT_FAMILY } from "../fonts";
 import { AREAS, DEFAULT_OFFICE, findOffice, findRegion, isWideView, NATIONAL, OFFICES, REGIONS, regionOf, type Office, type OfficeId } from "../offices";
 import { MAP_HEIGHT, PLOT_WIDTH, frameBounds, inverseWorld, plotExtent, project } from "../../lib/map-frame.mjs";
 import { parsePlaceIndex, searchPlaces } from "../../lib/place-search.mjs";
+import { formatAge, type Observation } from "../../lib/observations.mjs";
 import { ALERT_COLORS, DEFAULT_ALERT_COLOR } from "../alert-colors";
 
 type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "dewpoint" | "windGust" | "windSpeed" | "skyCover" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
@@ -246,6 +247,10 @@ type AlertRecord = {
   geometry: AreaGeometry | null;
 };
 type AlertPayload = { generatedAt: string; alerts: AlertRecord[]; zones: number };
+/** What /api/observations answers with. A null observation is a real answer, not an error. */
+type ObservationPayload = { generatedAt: string; observation: Observation | null; stations: number; anchor?: AnchorCity };
+/** One labelled city from public/cities/{OFFICE}.json, which carries its own gridpoint address. */
+type AnchorCity = { name: string; state: string; wfo: string; x: number; y: number };
 /**
  * UGC zone code to polygon, from public/zones/{OFFICE}.json.
  *
@@ -815,6 +820,14 @@ function fieldSolveFor(points: ForecastPoint[], frame: string, columns: number, 
 // a hard timeout, and eviction on failure so a hung request is never cached and reused.
 const TILE_TIMEOUT_MS = 15_000;
 
+// Carto stopped serving anonymous basemap tiles: an unauthenticated request still returns
+// 200, but with "API KEY REQUIRED" painted into the pixels, so neither the `!response.ok`
+// guard nor the per-tile catch below can see it — the watermark just composites under the
+// forecast field. Keyless is still the fallback rather than a hard failure, since a
+// watermarked map is more useful than none.
+const CARTO_API_KEY = process.env.NEXT_PUBLIC_CARTO_API_KEY;
+const TILE_KEY_SUFFIX = CARTO_API_KEY ? `?key=${encodeURIComponent(CARTO_API_KEY)}` : "";
+
 function loadTile(url: string) {
   const cached = tileCache.get(url);
   if (cached) return cached;
@@ -837,7 +850,7 @@ async function drawTiles(context: CanvasRenderingContext2D, extent: MapExtent, x
   await Promise.all(Array.from({ length: lastX - firstX + 1 }, (_, xi) => firstX + xi).flatMap((tileX) =>
     Array.from({ length: lastY - firstY + 1 }, (_, yi) => firstY + yi).map(async (tileY) => {
       try {
-        const url = `https://a.basemaps.cartocdn.com/rastertiles/voyager_nolabels/${extent.zoom}/${tileX}/${tileY}@2x.png`;
+        const url = `https://a.basemaps.cartocdn.com/rastertiles/voyager_nolabels/${extent.zoom}/${tileX}/${tileY}@2x.png${TILE_KEY_SUFFIX}`;
         const bitmap = await loadTile(url);
         context.drawImage(bitmap, x + (tileX * 256 - extent.left) * scale, y + (tileY * 256 - extent.top) * scale, 256 * scale, 256 * scale);
       } catch {
@@ -2074,9 +2087,13 @@ function AlertsPlot({ alerts, zones, bundle, office, generatedAt }: { alerts: Al
   );
 }
 
-function AlertsPanel({ alerts, zones, bundle, office, generatedAt, pending, error }: { alerts: AlertRecord[] | null; zones: ZoneIndex | null; bundle: OfficeBundle | null; office: Office; generatedAt: string | null; pending: boolean; error: boolean }) {
-  if (error) return <div className="gallery-message">Active alerts are temporarily unavailable.</div>;
-  if (pending || !alerts || !zones || !bundle) return <div className="gallery-message">Loading active watches and warnings…</div>;
+function AlertsPanel({ alerts, zones, bundle, office, generatedAt, pending, error, observation }: { alerts: AlertRecord[] | null; zones: ZoneIndex | null; bundle: OfficeBundle | null; office: Office; generatedAt: string | null; pending: boolean; error: boolean; observation: ObservationPayload | null }) {
+  // The strip renders ahead of the early returns below on purpose. The zone bundle is
+  // ~326 KB at PHI and 1.1 MB at US, and the observation lands long before it — gating the
+  // conditions on the map's geometry would blank them for the whole of that wait.
+  const conditions = <CurrentConditions payload={observation} />;
+  if (error) return <>{conditions}<div className="gallery-message">Active alerts are temporarily unavailable.</div></>;
+  if (pending || !alerts || !zones || !bundle) return <>{conditions}<div className="gallery-message">Loading active watches and warnings…</div></>;
 
   // Narrowed to this view before anything counts, draws or lists it. A wide view is served
   // every alert in force, so this is what makes its map, its header count and its strip
@@ -2086,6 +2103,7 @@ function AlertsPanel({ alerts, zones, bundle, office, generatedAt, pending, erro
     .sort((a, b) => alertRank(b.event) - alertRank(a.event) || a.event.localeCompare(b.event));
   return (
     <>
+      {conditions}
       <section className="forecast-gallery" aria-label="Active watches and warnings" data-office={office.id}>
         <AlertsPlot alerts={sorted} zones={zones} bundle={bundle} office={office} generatedAt={generatedAt} />
       </section>
@@ -2093,6 +2111,78 @@ function AlertsPanel({ alerts, zones, bundle, office, generatedAt, pending, erro
           whatever the API happened to return first. */}
       {sorted.length > 0 && <AlertsTicker alerts={sorted} />}
     </>
+  );
+}
+
+/**
+ * The latest surface observation near the office's anchor city, shown above the alerts
+ * map. It belongs on this view and no other: the alerts tab is the page's only "right
+ * now" view, and everything else is a forecast for a whole day.
+ */
+function CurrentConditions({ payload }: { payload: ObservationPayload | null }) {
+  const observation = payload?.observation ?? null;
+  // Nothing to show is not an error state worth a message — the alerts below are the
+  // point of the view, and a missing strip is quieter than an apology for one.
+  if (!payload || !observation) return null;
+
+  // Measured against the payload's own generatedAt rather than Date.now(): reading the
+  // clock during render is impure, and this is the more honest number anyway — how old
+  // the observation was when the data was fetched, which is what the rest of the strip
+  // describes. It advances on the two-minute refresh with everything else.
+  const age = observation.timestamp
+    ? formatAge((new Date(payload.generatedAt).getTime() - new Date(observation.timestamp).getTime()) / 60000)
+    : null;
+  const wind = observation.windSpeed === null
+    ? null
+    : observation.windSpeed === 0
+      ? "Calm"
+      : `${observation.windCompass ?? ""} ${observation.windSpeed} mph${observation.windGust ? ` G${observation.windGust}` : ""}`.trim();
+  // A field the station did not report renders as a dash in place, never as a dropped
+  // row: the layout then holds still across refreshes, and a gap reads as "not reported"
+  // rather than as something broken.
+  const readings: Array<[string, string]> = [
+    ["Dew point", observation.dewpoint === null ? "—" : `${observation.dewpoint}°`],
+    ["Humidity", observation.relativeHumidity === null ? "—" : `${observation.relativeHumidity}%`],
+    ["Wind", wind ?? "—"],
+    ["Visibility", observation.visibility === null ? "—" : `${observation.visibility} mi`],
+    ["Pressure", observation.pressure === null ? "—" : `${observation.pressure} in`],
+  ];
+  // Only one of these is ever in force, and only when it differs from the air temperature
+  // — NWS reports a heat index equal to the temperature on a mild day, which is noise.
+  const feelsLike = observation.heatIndex !== null && observation.heatIndex !== observation.temperature
+    ? ["Heat index", `${observation.heatIndex}°`] as const
+    : observation.windChill !== null && observation.windChill !== observation.temperature
+      ? ["Wind chill", `${observation.windChill}°`] as const
+      : null;
+  if (feelsLike) readings.splice(1, 0, [feelsLike[0], feelsLike[1]]);
+
+  return (
+    <section className="current-conditions" aria-label="Current conditions">
+      <div className="current-conditions-bar">
+        <h3>Current Conditions</h3>
+        <p>
+          {payload.anchor ? `${payload.anchor.name}, ${payload.anchor.state} · ` : ""}
+          {observation.station}
+          {age ? ` · ${age}` : ""}
+        </p>
+      </div>
+      <div className="current-conditions-body">
+        <div className="current-conditions-headline">
+          <span className="current-conditions-temperature">
+            {observation.temperature}<span className="current-conditions-degree">°F</span>
+          </span>
+          {observation.text && <span className="current-conditions-text">{observation.text}</span>}
+        </div>
+        <dl className="current-conditions-readings">
+          {readings.map(([label, value]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </section>
   );
 }
 
@@ -2753,6 +2843,9 @@ export function ForecastGraphic() {
   const [zoneIndex, setZoneIndex] = useState<{ office: OfficeId; zones: ZoneIndex } | null>(null);
   const [alerts, setAlerts] = useState<{ office: OfficeId; payload: AlertPayload } | null>(null);
   const [alertsError, setAlertsError] = useState<OfficeId | null>(null);
+  // Stamped with its office for the same reason as the three above: a stale observation
+  // must never be shown under a newly selected office's heading.
+  const [observation, setObservation] = useState<{ office: OfficeId; payload: ObservationPayload } | null>(null);
   // Tracked separately per source. A single boolean could never be cleared correctly:
   // whichever loader succeeded last would wipe the other's failure, and the bundle loader
   // never cleared it at all — so one transient miss pinned the page on "temporarily
@@ -2888,6 +2981,50 @@ export function ForecastGraphic() {
     const refresh = window.setInterval(load, 2 * 60 * 1000);
     return () => { active = false; window.clearInterval(refresh); };
   }, [showAlerts, officeZones, office.id]);
+
+  // The conditions strip on the alerts view. Anchored to cities[0] — the same city the
+  // publisher's freshness probe speaks for — because that bundle already carries the
+  // wfo/x,y the stations endpoint wants, so there is no geocoding step and no cost to the
+  // place index. 1.7 KB, and like the zone bundle it is fetched only when the tab opens.
+  //
+  // Refreshed on the alerts cadence rather than its own: the two sit together, and a
+  // conditions line visibly older than the warnings beside it reads as broken. The route
+  // caches for five minutes, so most of these refreshes cost nothing upstream.
+  useEffect(() => {
+    if (!showAlerts) return;
+    let active = true;
+    let refresh = 0;
+    void (async () => {
+      let anchor: AnchorCity | undefined;
+      try {
+        const response = await fetch(`/cities/${office.id}.json`);
+        if (!response.ok) throw new Error(String(response.status));
+        [anchor] = await response.json() as AnchorCity[];
+      } catch {
+        anchor = undefined;
+      }
+      // No labelled city means nothing to report on. Left null rather than surfaced as an
+      // error: the strip simply does not render, and the alerts below it are unaffected.
+      if (!active || !anchor) return;
+      const query = `wfo=${anchor.wfo}&x=${anchor.x}&y=${anchor.y}`;
+      const load = async () => {
+        try {
+          const response = await fetch(`/api/observations?${query}`);
+          if (!response.ok) throw new Error(String(response.status));
+          const payload = await response.json() as ObservationPayload;
+          if (active) setObservation({ office: office.id, payload: { ...payload, anchor } });
+        } catch {
+          // An unavailable observation must never take the alerts view down with it.
+          if (active) setObservation(null);
+        }
+      };
+      await load();
+      refresh = window.setInterval(load, 2 * 60 * 1000);
+    })();
+    return () => { active = false; if (refresh) window.clearInterval(refresh); };
+  }, [showAlerts, office.id]);
+
+  const officeObservation = observation?.office === office.id ? observation.payload : null;
 
   // SPC and WPC outlooks are national, so they load once and are shared by every office.
   // Only the live-canvas path needs them; published offices ship a baked PNG. The two
@@ -3052,6 +3189,7 @@ export function ForecastGraphic() {
               generatedAt={officeAlerts?.generatedAt ?? null}
               pending={!officeAlerts || !officeZones || !officeBundle}
               error={alertsError === office.id}
+              observation={officeObservation}
             />
           )}
 

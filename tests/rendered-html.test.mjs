@@ -1266,6 +1266,86 @@ test("validates zone codes before they reach an outbound URL", async () => {
   }
 });
 
+test("bounds what one observations lookup can cost upstream", async () => {
+  const route = await readFile(new URL("../app/api/observations/route.ts", import.meta.url), "utf8");
+  // One station-list request plus a capped walk. An office's gridpoint carries 72
+  // stations (PHI, measured); walking all of them would be the per-point fan-out that
+  // 504s /api/forecast in production, which is the whole reason that route cannot serve
+  // an office. The cap is the difference.
+  assert.match(route, /STATION_ATTEMPT_LIMIT/);
+  assert.match(route, /firstUsableObservation\(/);
+  // Validated before the values reach an outbound URL, same guard as the zone codes.
+  assert.match(route, /\^\[A-Z\]\{3\}\$/);
+  assert.ok(!/\$\{wfo\}/.test(route.split("export async function GET")[0]), "wfo must be validated before it is interpolated");
+});
+
+test("an observations lookup that finds nothing is an answer, not an error", async () => {
+  const route = await readFile(new URL("../app/api/observations/route.ts", import.meta.url), "utf8");
+  // Every nearby station being dark happens overnight at sparse gridpoints. Answering
+  // 200 with a null observation keeps the strip's empty state and a success on the same
+  // path, the way /api/alerts answers an empty zone list rather than erroring.
+  assert.match(route, /if \(!observation\) \{[\s\S]*?observation: null/);
+  assert.ok(
+    !/if \(!observation\) return unavailable/.test(route),
+    "no observation is a real answer, not a 503",
+  );
+});
+
+test("current conditions belong to the alerts view and to no forecast day", async () => {
+  const source = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
+  const component = source.split("function CurrentConditions")[1].split("\nfunction ")[0];
+  // The alerts tab is the page's only "right now" view; every other tab is a whole day's
+  // forecast. The strip is rendered from AlertsPanel and nowhere else.
+  // Exactly one render site, and it is the `conditions` binding inside AlertsPanel.
+  assert.equal((source.match(/<CurrentConditions /g) ?? []).length, 1);
+  assert.match(source, /const conditions = <CurrentConditions payload=\{observation\} \/>;/);
+  // It is not a publishable product: the publisher discovers what to capture with
+  // canvas[data-product-id], and this is live text with no PRODUCTS entry and no day.
+  assert.ok(!/data-product-id=/.test(component), "the conditions strip must not advertise a product id");
+  assert.ok(!/data-day-index=/.test(component), "the conditions strip belongs to no forecast day");
+  // A station that did not report a field renders as a dash in place, never as a dropped
+  // row — measured at KPHL, windSpeed and windGust were both null while temperature was
+  // fine. Dropping rows would reflow the strip between refreshes.
+  assert.match(component, /=== null \? "—"/);
+});
+
+test("the conditions strip does not wait on the alerts zone bundle", async () => {
+  const source = await readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8");
+  const panel = source.split("function AlertsPanel")[1].split("\nfunction ")[0];
+  // The zone bundle is ~326 KB at PHI and 1.1 MB at US. The observation lands far sooner,
+  // so gating it on the map's geometry would blank the strip for the whole of that wait.
+  const conditionsAt = panel.indexOf("const conditions =");
+  const firstReturn = panel.indexOf("if (error) return");
+  assert.ok(conditionsAt >= 0 && conditionsAt < firstReturn, "conditions must be built before the pending early-returns");
+  assert.match(panel, /if \(pending \|\| !alerts \|\| !zones \|\| !bundle\) return <>\{conditions\}/);
+});
+
+test("keeps NWS's keepalive test message off a map of live hazards", async () => {
+  const route = await readFile(new URL("../app/api/alerts/route.ts", import.meta.url), "utf8");
+  // The active feed always carries one `status: "Test"` "Test Message" — NWS keeps its
+  // dissemination path warm with a ten-minute keepalive naming a single real county
+  // (measured 2026-08-24: 271 Actual, 1 Test, on MDC031). It has affectedZones like any
+  // alert, so every step downstream — alertInView, the header count, the paint loop, the
+  // ticker — treated it as a hazard in force.
+  assert.match(route, /feature\.properties\?\.status/);
+  assert.match(route, /status === "Actual"/);
+  // Keyed on CAP `status`, never on the event name: the name is not the signal, and
+  // status is what also covers Exercise, System and Draft. A name match would both miss
+  // those and be at risk of eating a real event that happens to contain the word. Checked
+  // against the code with comments stripped, since the comments discuss the name.
+  const code = route.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+  assert.ok(
+    !/"Test Message"|test\/i\.test\(\s*(?:p\.)?event|event[\s\S]{0,40}includes\("Test"/.test(code),
+    "filter the CAP status, not the event name",
+  );
+  // The filter runs before the map, so a non-Actual message is never shaped into an
+  // AlertRecord at all — nothing downstream has to know about it.
+  assert.ok(
+    route.indexOf(".filter((feature)") < route.indexOf(".map((feature)"),
+    "non-Actual messages must be dropped before they become AlertRecords",
+  );
+});
+
 test("draws every office's alerts from a zone bundle it actually carries", async () => {
   const registry = JSON.parse(await readFile(new URL("../scripts/data/offices.json", import.meta.url), "utf8"));
   // Wide views are excluded, not just the national one: an area is no more a CWA than the
