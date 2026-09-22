@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
 import { targetsFor } from "../lib/areas.mjs";
 import { frameBounds } from "../lib/map-frame.mjs";
+import { inPolygons } from "../lib/point-in-polygon.mjs";
 
 // Resolves each office's interpolation lattice to the NWS gridpoints that feed it, and
 // writes public/gridpoints/{OFFICE}.json.
@@ -59,27 +60,6 @@ const rebalanceOnly = args.includes("--rebalance");
 const onlyArg = args.indexOf("--only");
 const only = onlyArg === -1 ? null : new Set(args[onlyArg + 1].split(","));
 
-/* ------------------------------------------------------------------ geometry */
-
-function pointInRing(lon, lat, ring) {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const [xi, yi] = ring[i];
-    const [xj, yj] = ring[j];
-    if (yi > lat !== yj > lat && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
-}
-
-function inCwa(lon, lat, polygons) {
-  for (const polygon of polygons) {
-    if (!pointInRing(lon, lat, polygon[0])) continue;
-    if (polygon.slice(1).some((hole) => pointInRing(lon, lat, hole))) continue;
-    return true;
-  }
-  return false;
-}
-
 /* ------------------------------------------------------------------ sampling */
 
 const bundleDir = new URL("../public/offices/", import.meta.url);
@@ -126,12 +106,12 @@ for (const name of names) {
 
   for (let lat = sampled.south; lat <= sampled.north + 1e-9; lat += fine) {
     for (let lon = sampled.west; lon <= sampled.east + 1e-9; lon += fine) {
-      if (inCwa(lon, lat, polygons)) add(lat, lon);
+      if (inPolygons(lon, lat, polygons)) add(lat, lon);
     }
   }
   for (let lat = sampled.south; lat <= sampled.north + 1e-9; lat += coarse) {
     for (let lon = sampled.west; lon <= sampled.east + 1e-9; lon += coarse) {
-      if (!inCwa(lon, lat, polygons)) add(lat, lon);
+      if (!inPolygons(lon, lat, polygons)) add(lat, lon);
     }
   }
   perOffice.push({ office: bundle.office, count, fine: +fine.toFixed(3), span: +(sampled.east - sampled.west).toFixed(1) });

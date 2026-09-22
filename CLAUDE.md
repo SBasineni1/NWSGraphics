@@ -37,7 +37,7 @@ the states, DC and Puerto Rico but not Guam or American Samoa. Guam is a real po
 CWA — it needs a different place source, not a lower threshold.
 
 To rebuild everything: `build-office-bundles` → `build-office-gridpoints` →
-`build-office-cities` → `build-offices`.
+`build-office-cities` → `build-offices`, then `build-meso-lattice` (seconds, offline).
 
 The selected office lives in the `?office=` query parameter, read through
 `useSyncExternalStore` so deep links, browser history, and the publisher's
@@ -115,8 +115,9 @@ Treat any surviving "50 subrequests / 10 ms CPU" reasoning elsewhere in the docs
   → `build-office-cities.mjs` → `build-offices.mjs` — the national asset chain, in that
   order. Bundles ~12s, the lattice ~18 min (31k `api.weather.gov/points` lookups; use
   `--dry-run` to size it first), cities ~70s, registry seconds. The wide views are built by
-  this same chain — **editing `lib/areas.mjs` means re-running all four**, since an area's
-  frame, lattice, labels and registry entry are all derived. `--only NW,WE` scopes the
+  this same chain — **editing `lib/areas.mjs` means re-running all four, plus
+  `build-meso-lattice.mjs`**, since an area's frame, lattice, labels, registry entry and
+  mesoanalysis lattice are all derived. `--only NW,WE` scopes the
   *middle two* (gridpoints and cities) to just the areas you touched; bundles and the
   registry take no such flag and always do everything, which is cheap. A scoped lattice run
   legitimately samples no CWA and fills entirely from the national pool — that is reported,
@@ -236,6 +237,33 @@ they are data in this repo rather than derived from anything upstream.
   `app/offices.ts` (client): "is there a CWA behind this id", not which flavour of wide
   view it is. Both a city-ownership check and the alerts join need exactly that question.
   See the alerts section below for the trap.
+
+## Mesoanalysis lattice (wide views)
+
+The Analysis view samples RAP at a point set per view. An office reuses its forecast
+lattice (`public/gridpoints/`); **the wide views get their own, `public/meso-lattice/{VIEW}.json`**,
+built offline by `scripts/build-meso-lattice.mjs` from `lib/meso-lattice.mjs`.
+
+- **Why a separate lattice:** the forecast lattice is sized by `api.weather.gov` cost — one
+  gridpoint request per point per publish — which left US sampling every ~135 km and
+  SW/SE/MW every 63–75 km. A meso point is a nearest-neighbour lookup into a RAP grid
+  already in memory. US went 803 → 5,803 points; a full 126-view pipeline run is ~8.5 s of
+  compute (the rest is the NOMADS download), and the US payload is ~157 KB gzipped.
+- **40 km, regular in Web Mercator pixels, land-only with a one-step buffer.** 40 km is the
+  grid SPC draws its mesoanalysis on, and the page exists to sit beside that panel — finer
+  would disagree with it visibly. Land-only because the renderer clips wide views to the
+  bundle's states anyway; the buffer keeps one offshore row so coasts don't smear.
+- **A view whose forecast lattice is already denser keeps it.** NE's is (381 vs 266), so the
+  builder writes no file for it, and `load_view_points` falls back to `public/gridpoints/`
+  exactly as for an office. The office list is still enumerated from `public/gridpoints/`.
+- Meso-lattice points ship as `{id, lat, lon, metrics}` — no empty `name`/`state`/`label`,
+  ~10% of the US payload. A missing `label` means unlabelled; `ForecastPoint` types them
+  optional.
+- **The renderer's neighbour search is bucketed** (`lib/field-neighbors.mjs`), not a scan of
+  every point per cell — at 5,800 points the scan was ~250M distance tests per solve. It
+  returns the scan's exact neighbours, order and distances (ties by index, same float
+  expression), so the Float64 weights stay bit-identical; `tests/field-neighbors.test.mjs`
+  checks it against a verbatim copy of the old loop. Twelve US plots render in ~1.2 s.
 
 ## Active watches & warnings
 

@@ -339,6 +339,8 @@ Dispatched to Codex on 2026-08-12; findings fold into this spec before implement
 - **Lattice density for wide views.** `US` and the seven areas sample at roughly 180 km spacing,
   so they will stay visibly softer than SPC's contours no matter how good the numbers are. This
   is the largest remaining visual gap and the designated follow-up.
+  *Done 2026-09-22:* wide views now sample a dedicated 40 km lattice
+  (`lib/meso-lattice.mjs`, `public/meso-lattice/`); see CLAUDE.md, "Mesoanalysis lattice".
 - **Switching to HRRR.** See below.
 - **New products.** 3CAPE and 0-1 km shear are both cheaply available and both deliberately
   deferred; this release improves the existing twelve rather than widening the catalogue.

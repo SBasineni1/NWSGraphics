@@ -5,6 +5,7 @@ import { PLOT_FONT_FAMILY } from "../fonts";
 import { AREAS, DEFAULT_OFFICE, findOffice, findRegion, isWideView, NATIONAL, OFFICES, REGIONS, regionOf, type Office, type OfficeId } from "../offices";
 import { MAP_HEIGHT, PLOT_WIDTH, frameBounds, inverseWorld, plotExtent, project } from "../../lib/map-frame.mjs";
 import { parsePlaceIndex, searchPlaces } from "../../lib/place-search.mjs";
+import { createNeighborIndex } from "../../lib/field-neighbors.mjs";
 import { formatAge, type Observation } from "../../lib/observations.mjs";
 import { ALERT_COLORS, DEFAULT_ALERT_COLOR } from "../alert-colors";
 
@@ -18,11 +19,13 @@ type MesoProductId =
 type FieldProductId = ProductId | MesoProductId;
 type ForecastPoint = {
   id: string;
-  name: string;
-  state: string;
   lat: number;
   lon: number;
-  label: boolean;
+  // Present on labelled cities. The wide-view mesoanalysis lattice omits all three on its
+  // unlabelled points to keep a ~5,800-point payload down, so absent means unlabelled.
+  name?: string;
+  state?: string;
+  label?: boolean;
   metrics: Partial<Record<FieldProductId, Array<number | null>>>;
 };
 type ForecastPayload = {
@@ -746,7 +749,10 @@ function solveFieldWeights(points: ForecastPoint[], columns: number, rows: numbe
   const exact = new Int32Array(cells).fill(-1);
   // Distance to the nearest contributing point, in multiples of lattice spacing.
   const support = new Float32Array(cells);
-  const near: Array<{ distanceSquared: number; index: number }> = [];
+  // Bucketed rather than a scan of every point per cell: the wide-view mesoanalysis
+  // lattice runs to thousands of points, where the scan cost seconds per solve. It returns
+  // exactly the scan's neighbours and distances — see lib/field-neighbors.mjs.
+  const neighbors = createNeighborIndex(points);
 
   // Characteristic spacing of this lattice: the frame's area shared between its points.
   // Latitude-scaled to match the distance metric used below, so it is comparable across a
@@ -762,33 +768,16 @@ function solveFieldWeights(points: ForecastPoint[], columns: number, rows: numbe
     for (let column = 0; column < columns; column += 1) {
       const cell = row * columns + column;
       const { lon, lat } = positionOf(column, row);
-      const scale = Math.cos(lat * Math.PI / 180);
-      near.length = 0;
-      for (let index = 0; index < points.length; index += 1) {
-        const point = points[index];
-        const dx = (lon - point.lon) * scale;
-        const dy = lat - point.lat;
-        const distanceSquared = dx * dx + dy * dy;
-        if (distanceSquared < 0.000001) {
-          exact[cell] = index;
-          break;
-        }
-        const insertAt = near.findIndex((neighbor) => distanceSquared < neighbor.distanceSquared);
-        if (insertAt === -1) {
-          if (near.length < NEIGHBOR_COUNT) near.push({ distanceSquared, index });
-        } else {
-          near.splice(insertAt, 0, { distanceSquared, index });
-          if (near.length > NEIGHBOR_COUNT) near.pop();
-        }
-      }
-      if (exact[cell] !== -1) {
+      const near = neighbors.nearest(lon, lat, NEIGHBOR_COUNT);
+      if (near.exact !== -1) {
+        exact[cell] = near.exact;
         support[cell] = 0;
         continue;
       }
-      support[cell] = near.length ? Math.sqrt(near[0].distanceSquared) / spacing : Infinity;
-      for (let slot = 0; slot < near.length; slot += 1) {
-        indices[cell * NEIGHBOR_COUNT + slot] = near[slot].index;
-        weights[cell * NEIGHBOR_COUNT + slot] = 1 / Math.pow(near[slot].distanceSquared + smoothing, 1.35);
+      support[cell] = near.count ? Math.sqrt(near.distances[0]) / spacing : Infinity;
+      for (let slot = 0; slot < near.count; slot += 1) {
+        indices[cell * NEIGHBOR_COUNT + slot] = near.indices[slot];
+        weights[cell * NEIGHBOR_COUNT + slot] = 1 / Math.pow(near.distances[slot] + smoothing, 1.35);
       }
     }
   }
@@ -1255,7 +1244,8 @@ async function renderFieldPlot(
     context.beginPath(); context.arc(x, y, 3.2, 0, Math.PI * 2); context.fillStyle = "#dc2626"; context.fill(); context.strokeStyle = "#fff"; context.lineWidth = 1.5; context.stroke();
     context.font = `600 11px ${PLOT_FONT_FAMILY}`;
     context.fillStyle = "#fff"; context.strokeStyle = "#111827"; context.lineWidth = 3;
-    context.strokeText(point.name, x, y + 12); context.fillText(point.name, x, y + 12);
+    const name = point.name ?? "";
+    context.strokeText(name, x, y + 12); context.fillText(name, x, y + 12);
   }
   context.textAlign = "left";
 

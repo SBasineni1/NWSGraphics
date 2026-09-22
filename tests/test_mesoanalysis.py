@@ -1,5 +1,8 @@
+import json
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 
@@ -9,6 +12,7 @@ from scripts.mesoanalysis_pipeline import (
     lapse_rate_c_per_km,
     lcl_height_metres,
     lift,
+    load_view_points,
     parse_index,
     pressure_layer_lapse_rate,
     record_span,
@@ -250,6 +254,49 @@ class ParcelLiftTest(unittest.TestCase):
         self.assertAlmostEqual(out["cape"][0], 7972.4205080191905, delta=1.0)
         self.assertAlmostEqual(out["cin"][0], -5.69075932046221, delta=0.5)
         self.assertAlmostEqual(out["lcl_pressure"][0], 97144.41346726583, delta=50.0)
+
+
+class LoadViewPointsTest(unittest.TestCase):
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.root = Path(self._dir.name)
+        for sub in ("gridpoints", "cities", "meso-lattice"):
+            (self.root / "public" / sub).mkdir(parents=True)
+        city = {"id": "US-new-york", "name": "New York", "state": "NY", "lat": 40.66, "lon": -73.94}
+        for view in ("US", "PHI"):
+            (self.root / "public" / "gridpoints" / f"{view}.json").write_text(json.dumps([
+                {"id": f"grid-{view}-1", "wfo": "PHI", "x": 1, "y": 1, "lat": 40.0, "lon": -75.0},
+            ]))
+            (self.root / "public" / "cities" / f"{view}.json").write_text(json.dumps([city]))
+        (self.root / "public" / "meso-lattice" / "US.json").write_text(json.dumps([
+            {"id": "meso-US-0-0", "lat": 41.0, "lon": -76.0},
+            {"id": "meso-US-1-0", "lat": 41.0, "lon": -75.5},
+        ]))
+
+    def tearDown(self):
+        self._dir.cleanup()
+
+    def test_a_wide_view_samples_its_meso_lattice_instead_of_the_forecast_lattice(self):
+        points = load_view_points(self.root, "US")
+        unlabelled = [point for point in points if not point.get("label")]
+        self.assertEqual([point["id"] for point in unlabelled], ["meso-US-0-0", "meso-US-1-0"])
+        # Trimmed to what the renderer reads; a missing label means unlabelled.
+        self.assertEqual(set(unlabelled[0]), {"id", "lat", "lon"})
+
+    def test_cities_still_come_from_the_view_labels(self):
+        labelled = [point for point in load_view_points(self.root, "US") if point.get("label")]
+        self.assertEqual([(point["name"], point["state"]) for point in labelled], [("New York", "NY")])
+
+    def test_a_view_without_a_meso_lattice_keeps_the_forecast_lattice(self):
+        points = load_view_points(self.root, "PHI")
+        self.assertEqual(points[0], {"id": "grid-PHI-1", "name": "", "state": "", "lat": 40.0, "lon": -75.0, "label": False})
+        self.assertEqual(len(points), 2)
+
+    def test_a_view_with_no_forecast_lattice_is_skipped_even_with_a_meso_lattice(self):
+        # The office list is enumerated from public/gridpoints/, so a stray lattice file for
+        # a view that no longer exists must not resurrect it.
+        (self.root / "public" / "gridpoints" / "US.json").unlink()
+        self.assertEqual(load_view_points(self.root, "US"), [])
 
 
 if __name__ == "__main__":

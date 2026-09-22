@@ -131,7 +131,11 @@ test("uses official NWS apparent-temperature grid data", async () => {
   assert.doesNotMatch(component, /coverageFalloff|maskFar/);
   assert.match(component, /const SUPPORT_FULL/);
   assert.match(component, /const SUPPORT_NONE/);
-  assert.match(component, /support\[cell\] = near\.length/);
+  assert.match(component, /support\[cell\] = near\.count \? Math\.sqrt\(near\.distances\[0\]\) \/ spacing/);
+  // The neighbour search is the shared bucketed index, not a per-cell scan of every point:
+  // the wide-view mesoanalysis lattice is ~5,800 points. tests/field-neighbors.test.mjs
+  // pins that it returns exactly what the scan did.
+  assert.match(component, /createNeighborIndex\(points\)/);
   // Shepard smoothing scales with the lattice, rather than the constant it used to be.
   // That constant was (0.1 x 0.219 deg)^2 — PHI's spacing — so at national scale, where
   // spacing is ~1.5 deg, inverse-distance weighting went near-singular at every point and

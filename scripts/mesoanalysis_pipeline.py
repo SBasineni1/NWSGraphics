@@ -708,14 +708,23 @@ def decode_rtma(grib_bytes: bytes):
 def load_view_points(root: Path, office: str) -> list[dict]:
     grid_path = root / "public" / "gridpoints" / f"{office}.json"
     city_path = root / "public" / "cities" / f"{office}.json"
+    # The wide views sample a denser lattice of their own (lib/meso-lattice.mjs): the
+    # forecast lattice is sized by api.weather.gov request cost, which RAP does not have.
+    # Offices, and any view without one, fall back to the forecast lattice.
+    meso_path = root / "public" / "meso-lattice" / f"{office}.json"
     if not grid_path.exists():
         return []
-    grid = json.loads(grid_path.read_text())
     cities = json.loads(city_path.read_text()) if city_path.exists() else []
-    points = [
-        {"id": point["id"], "name": "", "state": "", "lat": point["lat"], "lon": point["lon"], "label": False}
-        for point in grid
-    ]
+    if meso_path.exists():
+        # Only what the renderer reads for an unlabelled point. The empty name/state and
+        # label flag were ~10% of a 5,800-point national payload, and the client treats a
+        # missing label as unlabelled.
+        points = [{"id": point["id"], "lat": point["lat"], "lon": point["lon"]} for point in json.loads(meso_path.read_text())]
+    else:
+        points = [
+            {"id": point["id"], "name": "", "state": "", "lat": point["lat"], "lon": point["lon"], "label": False}
+            for point in json.loads(grid_path.read_text())
+        ]
     points.extend(
         {"id": city["id"], "name": city["name"], "state": city["state"], "lat": city["lat"], "lon": city["lon"], "label": True}
         for city in cities
