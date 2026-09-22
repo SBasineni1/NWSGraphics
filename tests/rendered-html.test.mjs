@@ -32,7 +32,9 @@ test("server-renders the default office's apparent-temperature product", async (
   assert.match(html, /Analysis/);
   assert.match(html, /Experimental/);
   assert.match(html, /Day (?:<!-- -->)?3[\s\S]*Analysis/, "Analysis should follow the forecast days");
-  assert.match(html, /Forecast catalogue/);
+  // The view switcher stands on its own; the old "Forecast catalogue /" breadcrumb is gone.
+  assert.doesNotMatch(html, /Forecast catalogue/);
+  assert.match(html, /aria-label="Forecast view"/);
   assert.match(html, /Temperature &amp; heat/);
   assert.match(html, /NWS (?:<!-- -->)?Philadelphia \/ Mount Holly/);
   assert.doesNotMatch(html, /NWS data source|Data status|Source:/);
@@ -419,7 +421,13 @@ test("offers the visitor's own office without ever prompting unbidden", async ()
   // opens it.
   assert.match(component, /if \(new URLSearchParams\(window\.location\.search\)\.has\("office"\)\) return/);
   // An office we cannot draw is reported, not silently swapped for the default.
-  assert.match(component, /if \(!found\?\.ready\)/);
+  assert.match(component, /if \(!found\?\.office\.ready\)/);
+  // The located spot drives the conditions strip, but it rides session storage, never the
+  // URL — a copied link must not carry where its sharer is — and any office picked by hand
+  // clears it back to that office's anchor city.
+  assert.match(component, /window\.sessionStorage\.setItem\(CHOSEN_POINT_KEY/);
+  assert.match(component, /writeChosenPoint\(point \? \{ \.\.\.point, office: next\.id \} : null\)/);
+  assert.match(component, /const localPoint = chosen\?\.office === office\.id \? chosen : null/);
   // Denied and unsupported are distinct outcomes and say different things.
   assert.match(component, /PERMISSION_DENIED/);
   assert.match(component, /Location permission is blocked/);
@@ -1167,7 +1175,8 @@ test("publishes an hourly RAP mesoanalysis with same-hour SPC comparisons", asyn
     assert.match(component, new RegExp(`id: "${product}"`));
     assert.match(pipeline, new RegExp(`"${product}"`));
   }
-  assert.match(component, /data-view="analysis"/);
+  // The view switcher is GooeyNav, which takes each tab's data-* attributes as an object.
+  assert.match(component, /"data-view": "analysis"/);
   assert.match(component, /Compare with SPC/);
   assert.match(component, /payload\.comparison\.products\[spec\.id\]/);
   assert.match(component, /const comparisonImage = comparison/);
@@ -1408,11 +1417,15 @@ test("a wide view draws alerts, scoped to the zones it actually carries", async 
   // in Texas would have counted as drawable on the Mid-Atlantic map.
   assert.match(component, /function alertInView/);
   assert.match(component, /alert\.zones\.some\(\(code\) => zones\[code\] !== undefined\)/);
-  // …and the filter runs before anything counts, draws or lists it, so the header total,
-  // the map and the strip cannot disagree.
+  // …and the filter runs once, before anything counts, draws or lists it, so the sidebar's
+  // tier counts, the map and the strip cannot disagree: alertsForView narrows, the parent
+  // holds the result, and both the sidebar and the panel read that one list.
+  const narrow = component.slice(component.indexOf("function alertsForView"), component.indexOf("async function renderAlertPlot"));
+  assert.match(narrow, /\.filter\(\(alert\) => alertInView\(alert, zones\)\)/);
+  assert.match(component, /const viewAlerts = useMemo\(\s*\(\) => officeAlerts && officeZones \? alertsForView\(officeAlerts\.alerts, officeZones\)/);
+  assert.match(component, /<AlertsPanel\s+alerts=\{viewAlerts\}/);
   const panel = component.slice(component.indexOf("function AlertsPanel"), component.indexOf("function publishedAssetUrl"));
   assert.ok(panel.length > 0, "expected to find the AlertsPanel body");
-  assert.match(panel, /\.filter\(\(alert\) => alertInView\(alert, zones\)\)/);
   assert.match(panel, /<AlertsPlot alerts=\{sorted\}/);
   // The old "pick an office" bail-out must be gone, or wide views never render at all.
   assert.doesNotMatch(panel, /Watches and warnings are issued per forecast office/);
@@ -1664,4 +1677,19 @@ test("labels cities against the office that forecasts them", async () => {
   const afc = JSON.parse(await readFile(new URL("AFC.json", dir), "utf8"));
   assert.ok(afc.length > 0, "AFC must have labels");
   assert.ok(afc.some((city) => city.wfo !== city.office), "expected AFC to use a separate gridpoint domain");
+});
+
+test("the view switcher keeps the attribute the publisher steps through days by", async () => {
+  const [component, publisher, nav] = await Promise.all([
+    readFile(new URL("../app/components/ForecastGraphic.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../components/ui/gooey-nav.tsx", import.meta.url), "utf8"),
+  ]);
+  // The publisher clicks `button[data-day-index="n"]`. The switcher is GooeyNav, which only
+  // renders a <button> for an item without an href and spreads `attributes` onto it — lose
+  // either and every run silently captures the same day three times.
+  assert.match(publisher, /button\[data-day-index=/);
+  assert.match(component, /"data-day-index": index/);
+  assert.doesNotMatch(component, /VIEW_ITEMS[^;]*href:/s);
+  assert.match(nav, /\.\.\.attributes,/);
 });

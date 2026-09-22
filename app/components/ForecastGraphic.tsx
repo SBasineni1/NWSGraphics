@@ -8,6 +8,9 @@ import { parsePlaceIndex, searchPlaces } from "../../lib/place-search.mjs";
 import { createNeighborIndex } from "../../lib/field-neighbors.mjs";
 import { formatAge, type Observation } from "../../lib/observations.mjs";
 import { ALERT_COLORS, DEFAULT_ALERT_COLOR } from "../alert-colors";
+import { BounceSidebar } from "../../components/ui/bounce-sidebar";
+import { GooeyNav, type GooeyNavItem } from "../../components/ui/gooey-nav";
+import { AlertIcon, AnalysisIcon, CalendarIcon } from "./view-icons";
 
 type ProductId = "apparentTemperature" | "temperature" | "minTemperature" | "dewpoint" | "windGust" | "windSpeed" | "skyCover" | "probabilityOfPrecipitation" | "quantitativePrecipitation";
 type MesoProductId =
@@ -1554,11 +1557,19 @@ const ALERT_HAZARDS: Array<[RegExp, number]> = [
  * off the event name — CAP `severity` carries neither (a Flood Watch and a Tornado
  * Warning are both "Severe").
  */
-function alertRank(event: string) {
-  const tier = /\bwarning\b/i.test(event) ? 3
+/** Warning 3, watch 2, advisory 1, anything else 0 — the order alerts are painted and listed in. */
+function alertTier(event: string) {
+  return /\bwarning\b/i.test(event) ? 3
     : /\bwatch\b/i.test(event) ? 2
     : /\badvisory\b/i.test(event) ? 1
     : 0;
+}
+
+/** Sidebar headings for each tier, most severe first. */
+const ALERT_TIER_TITLES = ["Warnings", "Watches", "Advisories", "Statements"].map((title, index) => ({ tier: 3 - index, title }));
+
+function alertRank(event: string) {
+  const tier = alertTier(event);
   const hazard = ALERT_HAZARDS.find(([pattern]) => pattern.test(event))?.[1] ?? 10;
   return tier * 1000 + hazard;
 }
@@ -1594,6 +1605,19 @@ function alertGeometries(alert: AlertRecord, zones: ZoneIndex): AreaGeometry[] {
  */
 function alertInView(alert: AlertRecord, zones: ZoneIndex) {
   return alert.zones.some((code) => zones[code] !== undefined);
+}
+
+/**
+ * The alerts this view shows, hardest hazard first.
+ *
+ * Narrowed to the view before anything counts, draws or lists it. A wide view is served
+ * every alert in force, so this is what makes its map, its strip and the sidebar's counts
+ * agree; for an office the route has already narrowed it and this changes nothing.
+ */
+function alertsForView(alerts: AlertRecord[], zones: ZoneIndex) {
+  return alerts
+    .filter((alert) => alertInView(alert, zones))
+    .sort((a, b) => alertRank(b.event) - alertRank(a.event) || a.event.localeCompare(b.event));
 }
 
 async function renderAlertPlot(canvas: HTMLCanvasElement, alerts: AlertRecord[], zones: ZoneIndex, bundle: OfficeBundle, office: OfficeId, generatedAt: string | null) {
@@ -1872,10 +1896,12 @@ function alertUntil(alert: AlertRecord) {
   const zone = "America/New_York";
   // en-CA gives YYYY-MM-DD, so two Eastern calendar days compare as strings.
   const day = (value: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
-  const time = new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "numeric", minute: "2-digit" }).format(at).toUpperCase();
-  if (day(at) === day(new Date())) return `UNTIL ${time}`;
-  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "short" }).format(at).toUpperCase();
-  return `UNTIL ${weekday} ${time}`;
+  // "11 PM", not "11:00 PM": NWS alerts almost always end on the hour, and the zeros are
+  // noise read forty times across the strip. A real minute ("7:30 PM") is kept.
+  const time = new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "numeric", minute: "2-digit" }).format(at).replace(":00", "");
+  if (day(at) === day(new Date())) return `until ${time}`;
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "short" }).format(at);
+  return `until ${weekday} ${time}`;
 }
 
 /** Roughly how much of a chip the places may take before they crowd out every other alert. */
@@ -1917,7 +1943,7 @@ function alertPlaces(areaDesc: string | null | undefined) {
 }
 
 /** How fast the strip travels, in CSS pixels per second. Slow enough to read in passing. */
-const TICKER_PX_PER_SECOND = 60;
+const TICKER_PX_PER_SECOND = 40;
 
 /**
  * Active alerts as one continuously flowing strip.
@@ -1993,7 +2019,7 @@ function AlertsTicker({ alerts }: { alerts: AlertRecord[] }) {
   const seconds = layout?.seconds ?? 0;
 
   return (
-    <div className="alert-ticker" ref={viewport}>
+    <div className="alert-ticker" id="alerts-list" ref={viewport}>
       <div
         className="alert-ticker-track"
         // Paused until measured, so the first frame isn't a strip sliding at the wrong speed.
@@ -2015,11 +2041,12 @@ function AlertsTicker({ alerts }: { alerts: AlertRecord[] }) {
               const until = alertUntil(alert);
               return (
                 <li key={alert.id} className="alert-chip">
-                  <span className="alert-swatch" style={{ background: color.fill, borderColor: color.stroke }} aria-hidden />
+                  <span className="alert-dot" style={{ background: color.fill, borderColor: color.stroke }} aria-hidden />
                   <b>{alert.event}</b>
+                  {/* The event is the headline; where and until are one muted line after it,
+                      joined the way the conditions row joins its provenance. */}
                   {places && <i>{places}</i>}
-                  {/* Kept, unlike the headline, which only restates the event and the times
-                      already shown here and beside it. */}
+                  {places && until && <span className="alert-sep" aria-hidden>·</span>}
                   {until && <time className="alert-until" dateTime={alert.ends ?? alert.expires ?? undefined}>{until}</time>}
                 </li>
               );
@@ -2057,7 +2084,7 @@ function AlertsPlot({ alerts, zones, bundle, office, generatedAt }: { alerts: Al
   }, [ready, office]);
 
   return (
-    <article className="forecast-product">
+    <article className="forecast-product" id="alerts-map">
       <div className="product-bar">
         <h3>Active Watches &amp; Warnings</h3>
         <button onClick={download} disabled={!ready}>{ready ? "Download PNG ↓" : "Rendering…"}</button>
@@ -2085,12 +2112,9 @@ function AlertsPanel({ alerts, zones, bundle, office, generatedAt, pending, erro
   if (error) return <>{conditions}<div className="gallery-message">Active alerts are temporarily unavailable.</div></>;
   if (pending || !alerts || !zones || !bundle) return <>{conditions}<div className="gallery-message">Loading active watches and warnings…</div></>;
 
-  // Narrowed to this view before anything counts, draws or lists it. A wide view is served
-  // every alert in force, so this is what makes its map, its header count and its strip
-  // agree; for an office the route has already narrowed it and this changes nothing.
-  const sorted = alerts
-    .filter((alert) => alertInView(alert, zones))
-    .sort((a, b) => alertRank(b.event) - alertRank(a.event) || a.event.localeCompare(b.event));
+  // Already narrowed to this view and ranked, by alertsForView in the parent — the sidebar
+  // counts the same list, so the two cannot disagree.
+  const sorted = alerts;
   return (
     <>
       {conditions}
@@ -2146,22 +2170,23 @@ function CurrentConditions({ payload }: { payload: ObservationPayload | null }) 
       : null;
   if (feelsLike) readings.splice(1, 0, [feelsLike[0], feelsLike[1]]);
 
+  // NWS title-cases its descriptions ("Thunderstorms and Rain"); everything else on the
+  // page is sentence case, and they carry no proper nouns to protect.
+  const sky = observation.text ? observation.text.charAt(0) + observation.text.slice(1).toLowerCase() : null;
+
   return (
-    <section className="current-conditions" aria-label="Current conditions">
-      <div className="current-conditions-bar">
-        <h3>Current Conditions</h3>
-        <p>
-          {payload.anchor ? `${payload.anchor.name}, ${payload.anchor.state} · ` : ""}
-          {observation.station}
-          {age ? ` · ${age}` : ""}
-        </p>
-      </div>
+    <section className="current-conditions" id="current-conditions" aria-label="Current conditions">
+      {/* Title, place, age. The station identifier is left out on purpose: "KSYR" means
+          nothing to a reader, and the town already says where the reading is from. */}
+      <p className="current-conditions-meta">
+        <b>Current Conditions</b>
+        {payload.anchor && <span>{payload.anchor.name}, {payload.anchor.state}</span>}
+        {age && <span>Last updated: {age}</span>}
+      </p>
       <div className="current-conditions-body">
         <div className="current-conditions-headline">
-          <span className="current-conditions-temperature">
-            {observation.temperature}<span className="current-conditions-degree">°F</span>
-          </span>
-          {observation.text && <span className="current-conditions-text">{observation.text}</span>}
+          <span className="current-conditions-temperature">{observation.temperature}°</span>
+          {sky && <span className="current-conditions-text">{sky}</span>}
         </div>
         <dl className="current-conditions-readings">
           {readings.map(([label, value]) => (
@@ -2224,6 +2249,92 @@ function readOfficeParam(): string {
   return new URLSearchParams(window.location.search).get("office") ?? DEFAULT_OFFICE;
 }
 
+/**
+ * Where the visitor is, once they have used "Use my location": the town NWS names for the
+ * point and its own gridpoint, stamped with the office it was found in.
+ *
+ * The conditions strip reports on this spot instead of the office's anchor city, but only
+ * while that office is still the one selected — picking any office by hand clears it, and
+ * the stamp stops it applying to a different office reached some other way (back button).
+ *
+ * Session storage, not the URL: a copied link must never carry where its sharer is. The
+ * module variable is the source of truth, so a browser that refuses storage still keeps
+ * the point for the life of the page.
+ */
+type ChosenPoint = AnchorCity & { office: OfficeId };
+const CHOSEN_POINT_KEY = "forecast-chosen-point";
+const CHOSEN_POINT_EVENT = "forecast-chosen-point-change";
+let chosenPoint: ChosenPoint | null | undefined;
+
+function isChosenPoint(value: unknown): value is ChosenPoint {
+  const point = value as Partial<ChosenPoint> | null;
+  return Boolean(point) && typeof point!.name === "string" && typeof point!.state === "string"
+    && typeof point!.wfo === "string" && typeof point!.office === "string"
+    && Number.isInteger(point!.x) && Number.isInteger(point!.y);
+}
+
+function readChosenPoint(): ChosenPoint | null {
+  if (chosenPoint === undefined) {
+    try {
+      const stored = JSON.parse(window.sessionStorage.getItem(CHOSEN_POINT_KEY) ?? "null");
+      chosenPoint = isChosenPoint(stored) ? stored : null;
+    } catch {
+      chosenPoint = null;
+    }
+  }
+  return chosenPoint;
+}
+
+function writeChosenPoint(point: ChosenPoint | null) {
+  chosenPoint = point;
+  try {
+    if (point) window.sessionStorage.setItem(CHOSEN_POINT_KEY, JSON.stringify(point));
+    else window.sessionStorage.removeItem(CHOSEN_POINT_KEY);
+  } catch {
+    // Storage refused (private window, blocked site data): the in-memory value still holds.
+  }
+  window.dispatchEvent(new Event(CHOSEN_POINT_EVENT));
+}
+
+function subscribeToChosenPoint(onChange: () => void) {
+  window.addEventListener(CHOSEN_POINT_EVENT, onChange);
+  return () => window.removeEventListener(CHOSEN_POINT_EVENT, onChange);
+}
+
+// The view switcher drops a size on phones, where five tabs at desktop size overrun the
+// top bar. A size is a prop, not a class, so CSS alone can't do it. Matches the 620px
+// breakpoint in globals.css.
+const COMPACT_NAV_QUERY = "(max-width: 620px)";
+
+function subscribeToCompactNav(onChange: () => void) {
+  const query = window.matchMedia(COMPACT_NAV_QUERY);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+}
+
+const readCompactNav = () => window.matchMedia(COMPACT_NAV_QUERY).matches;
+
+// A product counts as the one being read once its top passes this far below the viewport
+// top: under the 52px sticky top bar, with a little room so a heading just scrolled into
+// place already counts.
+const PRODUCT_SPY_OFFSET = 96;
+
+// Alerts, the three days, then Analysis. The data-* attributes are load-bearing: the
+// publisher steps through days with `button[data-day-index="n"]`.
+const VIEW_ITEMS: GooeyNavItem[] = [
+  // Ahead of Day 1, because it is the only thing here describing right now rather than a
+  // forecast day — and the first thing worth knowing.
+  { label: "Alerts", icon: <AlertIcon />, attributes: { "data-view": "alerts" } },
+  ...FORECAST_DAYS.map((index) => ({ label: `Day ${index + 1}`, icon: <CalendarIcon />, attributes: { "data-day-index": index } })),
+  {
+    label: "Analysis",
+    icon: <AnalysisIcon />,
+    attributes: { "data-view": "analysis" },
+    suffix: <span className="experimental-badge">Experimental</span>,
+  },
+];
+const ANALYSIS_VIEW = FORECAST_DAYS.length + 1;
+
 function writeOfficeParam(id: OfficeId) {
   const url = new URL(window.location.href);
   url.searchParams.set("office", id);
@@ -2260,7 +2371,7 @@ type LocateState = "idle" | "locating" | "denied" | "unavailable" | "unsupported
  * the request does. `api.weather.gov` sends `Access-Control-Allow-Origin: *`, so this
  * works from the browser with no proxy.
  */
-async function officeAt(latitude: number, longitude: number): Promise<Office | null> {
+async function officeAt(latitude: number, longitude: number): Promise<{ office: Office; point: AnchorCity | null } | null> {
   const response = await fetch(
     `https://api.weather.gov/points/${latitude.toFixed(4)},${longitude.toFixed(4)}`,
     { headers: { Accept: "application/geo+json" }, signal: AbortSignal.timeout(15_000) },
@@ -2268,7 +2379,16 @@ async function officeAt(latitude: number, longitude: number): Promise<Office | n
   if (!response.ok) return null;
   const properties = (await response.json())?.properties;
   const found = OFFICE_BY_ID.get(properties?.cwa as OfficeId);
-  return found ?? null;
+  if (!found) return null;
+  // The same response names the point's own gridpoint and the town NWS considers it
+  // nearest, which is everything the conditions strip needs to report on *this* spot
+  // rather than the office's anchor city — so there is no second request.
+  const town = properties?.relativeLocation?.properties;
+  const point = typeof properties?.gridId === "string" && Number.isInteger(properties?.gridX) && Number.isInteger(properties?.gridY)
+    && typeof town?.city === "string" && typeof town?.state === "string"
+    ? { name: town.city, state: town.state, wfo: properties.gridId, x: properties.gridX, y: properties.gridY }
+    : null;
+  return { office: found, point };
 }
 
 /**
@@ -2283,7 +2403,7 @@ async function officeAt(latitude: number, longitude: number): Promise<Office | n
  * Silent location never overrides an explicit `?office=`, or a shared deep link would
  * quietly retarget itself at whoever opened it.
  */
-function useLocalOffice(onSelect: (office: Office) => void) {
+function useLocalOffice(onSelect: (office: Office, point?: AnchorCity) => void) {
   const [state, setState] = useState<LocateState>("idle");
   const attempted = useRef(false);
 
@@ -2292,11 +2412,11 @@ function useLocalOffice(onSelect: (office: Office) => void) {
       const found = await officeAt(position.coords.latitude, position.coords.longitude);
       // An office we can't draw is reported, not silently swapped for the default — the
       // same rule the ZIP/town search follows.
-      if (!found?.ready) {
+      if (!found?.office.ready) {
         setState("unavailable");
         return;
       }
-      onSelect(found);
+      onSelect(found.office, found.point ?? undefined);
       setState("idle");
     } catch {
       setState("unavailable");
@@ -2371,7 +2491,7 @@ function usePlaceIndex() {
  */
 const AREAS_LEVEL = "areas";
 
-function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office: Office) => void }) {
+function OfficePicker({ office, onSelect }: { office: Office; onSelect: (office: Office, point?: AnchorCity) => void }) {
   const [open, setOpen] = useState(false);
   // The menu stays mounted through its exit animation, so "closing" is its own state.
   const [closing, setClosing] = useState(false);
@@ -2848,8 +2968,15 @@ export function ForecastGraphic() {
   // The server can't see the query string, so it renders the default office; the client
   // swaps to the requested one on hydration without a markup mismatch.
   const officeId = useSyncExternalStore(subscribeToOfficeParam, readOfficeParam, () => DEFAULT_OFFICE);
+  const compactNav = useSyncExternalStore(subscribeToCompactNav, readCompactNav, () => false);
+  const chosen = useSyncExternalStore(subscribeToChosenPoint, readChosenPoint, () => null);
   const office = useMemo(() => findOffice(officeId), [officeId]);
-  const selectOffice = useCallback((next: Office) => writeOfficeParam(next.id), []);
+  // A location from "Use my location" arrives with its point; any other choice is an
+  // office picked by hand, which drops back to that office's own anchor city.
+  const selectOffice = useCallback((next: Office, point?: AnchorCity) => {
+    writeChosenPoint(point ? { ...point, office: next.id } : null);
+    writeOfficeParam(next.id);
+  }, []);
 
   // One bundle per office: its CWA outline, the counties/state lines/interstates inside
   // its frame, and the tile zoom that frame wants. The four national files this replaced
@@ -2980,18 +3107,24 @@ export function ForecastGraphic() {
   // Refreshed on the alerts cadence rather than its own: the two sit together, and a
   // conditions line visibly older than the warnings beside it reads as broken. The route
   // caches for five minutes, so most of these refreshes cost nothing upstream.
+  //
+  // A visitor who used their location gets that spot instead: the same route, pointed at
+  // their own gridpoint, labelled with the town NWS names for it.
+  const localPoint = chosen?.office === office.id ? chosen : null;
   useEffect(() => {
     if (!showAlerts) return;
     let active = true;
     let refresh = 0;
     void (async () => {
-      let anchor: AnchorCity | undefined;
-      try {
-        const response = await fetch(`/cities/${office.id}.json`);
-        if (!response.ok) throw new Error(String(response.status));
-        [anchor] = await response.json() as AnchorCity[];
-      } catch {
-        anchor = undefined;
+      let anchor: AnchorCity | undefined = localPoint ?? undefined;
+      if (!anchor) {
+        try {
+          const response = await fetch(`/cities/${office.id}.json`);
+          if (!response.ok) throw new Error(String(response.status));
+          [anchor] = await response.json() as AnchorCity[];
+        } catch {
+          anchor = undefined;
+        }
       }
       // No labelled city means nothing to report on. Left null rather than surfaced as an
       // error: the strip simply does not render, and the alerts below it are unaffected.
@@ -3012,7 +3145,7 @@ export function ForecastGraphic() {
       refresh = window.setInterval(load, 2 * 60 * 1000);
     })();
     return () => { active = false; if (refresh) window.clearInterval(refresh); };
-  }, [showAlerts, office.id]);
+  }, [showAlerts, office.id, localPoint]);
 
   const officeObservation = observation?.office === office.id ? observation.payload : null;
 
@@ -3100,6 +3233,110 @@ export function ForecastGraphic() {
     () => PRODUCT_GROUPS.filter((group) => catalogueProducts.some((product) => product.group === group.id)),
     [catalogueProducts],
   );
+
+  const viewIndex = showAlerts ? 0 : showAnalysis ? ANALYSIS_VIEW : dayIndex + 1;
+  const selectView = useCallback((index: number) => {
+    setShowAlerts(index === 0);
+    setShowAnalysis(index === ANALYSIS_VIEW);
+    if (index > 0 && index < ANALYSIS_VIEW) setDayIndex(index - 1);
+  }, []);
+
+  const viewAlerts = useMemo(
+    () => officeAlerts && officeZones ? alertsForView(officeAlerts.alerts, officeZones) : null,
+    [officeAlerts, officeZones],
+  );
+
+  // The sidebar describes the page actually on screen. The forecast days and Analysis list
+  // their products; the Alerts view has none of those, so it lists the alert tiers in force
+  // and its own sections instead of a catalogue it isn't showing.
+  const menuItems = useMemo(() => {
+    if (!showAlerts) {
+      return [
+        { label: "Overview", count: catalogueProducts.length as number | null, href: "#overview" },
+        ...availableGroups.map((group) => ({
+          label: group.title,
+          count: catalogueProducts.filter((product) => product.group === group.id).length as number | null,
+          href: `#product-${catalogueProducts.find((product) => product.group === group.id)!.id}`,
+        })),
+      ];
+    }
+    return [
+      { label: "Overview", count: viewAlerts?.length ?? null, href: "#overview" },
+      ...ALERT_TIER_TITLES
+        .map(({ tier, title }) => ({ title, count: viewAlerts?.filter((alert) => alertTier(alert.event) === tier).length ?? 0 }))
+        .filter(({ count }) => count > 0)
+        .map(({ title, count }) => ({ label: title, count: count as number | null, href: "#alerts-map" })),
+    ];
+  }, [showAlerts, catalogueProducts, availableGroups, viewAlerts]);
+
+  // Only sections that are on the page: the conditions strip renders only with an
+  // observation, the map only once its zones and bundle have arrived, and the alert list
+  // only when something is in force.
+  const alertsMapShown = alertsError !== office.id && Boolean(viewAlerts && officeBundle);
+  const pageItems = useMemo(() => {
+    if (!showAlerts) return catalogueProducts.map((spec) => ({ label: spec.nav, href: `#product-${spec.id}` }));
+    return [
+      ...(officeObservation?.observation ? [{ label: "Current conditions", href: "#current-conditions" }] : []),
+      ...(alertsMapShown ? [{ label: "Watches & warnings map", href: "#alerts-map" }] : []),
+      ...(alertsMapShown && viewAlerts?.length ? [{ label: "Active alerts", href: "#alerts-list" }] : []),
+    ];
+  }, [showAlerts, catalogueProducts, officeObservation, alertsMapShown, viewAlerts]);
+
+  // Which section the reader is on, so the sidebar's dot follows the page as it scrolls.
+  // Read from the DOM on scroll rather than observed: the sections mount only once their
+  // data arrives, and a scroll handler that looks them up each time needs no re-wiring
+  // when they do.
+  const [activeProduct, setActiveProduct] = useState(0);
+  // A click starts a smooth scroll past every product in between; following it would
+  // bounce the dot through each one. The spy stands down until the scrolling stops.
+  const productSpyLock = useRef<{ locked: boolean; timer: number }>({ locked: false, timer: 0 });
+  const releaseProductSpy = useCallback((delay: number) => {
+    window.clearTimeout(productSpyLock.current.timer);
+    productSpyLock.current.timer = window.setTimeout(() => { productSpyLock.current.locked = false; }, delay);
+  }, []);
+  const selectProduct = useCallback((index: number) => {
+    setActiveProduct(index);
+    productSpyLock.current.locked = true;
+    // Released by the scroll handler once scrolling settles; this covers a click that
+    // scrolls nowhere, such as the product already in place.
+    releaseProductSpy(1000);
+  }, [releaseProductSpy]);
+  useEffect(() => {
+    let frame = 0;
+    const spy = () => {
+      frame = 0;
+      if (productSpyLock.current.locked) {
+        releaseProductSpy(150);
+        return;
+      }
+      const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
+      // The row nearest the offset wins, and within a row the first product: on a wide
+      // screen the gallery is two columns, so two products share every top, and "the last
+      // one past the line" would always name the right-hand one.
+      let current = 0;
+      let currentTop = -Infinity;
+      pageItems.forEach((item, index) => {
+        const article = document.getElementById(item.href.slice(1));
+        if (!article) return;
+        const top = Math.round(article.getBoundingClientRect().top);
+        // At the bottom of the page the last rows can never scroll up to the offset, so
+        // the lowest row in view is the one being read.
+        const reached = top <= PRODUCT_SPY_OFFSET || (atBottom && top < window.innerHeight);
+        if (reached && top > currentTop) {
+          current = index;
+          currentTop = top;
+        }
+      });
+      setActiveProduct(current);
+    };
+    const onScroll = () => { if (!frame) frame = window.requestAnimationFrame(spy); };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [pageItems, releaseProductSpy]);
   const publishedDay = publishedDays?.[dayIndex];
   // Derived rather than cleared on switch, so a previous office's payload can never be
   // drawn against the newly selected office's boundary.
@@ -3110,20 +3347,29 @@ export function ForecastGraphic() {
       <aside className="catalog-sidebar">
         <OfficePicker office={office} onSelect={selectOffice} />
         <div className="catalog-scroll">
-          <nav className="catalog-nav" aria-label="Forecast product catalogue">
+          <nav className="catalog-nav" aria-label={showAlerts ? "Active alerts" : "Forecast product catalogue"}>
             <p>Menu</p>
-            <a className="is-active" href="#overview"><span>Overview</span><b>[{catalogueProducts.length}]</b></a>
-            {availableGroups.map((group) => (
-              <a key={group.id} href={`#product-${catalogueProducts.find((product) => product.group === group.id)!.id}`}>
-                <span>{group.title}</span>
-                <b>[{catalogueProducts.filter((product) => product.group === group.id).length}]</b>
+            {menuItems.map((item, index) => (
+              <a key={item.label} className={index === 0 ? "is-active" : undefined} href={item.href}>
+                <span>{item.label}</span>
+                {item.count !== null && <b>[{item.count}]</b>}
               </a>
             ))}
           </nav>
           <div className="catalog-divider" />
-          <nav className="product-index" aria-label="Individual forecast products">
-            <p>Products</p>
-            {catalogueProducts.map((spec) => <a key={spec.id} href={`#product-${spec.id}`}>{spec.nav}</a>)}
+          <nav className="product-index" aria-label={showAlerts ? "Sections of this page" : "Individual forecast products"}>
+            <p>{showAlerts ? "On this page" : "Products"}</p>
+            {pageItems.length > 0 && (
+              <BounceSidebar
+                // Remounted when the list changes (day tab, Analysis or Alerts), so the dot
+                // starts on the new list rather than arcing from a row that no longer exists.
+                key={pageItems.map((item) => item.href).join("|")}
+                items={pageItems}
+                value={Math.min(activeProduct, pageItems.length - 1)}
+                onChange={selectProduct}
+                dotColor="#d94f00"
+              />
+            )}
           </nav>
         </div>
         <footer className="catalog-footer">
@@ -3136,23 +3382,17 @@ export function ForecastGraphic() {
       <section className="catalog-workspace">
         <header className="workspace-topbar">
           <div className="breadcrumbs">
-            <span>Forecast catalogue</span>
-            <i>/</i>
-            <nav className="day-switcher" aria-label="Forecast day">
-              {/* Ahead of Day 1, because it is the only thing here describing right now
-                  rather than a forecast day — and the first thing worth knowing. */}
-              <button type="button" data-view="alerts" className={showAlerts ? "is-active" : ""} aria-pressed={showAlerts} onClick={() => { setShowAnalysis(false); setShowAlerts(true); }}>
-                Alerts
-              </button>
-              {FORECAST_DAYS.map((index) => (
-                <button key={index} type="button" data-day-index={index} className={!showAnalysis && !showAlerts && dayIndex === index ? "is-active" : ""} aria-pressed={!showAnalysis && !showAlerts && dayIndex === index} onClick={() => { setShowAnalysis(false); setShowAlerts(false); setDayIndex(index); }}>
-                  Day {index + 1}
-                </button>
-              ))}
-              <button type="button" data-view="analysis" className={`analysis-tab${showAnalysis ? " is-active" : ""}`} aria-pressed={showAnalysis} onClick={() => { setShowAnalysis(true); setShowAlerts(false); }}>
-                Analysis <span className="experimental-badge">Experimental</span>
-              </button>
-            </nav>
+            <GooeyNav
+              className="day-switcher"
+              aria-label="Forecast view"
+              items={VIEW_ITEMS}
+              value={viewIndex}
+              onChange={selectView}
+              size={compactNav ? "xs" : "sm"}
+              // The top bar is black whatever the OS scheme, so the bar is pinned dark.
+              tone="dark"
+              activeColor="#d94f00"
+            />
           </div>
           {showAnalysis && <button type="button" className={`comparison-toggle${compareSpc ? " is-active" : ""}`} aria-pressed={compareSpc} onClick={() => setCompareSpc((value) => !value)}>{compareSpc ? "Hide SPC comparison" : "Compare with SPC"}</button>}
         </header>
@@ -3172,7 +3412,7 @@ export function ForecastGraphic() {
 
           {!showAnalysis && showAlerts && (
             <AlertsPanel
-              alerts={officeAlerts?.alerts ?? null}
+              alerts={viewAlerts}
               zones={officeZones}
               bundle={officeBundle}
               office={office}
