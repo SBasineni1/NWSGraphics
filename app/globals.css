@@ -579,6 +579,11 @@ h1 { margin: 0; font-size: clamp(42px, 5vw, 72px); line-height: .96; letter-spac
 .product-bar a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .product-bar button:disabled { color: var(--faint); cursor: wait; }
 .forecast-canvas { display: block; width: 100%; height: auto; border: 1px solid var(--line-strong); background: #dfe8ee; }
+/* A canvas keeps its last picture until the queue reaches it, so on a day switch the maps
+   further down still show the previous day for a moment. Dimmed, they read as pending
+   rather than as the new day. Opacity is CSS only — the publisher's capture reads pixels. */
+.forecast-canvas { transition: opacity .2s ease; }
+.forecast-canvas[data-render-state="rendering"] { opacity: .35; }
 .mesoanalysis-pair { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
 .mesoanalysis-pair figure { min-width: 0; margin: 0; }
 .mesoanalysis-product.is-comparing { grid-column: 1 / -1; }

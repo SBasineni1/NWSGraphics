@@ -938,6 +938,18 @@ test("no render path can hang on an external request", async () => {
   assert.match(component, /function enqueueRender/);
   assert.match(component, /enqueueRender\(\(\) => renderFieldPlot\(/);
   assert.match(component, /enqueueRender\(\(\) => renderOutlookPlot\(/);
+  // Serialized is not the same as synchronous. With tiles cached every await resolves at
+  // once, and without a yield the whole queue ran inside the click that filled it — a ~1 s
+  // task in which the tab switcher could not paint (measured: highlight 1,100 ms → 15 ms).
+  // The yield is a message, not scheduler.yield(), which jumps ahead of React's setReady
+  // and left every canvas dimmed until the last one finished.
+  assert.match(component, /await waitForRenderSlot\(\);\s*return isCurrent\(\) \? task\(\) : undefined;/);
+  assert.match(component, /channel\.port2\.postMessage\(null\)/);
+  assert.doesNotMatch(component.match(/function yieldToBrowser\(\)[\s\S]*?\n\}/)[0], /scheduler/);
+  assert.match(component, /holdRenders\(VIEW_SWITCH_HOLD_MS\)/);
+  // A render for a view that has been left is skipped, so every caller says whether it
+  // still wants its canvas.
+  assert.equal((component.match(/void enqueueRender\(/g) ?? []).length, (component.match(/\), \(\) => active\)/g) ?? []).length);
   // Scratch canvases hand memory back rather than waiting for GC under pressure.
   assert.match(component, /function releaseCanvas/);
   assert.match(component, /releaseCanvas\(mapCanvas\)/);

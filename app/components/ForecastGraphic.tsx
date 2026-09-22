@@ -573,9 +573,56 @@ const PRODUCT_GROUPS: Array<{ id: ProductGroupId; title: string }> = [
 // refusing backing stores, renders never resolve, and the tab can die outright. Running
 // them one at a time costs nothing: this is CPU-bound, so concurrency only multiplied
 // peak memory without shortening the total.
+//
+// Each render also yields to the browser before it starts. With the basemap tiles cached,
+// every `await` in a render resolves at once, so the chain used to run all fourteen as
+// microtasks inside the click that queued them: one ~1 s task during which the tab
+// highlight, the heading and the switcher's animation could not paint a single frame.
+// And a render whose view has been left is skipped rather than drawn onto a canvas nobody
+// will see — otherwise clicking through two tabs quickly paid for both.
 let renderQueue: Promise<unknown> = Promise.resolve();
-function enqueueRender<T>(task: () => Promise<T>): Promise<T> {
-  const next = renderQueue.then(task, task);
+let renderHoldUntil = 0;
+const VIEW_SWITCH_HOLD_MS = 300;
+
+/**
+ * Keep the queue idle for `ms`, so an animation that just started gets clean frames
+ * instead of sharing them with ~75 ms map renders. Called on a view switch, sized to the
+ * switcher's spring.
+ */
+function holdRenders(ms: number) {
+  renderHoldUntil = Math.max(renderHoldUntil, performance.now() + ms);
+}
+
+/**
+ * One macrotask boundary, so the browser can paint and handle input between renders.
+ *
+ * A message, not `scheduler.yield()`: a yielded continuation jumps ahead of other queued
+ * tasks, React's included, so each map's `setReady` waited behind the whole queue and every
+ * canvas lit up at once at the end. React schedules on a message channel too, so this one
+ * lands behind it in order. And not setTimeout: background tabs clamp timers to once a
+ * second, which would stretch fourteen renders into fourteen seconds.
+ */
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => resolve();
+    channel.port2.postMessage(null);
+  });
+}
+
+async function waitForRenderSlot() {
+  for (let wait = renderHoldUntil - performance.now(); wait > 0; wait = renderHoldUntil - performance.now()) {
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+  await yieldToBrowser();
+}
+
+function enqueueRender<T>(task: () => Promise<T>, isCurrent: () => boolean): Promise<T | undefined> {
+  const run = async () => {
+    await waitForRenderSlot();
+    return isCurrent() ? task() : undefined;
+  };
+  const next = renderQueue.then(run, run);
   // Keep the chain alive regardless of individual failures.
   renderQueue = next.then(() => undefined, () => undefined);
   return next;
@@ -1727,7 +1774,7 @@ function ForecastPlot({ spec, forecast, outlook, outlookPending, bundle, dayInde
       // they have settled — success or failure — render something, or this canvas never
       // reports ready and the publisher waits on it until it times out.
       if (outlookPending) return;
-      void enqueueRender(() => renderOutlookPlot(target, outlook, bundle, spec, dayIndex, office.id)).then(done);
+      void enqueueRender(() => renderOutlookPlot(target, outlook, bundle, spec, dayIndex, office.id), () => active).then(done);
     } else {
       void enqueueRender(() => renderFieldPlot(
         target,
@@ -1738,7 +1785,7 @@ function ForecastPlot({ spec, forecast, outlook, outlookPending, bundle, dayInde
         office.id,
         forecastHeaderLines(forecast, dayIndex, office.id),
         "FORECAST DATA UNAVAILABLE",
-      )).then(done);
+      ), () => active).then(done);
     }
     return () => { active = false; };
   }, [forecast, outlook, outlookPending, bundle, spec, dayIndex, office]);
@@ -1793,7 +1840,7 @@ function MesoanalysisPlot({ spec, payload, bundle, office, compare }: { spec: Fi
       office.id,
       mesoanalysisHeaderLines(payload),
       "RAP ANALYSIS UNAVAILABLE",
-    )).then(() => { if (active) setReady(true); });
+    ), () => active).then(() => { if (active) setReady(true); });
     return () => { active = false; };
   }, [payload, bundle, spec, office]);
 
@@ -2066,7 +2113,7 @@ function AlertsPlot({ alerts, zones, bundle, office, generatedAt }: { alerts: Al
     let active = true;
     setReady(false);
     const target = canvas.current;
-    void enqueueRender(() => renderAlertPlot(target, alerts, zones, bundle, office.id, generatedAt))
+    void enqueueRender(() => renderAlertPlot(target, alerts, zones, bundle, office.id, generatedAt), () => active)
       .then(() => { if (active) setReady(true); });
     return () => { active = false; };
   }, [alerts, zones, bundle, office, generatedAt]);
@@ -3236,6 +3283,9 @@ export function ForecastGraphic() {
 
   const viewIndex = showAlerts ? 0 : showAnalysis ? ANALYSIS_VIEW : dayIndex + 1;
   const selectView = useCallback((index: number) => {
+    // The switcher's spring settles in ~300 ms; the maps wait that long so the animation
+    // runs on an idle main thread. Nothing to protect when motion is reduced.
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) holdRenders(VIEW_SWITCH_HOLD_MS);
     setShowAlerts(index === 0);
     setShowAnalysis(index === ANALYSIS_VIEW);
     if (index > 0 && index < ANALYSIS_VIEW) setDayIndex(index - 1);
