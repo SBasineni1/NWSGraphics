@@ -50,21 +50,77 @@ async function currentManifest() {
   }
 }
 
-const discovery = JSON.parse(await runPython(["--discover-only"]));
+let discovery = JSON.parse(await runPython(["--discover-only"]));
 const previous = await currentManifest();
 const only = process.env.MESO_OFFICES?.trim();
 const requestedScope = only
   ? [...new Set(only.split(",").map((office) => office.trim().toUpperCase()).filter(Boolean))].sort()
   : "all";
+
 // RTMA lands after RAP for the same hour often enough that this matters: an hour first
 // published on the raw RAP surface must be republished once RTMA appears for that same
 // cycle, or the adjusted surface is never used. A manifest predating the `surface` field
 // carries no evidence of an upgrade, so it is treated as not upgradable -- exactly the
 // old cycle-and-scope behaviour.
-const sameCycle = previous?.cycle === discovery.cycle;
-const sameScope = JSON.stringify(previous?.scope) === JSON.stringify(requestedScope);
-const isSurfaceUpgrade = previous?.surface === "rap" && discovery.surface === "rtma";
-if (!outputOnly && !forcePublish && sameCycle && sameScope && !isSurfaceUpgrade) {
+function nothingToPublish(discovery) {
+  const sameCycle = previous?.cycle === discovery.cycle;
+  const sameScope = JSON.stringify(previous?.scope) === JSON.stringify(requestedScope);
+  const isSurfaceUpgrade = previous?.surface === "rap" && discovery.surface === "rtma";
+  return sameCycle && sameScope && !isSurfaceUpgrade;
+}
+
+/**
+ * Wait for the hour's RAP analysis rather than surrendering the run.
+ *
+ * GitHub delivers a fraction of a high-frequency cron. Measured 2026-08-13 against a
+ * `7,22,37,52` schedule -- four runs an hour requested -- the gaps between delivered runs
+ * were 64, 61, 62, 62, 79, 38, 52, 57, 59, 57 and 55 minutes: about one run an hour, and
+ * on that night a two-hour hole. So a run that finds nothing is not cheaply repeated in
+ * fifteen minutes the way the schedule implies; the next attempt is an hour away.
+ *
+ * That turned a near miss into stale data. Run 19 started 23:51:39Z and published the 23Z
+ * cycle. Run 20 started 00:46:20Z, exited in 52 seconds on "RAP cycle unchanged" because
+ * RAP f00 for 00Z had not landed yet, and nothing ran again for two hours -- so the site
+ * sat on the 23Z (7 PM Eastern) analysis while 00Z and 01Z were published upstream.
+ *
+ * A run costs about a minute of a twenty-minute job, so waiting a few minutes for a cycle
+ * that is nearly due is far cheaper than losing the hour. Only wait past
+ * MESO_WAIT_AFTER_MINUTE, when the current hour's f00 is imminent -- earlier in the hour
+ * the next cycle is too far off to be worth holding a runner for.
+ */
+const waitAfterMinute = Number(process.env.MESO_WAIT_AFTER_MINUTE ?? 40);
+const waitBudgetMs = Number(process.env.MESO_WAIT_BUDGET_MS ?? 11 * 60_000);
+const waitIntervalMs = Number(process.env.MESO_WAIT_INTERVAL_MS ?? 75_000);
+const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+
+if (
+  !outputOnly
+  && !forcePublish
+  && nothingToPublish(discovery)
+  && new Date().getUTCMinutes() >= waitAfterMinute
+  && waitBudgetMs > 0
+) {
+  const deadline = Date.now() + waitBudgetMs;
+  let attempts = 0;
+  while (Date.now() < deadline) {
+    await sleep(Math.min(waitIntervalMs, deadline - Date.now()));
+    attempts += 1;
+    // A discovery failure here is not fatal: keep the cycle already in hand and let the
+    // normal gate below report it, exactly as if no wait had happened.
+    try {
+      discovery = JSON.parse(await runPython(["--discover-only"]));
+    } catch (error) {
+      console.log(JSON.stringify({ waiting: false, reason: "discovery failed while waiting", detail: String(error) }));
+      break;
+    }
+    if (!nothingToPublish(discovery)) {
+      console.log(JSON.stringify({ waiting: false, reason: "newer RAP cycle landed", attempts, cycle: discovery.cycle }));
+      break;
+    }
+  }
+}
+
+if (!outputOnly && !forcePublish && nothingToPublish(discovery)) {
   console.log(JSON.stringify({
     published: false,
     reason: previous.surface === undefined

@@ -14,10 +14,23 @@ on:
         default: ""
         type: string
   schedule:
-    # RAP analyses are hourly but normally finish late in the hour. Four inexpensive
-    # index probes keep latency low; the publisher exits before GRIB download or R2
-    # writes whenever the latest complete cycle is already present.
-    - cron: "7,22,37,52 * * * *"
+    # RAP analyses are hourly and normally finish late in the hour, so the minutes here
+    # are chosen to land AFTER f00 rather than spread evenly across the hour.
+    #
+    # The even spread was written assuming four runs an hour actually happen. They do not.
+    # Measured 2026-08-13, GitHub delivered roughly one run an hour from a `7,22,37,52`
+    # schedule -- gaps of 64, 61, 62, 62, 79, 38, 52, 57, 59, 57 and 55 minutes, then a
+    # two-hour hole. Scheduled workflows are best effort and high-frequency crons are
+    # dropped hardest, so the count requested here is not the count delivered.
+    #
+    # With only one survivor an hour, WHERE it lands decides everything. Run 20 landed at
+    # :46, six minutes before 00Z RAP appeared, exited on "cycle unchanged", and the site
+    # held the 23Z analysis for three hours. Three of these four minutes therefore sit in
+    # the window where f00 is imminent, and the publisher waits a few minutes there rather
+    # than surrendering the hour (see MESO_WAIT_AFTER_MINUTE in publish-mesoanalysis.mjs).
+    # The :10 entry is the catch-up for a cycle that landed late and was missed entirely;
+    # it publishes immediately, without waiting, because by then the cycle is already up.
+    - cron: "10,41,48,55 * * * *"
 
 concurrency:
   group: mesoanalysis-publisher
