@@ -460,6 +460,17 @@ async function openPage() {
   const page = await browser.newPage({ viewport: { width: 1600, height: 1100 }, deviceScaleFactor: 1 });
   page.on("pageerror", (error) => console.error(`Page error: ${error.message}`));
   page.on("crash", () => console.error("Page crashed"));
+  // The weather intro shows once per browser session and every page here is a new session,
+  // so its full-screen overlay would intercept every day-tab click. Pre-seeding the flag
+  // (INTRO_SEEN_KEY in app/intro-session.ts — a test pins the two together) makes the head
+  // script hide it before paint, and the component never starts its animation.
+  await page.addInitScript(() => {
+    try {
+      sessionStorage.setItem("nws-intro-seen", "1");
+    } catch {
+      // A page without storage just shows the intro; nothing here depends on it.
+    }
+  });
   // Serve the payloads already fetched above, so the page never re-queries
   // api.weather.gov or SPC and every office renders from the same snapshot.
   await page.route("**/api/forecast*", async (route) => {

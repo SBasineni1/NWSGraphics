@@ -1705,3 +1705,50 @@ test("the view switcher keeps the attribute the publisher steps through days by"
   assert.doesNotMatch(component, /VIEW_ITEMS[^;]*href:/s);
   assert.match(nav, /\.\.\.attributes,/);
 });
+
+test("the weather intro is server-rendered, skippable per session, and never traps a no-JS visitor", async () => {
+  const html = await (await render()).text();
+  assert.match(html, /class="weather-intro"/);
+  assert.match(html, />NWS</);
+  assert.match(html, />FORECAST</);
+  assert.match(html, />GRAPHICS</);
+  assert.doesNotMatch(html, /DAY 1–3/, "the eyebrow was cut");
+  assert.match(html, /CLICK ANYWHERE TO ENTER/);
+  assert.match(html, />Enter site</);
+  assert.doesNotMatch(html, /SURFACE ANALYSIS|121 FORECAST OFFICES/i);
+  // Head script marks a seen session before paint, and survives storage throwing.
+  assert.match(html, /<script>[^<]*try\{[^<]*sessionStorage\.getItem\("nws-intro-seen"\)[^<]*dataset\.intro="seen"[^<]*\}catch/);
+  // Without JS the overlay must not cover the site.
+  assert.match(html, /<noscript><style>\.weather-intro\{display:none(?:!important)?\}<\/style><\/noscript>/);
+  // The forecast page is still rendered underneath.
+  assert.match(html, /Philadelphia \/ Mount Holly/);
+});
+
+// The publisher opens a fresh page per office, so its sessionStorage is always empty: without
+// pre-seeding the flag, the full-screen intro intercepts every day-tab click and the capture
+// times out — latent while imagery is off, fatal the moment RENDER_OFFICE_COUNT goes up.
+test("the publisher pre-seeds the intro's session flag so the overlay never blocks a capture", async () => {
+  const [publisher, session] = await Promise.all([
+    readFile(new URL("../scripts/publish-forecast-plots.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../app/intro-session.ts", import.meta.url), "utf8"),
+  ]);
+  const key = session.match(/INTRO_SEEN_KEY = "([^"]+)"/)?.[1];
+  assert.ok(key, "intro-session.ts declares the key");
+  const openPage = publisher.slice(publisher.indexOf("async function openPage()"));
+  assert.match(openPage.slice(0, openPage.indexOf("\n}\n")), new RegExp(`addInitScript\\([\\s\\S]*sessionStorage\\.setItem\\("${key}"`));
+});
+
+// If the client bundle is slow or never runs, React's handlers never attach, so the prompt
+// would invite clicks that do nothing. The head script carries a vanilla fallback that stands
+// down once the component is live.
+test("the intro can be dismissed before (or without) hydration", async () => {
+  const html = await (await render()).text();
+  const script = html.match(/<script>([^<]*sessionStorage\.getItem\("nws-intro-seen"\)[^<]*)<\/script>/)?.[1];
+  assert.ok(script, "head script present");
+  assert.match(script, /addEventListener\("pointerdown"/);
+  assert.match(script, /addEventListener\("keydown"/);
+  assert.match(script, /dataset\.introLive/, "the fallback stands down once the component is live");
+  assert.match(script, /sessionStorage\.setItem\("nws-intro-seen"/, "a fallback dismissal is remembered too");
+  const component = await readFile(new URL("../app/components/WeatherIntro.tsx", import.meta.url), "utf8");
+  assert.match(component, /dataset\.introLive = "1"/);
+});

@@ -1,0 +1,34 @@
+name: Keep scheduled workflows alive
+
+# GitHub disables every scheduled workflow in a public repository after 60 days with no
+# repository activity. That is exactly what stopped the publishers on 2026-11-21, 60 days
+# after the last push on 2026-09-22: no failure, no notification, the cron simply stopped
+# firing and the site kept serving Nov 21 forecasts.
+#
+# Re-enabling a workflow through the API counts as activity and resets that clock, so a
+# weekly call keeps the publishers running through quiet stretches with no commits. This
+# workflow re-enables itself too — it is scheduled, so it is subject to the same rule.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for workflow in publish-forecast-plots.yml publish-mesoanalysis.yml keepalive.yml; do
+            gh api --method PUT "repos/$REPO/actions/workflows/$workflow/enable"
+            echo "re-enabled $workflow"
+          done
